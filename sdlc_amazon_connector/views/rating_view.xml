@@ -1,0 +1,59 @@
+<odoo>
+    <record id="amazon_rating_action" model="ir.actions.act_window">
+        <field name="name">Seller Rating Reports</field>
+        <field name="res_model">amazon.rating.report</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_rating_list" model="ir.ui.view">
+        <field name="name">amazon.rating.report.list</field>
+        <field name="model">amazon.rating.report</field>
+        <field name="arch" type="xml">
+            <list string="Rating Reports">
+                <field name="name"/>
+                <field name="report_date"/>
+                <field name="average_rating"/>
+                <field name="total_ratings"/>
+                <field name="state"/>
+                <field name="instance_id"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_rating_form" model="ir.ui.view">
+        <field name="name">amazon.rating.report.form</field>
+        <field name="model">amazon.rating.report</field>
+        <field name="arch" type="xml">
+            <form string="Rating Report">
+                <header>
+                    <button name="action_download_report" type="object" string="Download Report" class="btn-primary" invisible="state != 'draft'"/>
+                    <button name="action_process_report" type="object" string="Process Report" invisible="state != 'downloaded'"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="instance_id"/>
+                            <field name="report_date"/>
+                        </group>
+                        <group>
+                            <field name="average_rating"/>
+                            <field name="total_ratings"/>
+                        </group>
+                    </group>
+                    <field name="line_ids">
+                        <list>
+                            <field name="date"/>
+                            <field name="amazon_order_id"/>
+                            <field name="order_id"/>
+                            <field name="rating"/>
+                            <field name="feedback"/>
+                            <field name="rater_email"/>
+                        </list>
+                    </field>
+                </sheet>
+            </form>
+        </field>
+    </record>
+</odoo>

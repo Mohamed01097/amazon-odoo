@@ -1,0 +1,286 @@
+<odoo>
+
+    <!-- ═══════════════════════════════════════════════════
+         SEARCH VIEW — must be first (referenced by actions)
+         ═══════════════════════════════════════════════════ -->
+
+    <record id="amazon_delivery_search" model="ir.ui.view">
+        <field name="name">amazon.delivery.search</field>
+        <field name="model">amazon.sale.order</field>
+        <field name="arch" type="xml">
+            <search string="Delivery Search">
+                <field name="amazon_order_ref"/>
+                <field name="tracking_number"/>
+                <field name="customer_name"/>
+                <field name="carrier_name"/>
+                <field name="shipping_city"/>
+                <field name="shipping_country_code"/>
+                <separator/>
+                <!-- Status Filters -->
+                <filter string="Pending" name="pending" domain="[('order_status','in',['Pending','Unshipped'])]"/>
+                <filter string="Shipped" name="shipped" domain="[('order_status','=','Shipped')]"/>
+                <filter string="Delivered" name="delivered" domain="[('delivery_status','=','delivered')]"/>
+                <filter string="Cancelled" name="cancelled" domain="[('order_status','=','Canceled')]"/>
+                <filter string="In Transit" name="in_transit" domain="[('delivery_status','=','in_transit')]"/>
+                <filter string="Failed" name="failed" domain="[('delivery_status','=','failed')]"/>
+                <separator/>
+                <!-- Channel -->
+                <filter string="FBM" name="fbm" domain="[('fulfillment_channel','=','MFN')]"/>
+                <filter string="FBA" name="fba" domain="[('fulfillment_channel','=','AFN')]"/>
+                <separator/>
+                <filter string="Has Tracking" name="has_tracking" domain="[('tracking_number','!=',False)]"/>
+                <filter string="No Tracking" name="no_tracking" domain="[('tracking_number','=',False)]"/>
+                <filter string="Prime" name="prime" domain="[('is_prime','=',True)]"/>
+                <separator/>
+                <!-- Group By -->
+                <group>
+                    <filter string="Delivery Status" name="group_delivery_status" context="{'group_by': 'delivery_status'}"/>
+                    <filter string="Order Status" name="group_order_status" context="{'group_by': 'order_status'}"/>
+                    <filter string="Carrier" name="group_carrier" context="{'group_by': 'carrier_name'}"/>
+                    <filter string="Fulfillment" name="group_channel" context="{'group_by': 'fulfillment_channel'}"/>
+                    <filter string="Country" name="group_country" context="{'group_by': 'shipping_country_code'}"/>
+                    <filter string="Ship Date" name="group_ship_date" context="{'group_by': 'ship_date:month'}"/>
+                    <filter string="Purchase Date" name="group_purchase" context="{'group_by': 'purchase_date:month'}"/>
+                    <filter string="Instance" name="group_instance" context="{'group_by': 'instance_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- ═══════════════════════════════════════════════════
+         LIST VIEWS
+         ═══════════════════════════════════════════════════ -->
+
+    <!-- Main delivery list (all details) -->
+    <record id="amazon_delivery_all_list" model="ir.ui.view">
+        <field name="name">amazon.delivery.all.list</field>
+        <field name="model">amazon.sale.order</field>
+        <field name="priority">20</field>
+        <field name="arch" type="xml">
+            <list string="All Deliveries"
+                  decoration-success="delivery_status=='delivered'"
+                  decoration-danger="order_status=='Canceled'"
+                  decoration-warning="delivery_status in ('failed','returned')"
+                  decoration-info="delivery_status=='in_transit'"
+                  default_order="purchase_date desc">
+                <field name="amazon_order_ref"/>
+                <field name="purchase_date"/>
+                <field name="order_status" decoration-success="order_status=='Shipped'" decoration-danger="order_status=='Canceled'"/>
+                <field name="delivery_status"/>
+                <field name="customer_name"/>
+                <field name="carrier_name"/>
+                <field name="tracking_number"/>
+                <field name="ship_date"/>
+                <field name="estimated_delivery_date" optional="show"/>
+                <field name="actual_delivery_date" optional="show"/>
+                <field name="shipping_city" optional="show"/>
+                <field name="shipping_country_code" string="Country"/>
+                <field name="fulfillment_channel"/>
+                <field name="order_total"/>
+                <field name="is_prime" optional="hide"/>
+                <field name="instance_id" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- Tracking numbers only (minimal list) -->
+    <record id="amazon_delivery_tracking_list" model="ir.ui.view">
+        <field name="name">amazon.delivery.tracking.list</field>
+        <field name="model">amazon.sale.order</field>
+        <field name="priority">25</field>
+        <field name="arch" type="xml">
+            <list string="Tracking Numbers" default_order="ship_date desc"
+                  decoration-success="delivery_status=='delivered'"
+                  decoration-info="delivery_status=='in_transit'">
+                <field name="amazon_order_ref"/>
+                <field name="tracking_number"/>
+                <field name="carrier_name"/>
+                <field name="ship_date"/>
+                <field name="delivery_status"/>
+                <field name="customer_name"/>
+                <field name="shipping_city"/>
+                <field name="shipping_country_code" string="Country"/>
+                <field name="estimated_delivery_date"/>
+                <field name="fulfillment_channel"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ═══════════════════════════════════════════════════
+         DELIVERY FORM VIEW (full details)
+         ═══════════════════════════════════════════════════ -->
+
+    <record id="amazon_delivery_form" model="ir.ui.view">
+        <field name="name">amazon.delivery.form</field>
+        <field name="model">amazon.sale.order</field>
+        <field name="priority">20</field>
+        <field name="arch" type="xml">
+            <form string="Delivery Details">
+                <header>
+                    <button name="action_confirm_shipment" type="object" string="Confirm Shipment" class="btn-primary" invisible="fulfillment_channel == 'AFN' or order_status in ('Shipped','Canceled')"/>
+                    <button name="action_mark_delivered" type="object" string="Mark Delivered" class="btn-success" invisible="delivery_status == 'delivered'"/>
+                    <button name="action_ai_analyze_delivery" type="object" string="AI Delivery Analysis" class="btn-warning" icon="fa-truck"/>
+                    <button name="action_ai_generate_reply" type="object" string="AI Customer Reply" class="btn-warning" icon="fa-comment"/>
+                    <button name="action_cancel_order" type="object" string="Cancel Order" class="btn-danger" invisible="order_status == 'Canceled'"/>
+                    <field name="delivery_status" widget="statusbar" statusbar_visible="pending,processing,shipped,in_transit,delivered"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_view_deliveries" type="object" class="oe_stat_button" icon="fa-truck">
+                            <field name="picking_count" widget="statinfo" string="Pickings"/>
+                        </button>
+                    </div>
+                    <widget name="web_ribbon" title="Cancelled" bg_color="text-bg-danger" invisible="order_status != 'Canceled'"/>
+                    <widget name="web_ribbon" title="Delivered" bg_color="text-bg-success" invisible="delivery_status != 'delivered'"/>
+
+                    <div class="oe_title">
+                        <h1><field name="amazon_order_ref" readonly="1"/></h1>
+                    </div>
+
+                    <group>
+                        <group string="Order Info">
+                            <field name="instance_id"/>
+                            <field name="order_status"/>
+                            <field name="fulfillment_channel"/>
+                            <field name="order_type"/>
+                            <field name="purchase_date"/>
+                            <field name="sales_channel"/>
+                            <field name="is_prime"/>
+                            <field name="is_business_order"/>
+                            <field name="order_total"/>
+                            <field name="currency_id"/>
+                        </group>
+                        <group string="Shipping &amp; Tracking">
+                            <field name="carrier_name"/>
+                            <field name="tracking_number"/>
+                            <field name="ship_service_level"/>
+                            <field name="ship_date"/>
+                            <field name="estimated_delivery_date"/>
+                            <field name="actual_delivery_date"/>
+                            <field name="delivery_notes"/>
+                        </group>
+                    </group>
+
+                    <group>
+                        <group string="Customer Details">
+                            <field name="customer_name"/>
+                            <field name="customer_email"/>
+                            <field name="customer_phone"/>
+                            <field name="partner_id"/>
+                        </group>
+                        <group string="Shipping Address">
+                            <field name="shipping_address_name"/>
+                            <field name="shipping_address_line1"/>
+                            <field name="shipping_address_line2"/>
+                            <field name="shipping_city"/>
+                            <field name="shipping_state"/>
+                            <field name="shipping_postal_code"/>
+                            <field name="shipping_country_code"/>
+                        </group>
+                    </group>
+
+                    <group>
+                        <group string="Odoo Links">
+                            <field name="sale_order_id"/>
+                            <field name="invoice_id"/>
+                            <field name="amazon_invoice_number"/>
+                        </group>
+                    </group>
+
+                    <notebook>
+                        <page string="Order Lines" name="lines">
+                            <field name="order_line_ids">
+                                <list>
+                                    <field name="sku"/>
+                                    <field name="asin"/>
+                                    <field name="title"/>
+                                    <field name="quantity"/>
+                                    <field name="item_price"/>
+                                    <field name="item_tax"/>
+                                    <field name="shipping_price"/>
+                                    <field name="promotion_discount"/>
+                                    <field name="line_total"/>
+                                    <field name="odoo_product_id"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="AI Analysis" name="ai_analysis">
+                            <group>
+                                <field name="ai_delivery_analysis" widget="text" readonly="1"/>
+                            </group>
+                        </page>
+                        <page string="AI Customer Reply" name="ai_reply">
+                            <group>
+                                <field name="buyer_message" placeholder="Paste buyer's message here..." widget="text"/>
+                            </group>
+                            <group>
+                                <field name="ai_reply" widget="text"/>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ═══════════════════════════════════════════════════
+         ACTION WINDOWS
+         ═══════════════════════════════════════════════════ -->
+
+    <!-- 1. All Deliveries -->
+    <record id="amazon_delivery_all_action" model="ir.actions.act_window">
+        <field name="name">All Deliveries</field>
+        <field name="res_model">amazon.sale.order</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('order_status', 'not in', ['Pending'])]</field>
+        <field name="context">{'search_default_group_delivery_status': 1}</field>
+        <field name="search_view_id" ref="amazon_delivery_search"/>
+    </record>
+
+    <!-- 2. Shipped / In Transit -->
+    <record id="amazon_delivery_shipped_action" model="ir.actions.act_window">
+        <field name="name">Shipped Orders</field>
+        <field name="res_model">amazon.sale.order</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('order_status', '=', 'Shipped')]</field>
+        <field name="search_view_id" ref="amazon_delivery_search"/>
+    </record>
+
+    <!-- 3. Delivered -->
+    <record id="amazon_delivery_delivered_action" model="ir.actions.act_window">
+        <field name="name">Delivered Orders</field>
+        <field name="res_model">amazon.sale.order</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('delivery_status', '=', 'delivered')]</field>
+        <field name="search_view_id" ref="amazon_delivery_search"/>
+    </record>
+
+    <!-- 4. Cancelled Orders -->
+    <record id="amazon_delivery_cancelled_action" model="ir.actions.act_window">
+        <field name="name">Cancelled Orders</field>
+        <field name="res_model">amazon.sale.order</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('order_status', '=', 'Canceled')]</field>
+        <field name="search_view_id" ref="amazon_delivery_search"/>
+    </record>
+
+    <!-- 5. Tracking Numbers -->
+    <record id="amazon_delivery_tracking_action" model="ir.actions.act_window">
+        <field name="name">Tracking Numbers</field>
+        <field name="res_model">amazon.sale.order</field>
+        <field name="view_mode">list</field>
+        <field name="view_id" ref="amazon_delivery_tracking_list"/>
+        <field name="domain">[('tracking_number', '!=', False)]</field>
+        <field name="search_view_id" ref="amazon_delivery_search"/>
+    </record>
+
+    <!-- 6. Pending / Unshipped -->
+    <record id="amazon_delivery_pending_action" model="ir.actions.act_window">
+        <field name="name">Pending Shipments</field>
+        <field name="res_model">amazon.sale.order</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('order_status', 'in', ['Pending', 'Unshipped'])]</field>
+        <field name="search_view_id" ref="amazon_delivery_search"/>
+    </record>
+
+</odoo>

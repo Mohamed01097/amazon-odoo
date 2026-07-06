@@ -1,0 +1,75 @@
+<odoo>
+    <!-- Root menu -->
+    <menuitem id="amazon_root" name="Amazon"/>
+
+    <!-- Dashboard -->
+    <menuitem id="amazon_dashboard_menu" parent="amazon_root" name="Dashboard" action="amazon_dashboard_action" sequence="0"/>
+
+    <!-- Configuration -->
+    <menuitem id="amazon_config_menu" parent="amazon_root" name="Configuration" sequence="1"/>
+    <menuitem id="amazon_instance_menu" parent="amazon_config_menu" name="Instances" action="amazon_instance_action" sequence="10"/>
+    <menuitem id="amazon_settings_menu" parent="amazon_config_menu" name="Settings" action="amazon_config_settings_action" sequence="20" groups="base.group_system"/>
+    <menuitem id="amazon_user_guide_menu" parent="amazon_config_menu" name="User Guide" action="amazon_user_guidance_action" sequence="90"/>
+    <menuitem id="amazon_ai_features_menu" parent="amazon_config_menu" name="AI Features Overview" action="amazon_ai_features_action" sequence="100"/>
+
+    <!-- Products -->
+    <menuitem id="amazon_catalog_menu" parent="amazon_root" name="Catalog" sequence="10"/>
+    <menuitem id="amazon_product_menu" parent="amazon_catalog_menu" name="Products" action="amazon_product_action" sequence="10"/>
+    <menuitem id="amazon_product_import_menu" parent="amazon_catalog_menu" name="Import / Map Products" action="amazon_product_import_wizard_action" sequence="20"/>
+
+    <!-- Orders -->
+    <menuitem id="amazon_orders_menu" parent="amazon_root" name="Orders" sequence="20"/>
+    <menuitem id="amazon_all_orders_menu" parent="amazon_orders_menu" name="All Orders" action="amazon_sale_order_action" sequence="10"/>
+    <menuitem id="amazon_fbm_orders_menu" parent="amazon_orders_menu" name="FBM Orders" action="amazon_sale_order_action_fbm" sequence="20"/>
+    <menuitem id="amazon_fba_orders_menu" parent="amazon_orders_menu" name="FBA Orders" action="amazon_sale_order_action_fba" sequence="30"/>
+
+    <!-- ═══ Delivery (NEW dropdown) ═══ -->
+    <menuitem id="amazon_delivery_menu" parent="amazon_root" name="Delivery" sequence="25"/>
+    <menuitem id="amazon_delivery_all_menu" parent="amazon_delivery_menu" name="All Deliveries" action="amazon_delivery_all_action" sequence="10"/>
+    <menuitem id="amazon_delivery_pending_menu" parent="amazon_delivery_menu" name="Pending Shipments" action="amazon_delivery_pending_action" sequence="20"/>
+    <menuitem id="amazon_delivery_shipped_menu" parent="amazon_delivery_menu" name="Shipped Orders" action="amazon_delivery_shipped_action" sequence="30"/>
+    <menuitem id="amazon_delivery_delivered_menu" parent="amazon_delivery_menu" name="Delivered Orders" action="amazon_delivery_delivered_action" sequence="40"/>
+    <menuitem id="amazon_delivery_cancelled_menu" parent="amazon_delivery_menu" name="Cancelled Orders" action="amazon_delivery_cancelled_action" sequence="50"/>
+    <menuitem id="amazon_delivery_tracking_menu" parent="amazon_delivery_menu" name="Tracking Numbers" action="amazon_delivery_tracking_action" sequence="60"/>
+
+    <!-- FBA Inventory -->
+    <menuitem id="amazon_fba_menu" parent="amazon_root" name="FBA" sequence="30"/>
+    <menuitem id="amazon_inbound_shipment_menu" parent="amazon_fba_menu" name="Inbound Shipments" action="amazon_inbound_shipment_action" sequence="10"/>
+    <menuitem id="amazon_removal_order_menu" parent="amazon_fba_menu" name="Removal Orders" action="amazon_removal_order_action" sequence="20"/>
+    <menuitem id="amazon_fba_inventory_menu" parent="amazon_fba_menu" name="Inventory Reports" action="amazon_fba_inventory_action" sequence="30"/>
+    <menuitem id="amazon_outbound_order_menu" parent="amazon_fba_menu" name="MCF Outbound Orders" action="amazon_outbound_order_action" sequence="40"/>
+
+    <!-- ═══ AI Tools ═══ -->
+    <menuitem id="amazon_ai_menu" parent="amazon_root" name="AI Tools" sequence="35"/>
+    <menuitem id="amazon_ai_pricing_menu" parent="amazon_ai_menu" name="AI Pricing" action="amazon_ai_pricing_action" sequence="10"/>
+    <menuitem id="amazon_ai_pricing_wizard_menu" parent="amazon_ai_menu" name="Bulk AI Reprice" action="amazon_ai_pricing_wizard_action" sequence="15"/>
+    <menuitem id="amazon_ai_listing_menu" parent="amazon_ai_menu" name="Listing Optimiser" action="amazon_ai_listing_action" sequence="20"/>
+    <menuitem id="amazon_ai_forecast_menu" parent="amazon_ai_menu" name="Demand Forecast" action="amazon_ai_forecast_action" sequence="30"/>
+    <menuitem id="amazon_ai_review_menu" parent="amazon_ai_menu" name="Review Analysis" action="amazon_ai_review_action" sequence="40"/>
+    <menuitem id="amazon_ai_health_menu" parent="amazon_ai_menu" name="Product Health Scores" action="amazon_health_action" sequence="50"/>
+    <menuitem id="amazon_ai_profit_menu" parent="amazon_ai_menu" name="Profit Calculator" action="amazon_profit_calc_action" sequence="60"/>
+    <menuitem id="amazon_ai_competitor_menu" parent="amazon_ai_menu" name="Competitor Monitor" action="amazon_competitor_action" sequence="70"/>
+    <menuitem id="amazon_ai_keyword_menu" parent="amazon_ai_menu" name="Keyword Tracker" action="amazon_keyword_action" sequence="80"/>
+    <menuitem id="amazon_ai_return_menu" parent="amazon_ai_menu" name="Return Analyzer" action="amazon_return_analyzer_action" sequence="90"/>
+    <menuitem id="amazon_ai_sales_menu" parent="amazon_ai_menu" name="Sales Insights" action="amazon_sales_insights_action" sequence="100"/>
+
+    <!-- ═══ Smart Alerts ═══ -->
+    <menuitem id="amazon_alerts_menu" parent="amazon_root" name="Alerts" sequence="15"/>
+    <menuitem id="amazon_alerts_active_menu" parent="amazon_alerts_menu" name="Active Alerts" action="amazon_alert_action" sequence="10"/>
+    <menuitem id="amazon_alerts_all_menu" parent="amazon_alerts_menu" name="Alert History" action="amazon_alert_all_action" sequence="20"/>
+
+    <!-- Returns &amp; Refunds -->
+    <menuitem id="amazon_returns_menu" parent="amazon_root" name="Returns &amp; Refunds" sequence="40"/>
+    <menuitem id="amazon_return_report_menu" parent="amazon_returns_menu" name="Return Reports" action="amazon_return_action" sequence="10"/>
+
+    <!-- Accounting -->
+    <menuitem id="amazon_accounting_menu" parent="amazon_root" name="Accounting" sequence="50"/>
+    <menuitem id="amazon_settlement_menu" parent="amazon_accounting_menu" name="Settlement Reports" action="amazon_settlement_action" sequence="10"/>
+    <menuitem id="amazon_vcs_menu" parent="amazon_accounting_menu" name="VCS Tax Reports" action="amazon_vcs_action" sequence="20"/>
+
+    <!-- Reports -->
+    <menuitem id="amazon_reports_menu" parent="amazon_root" name="Reports" sequence="60"/>
+    <menuitem id="amazon_rating_menu" parent="amazon_reports_menu" name="Seller Rating" action="amazon_rating_action" sequence="10"/>
+    <menuitem id="amazon_sync_report_menu" parent="amazon_reports_menu" name="Sync Reports" action="amazon_sync_report_action" sequence="20"/>
+    <menuitem id="amazon_sync_log_menu" parent="amazon_reports_menu" name="Sync Logs (Raw)" action="amazon_sync_log_action" sequence="30"/>
+</odoo>

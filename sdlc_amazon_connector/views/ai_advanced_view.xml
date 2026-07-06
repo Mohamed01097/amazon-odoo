@@ -1,0 +1,267 @@
+<odoo>
+
+    <!-- ═══ PROFIT CALCULATOR ═══ -->
+    <record id="amazon_profit_calc_action" model="ir.actions.act_window">
+        <field name="name">Profit Calculator</field>
+        <field name="res_model">amazon.profit.calculator</field>
+        <field name="view_mode">list,form</field>
+    </record>
+    <record id="amazon_profit_calc_list" model="ir.ui.view">
+        <field name="name">amazon.profit.calculator.list</field>
+        <field name="model">amazon.profit.calculator</field>
+        <field name="arch" type="xml">
+            <list string="Profit Calculator" decoration-danger="profitability=='loss_making'" decoration-warning="profitability=='break_even'" decoration-success="profitability in ('profitable','highly_profitable')" default_order="net_profit desc">
+                <field name="product_id"/>
+                <field name="selling_price"/>
+                <field name="cost_price"/>
+                <field name="amazon_referral_fee"/>
+                <field name="fba_fee"/>
+                <field name="profit_per_unit"/>
+                <field name="profit_margin_pct" string="Margin %"/>
+                <field name="units_sold_30d"/>
+                <field name="net_profit" string="Net Profit (30d)"/>
+                <field name="profitability"/>
+                <button name="action_calculate" type="object" string="Calc" class="btn-sm btn-primary"/>
+                <button name="action_ai_analyze_profit" type="object" string="AI" class="btn-sm btn-warning"/>
+            </list>
+        </field>
+    </record>
+    <record id="amazon_profit_calc_form" model="ir.ui.view">
+        <field name="name">amazon.profit.calculator.form</field>
+        <field name="model">amazon.profit.calculator</field>
+        <field name="arch" type="xml">
+            <form string="Profit Calculator">
+                <header>
+                    <button name="action_calculate" type="object" string="Calculate" class="btn-primary"/>
+                    <button name="action_ai_analyze_profit" type="object" string="AI Analysis" class="btn-warning" icon="fa-magic"/>
+                </header>
+                <sheet>
+                    <widget name="web_ribbon" title="LOSS" bg_color="text-bg-danger" invisible="profitability != 'loss_making'"/>
+                    <group>
+                        <group string="Revenue">
+                            <field name="product_id"/>
+                            <field name="selling_price"/>
+                            <field name="units_sold_30d"/>
+                            <field name="gross_revenue"/>
+                        </group>
+                        <group string="Costs (per unit)">
+                            <field name="cost_price"/>
+                            <field name="amazon_referral_fee_pct"/>
+                            <field name="amazon_referral_fee"/>
+                            <field name="fba_fee"/>
+                            <field name="gst_pct"/>
+                            <field name="packaging_cost"/>
+                            <field name="other_costs"/>
+                            <field name="total_cost_per_unit"/>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="Profit">
+                            <field name="profit_per_unit"/>
+                            <field name="net_profit"/>
+                            <field name="profit_margin_pct" widget="progressbar"/>
+                            <field name="roi_pct"/>
+                            <field name="profitability"/>
+                        </group>
+                    </group>
+                    <group string="AI Analysis" invisible="not ai_analysis">
+                        <field name="ai_analysis" nolabel="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ═══ COMPETITOR MONITOR ═══ -->
+    <record id="amazon_competitor_action" model="ir.actions.act_window">
+        <field name="name">Competitor Monitor</field>
+        <field name="res_model">amazon.competitor.monitor</field>
+        <field name="view_mode">list,form</field>
+    </record>
+    <record id="amazon_competitor_list" model="ir.ui.view">
+        <field name="name">amazon.competitor.monitor.list</field>
+        <field name="model">amazon.competitor.monitor</field>
+        <field name="arch" type="xml">
+            <list string="Competitor Monitor" decoration-danger="price_position=='highest'" decoration-success="price_position=='lowest'" decoration-warning="price_position=='above_avg'">
+                <field name="product_id"/>
+                <field name="our_price"/>
+                <field name="buy_box_price"/>
+                <field name="lowest_price"/>
+                <field name="highest_price"/>
+                <field name="price_diff_pct" string="Diff %"/>
+                <field name="price_position"/>
+                <field name="num_sellers"/>
+                <field name="last_checked"/>
+                <button name="action_fetch_competitor_data" type="object" string="Refresh" class="btn-sm btn-primary"/>
+                <button name="action_ai_strategy" type="object" string="AI" class="btn-sm btn-warning"/>
+            </list>
+        </field>
+    </record>
+    <record id="amazon_competitor_form" model="ir.ui.view">
+        <field name="name">amazon.competitor.monitor.form</field>
+        <field name="model">amazon.competitor.monitor</field>
+        <field name="arch" type="xml">
+            <form string="Competitor Monitor">
+                <header>
+                    <button name="action_fetch_competitor_data" type="object" string="Fetch Data" class="btn-primary"/>
+                    <button name="action_ai_strategy" type="object" string="AI Strategy" class="btn-warning" icon="fa-magic"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="Prices">
+                            <field name="product_id"/>
+                            <field name="our_price"/>
+                            <field name="buy_box_price"/>
+                            <field name="lowest_price"/>
+                            <field name="highest_price"/>
+                        </group>
+                        <group string="Analysis">
+                            <field name="price_diff"/>
+                            <field name="price_diff_pct"/>
+                            <field name="price_position"/>
+                            <field name="num_sellers"/>
+                            <field name="last_checked"/>
+                        </group>
+                    </group>
+                    <group string="AI Strategy" invisible="not ai_strategy">
+                        <field name="ai_strategy" nolabel="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ═══ KEYWORD TRACKER ═══ -->
+    <record id="amazon_keyword_action" model="ir.actions.act_window">
+        <field name="name">Keyword Tracker</field>
+        <field name="res_model">amazon.keyword.tracker</field>
+        <field name="view_mode">list</field>
+    </record>
+    <record id="amazon_keyword_list" model="ir.ui.view">
+        <field name="name">amazon.keyword.tracker.list</field>
+        <field name="model">amazon.keyword.tracker</field>
+        <field name="arch" type="xml">
+            <list string="Keyword Tracker" decoration-success="in_title and in_bullets and in_backend" decoration-danger="not in_title and not in_bullets and not in_backend" decoration-warning="in_title and not in_bullets">
+                <field name="product_id"/>
+                <field name="keyword"/>
+                <field name="keyword_type"/>
+                <field name="search_volume"/>
+                <field name="relevance_score" widget="progressbar"/>
+                <field name="in_title"/>
+                <field name="in_bullets"/>
+                <field name="in_backend"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ═══ RETURN ANALYZER ═══ -->
+    <record id="amazon_return_analyzer_action" model="ir.actions.act_window">
+        <field name="name">Return Analyzer</field>
+        <field name="res_model">amazon.return.analyzer</field>
+        <field name="view_mode">list,form</field>
+    </record>
+    <record id="amazon_return_analyzer_list" model="ir.ui.view">
+        <field name="name">amazon.return.analyzer.list</field>
+        <field name="model">amazon.return.analyzer</field>
+        <field name="arch" type="xml">
+            <list string="Return Analyzer" decoration-danger="risk_level in ('critical','high')" decoration-warning="risk_level=='medium'" decoration-success="risk_level=='low'">
+                <field name="product_id"/>
+                <field name="total_orders"/>
+                <field name="total_returns"/>
+                <field name="return_rate" string="Rate %"/>
+                <field name="risk_level"/>
+                <field name="top_reason"/>
+                <button name="action_ai_analyze_returns" type="object" string="AI" class="btn-sm btn-warning"/>
+            </list>
+        </field>
+    </record>
+    <record id="amazon_return_analyzer_form" model="ir.ui.view">
+        <field name="name">amazon.return.analyzer.form</field>
+        <field name="model">amazon.return.analyzer</field>
+        <field name="arch" type="xml">
+            <form string="Return Analyzer">
+                <header>
+                    <button name="action_ai_analyze_returns" type="object" string="AI Analysis" class="btn-warning" icon="fa-magic"/>
+                </header>
+                <sheet>
+                    <widget name="web_ribbon" title="HIGH RETURNS" bg_color="text-bg-danger" invisible="risk_level not in ('critical','high')"/>
+                    <group>
+                        <group>
+                            <field name="product_id"/>
+                            <field name="total_orders"/>
+                            <field name="total_returns"/>
+                            <field name="return_rate"/>
+                            <field name="risk_level"/>
+                            <field name="top_reason"/>
+                        </group>
+                    </group>
+                    <group string="AI Analysis" invisible="not ai_analysis">
+                        <field name="ai_analysis" nolabel="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ═══ SALES INSIGHTS ═══ -->
+    <record id="amazon_sales_insights_action" model="ir.actions.act_window">
+        <field name="name">Sales Insights</field>
+        <field name="res_model">amazon.sales.insights</field>
+        <field name="view_mode">list,form</field>
+    </record>
+    <record id="amazon_sales_insights_list" model="ir.ui.view">
+        <field name="name">amazon.sales.insights.list</field>
+        <field name="model">amazon.sales.insights</field>
+        <field name="arch" type="xml">
+            <list string="Sales Insights" default_order="generated_at desc" decoration-success="trend=='growing'" decoration-danger="trend=='declining'">
+                <field name="instance_id"/>
+                <field name="period"/>
+                <field name="total_orders"/>
+                <field name="total_revenue"/>
+                <field name="avg_order_value"/>
+                <field name="top_product_id"/>
+                <field name="trend"/>
+                <field name="generated_at"/>
+                <button name="action_generate_insights" type="object" string="Generate" class="btn-sm btn-warning"/>
+            </list>
+        </field>
+    </record>
+    <record id="amazon_sales_insights_form" model="ir.ui.view">
+        <field name="name">amazon.sales.insights.form</field>
+        <field name="model">amazon.sales.insights</field>
+        <field name="arch" type="xml">
+            <form string="Sales Insights">
+                <header>
+                    <button name="action_generate_insights" type="object" string="Generate Insights" class="btn-primary" icon="fa-magic"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="Period">
+                            <field name="instance_id"/>
+                            <field name="period"/>
+                            <field name="generated_at"/>
+                            <field name="trend"/>
+                        </group>
+                        <group string="Metrics">
+                            <field name="total_orders"/>
+                            <field name="total_revenue"/>
+                            <field name="avg_order_value"/>
+                            <field name="top_product_id"/>
+                            <field name="top_product_units"/>
+                            <field name="worst_product_id"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="AI Summary">
+                            <field name="ai_summary" nolabel="1"/>
+                        </page>
+                        <page string="Recommendations">
+                            <field name="ai_recommendations" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+</odoo>

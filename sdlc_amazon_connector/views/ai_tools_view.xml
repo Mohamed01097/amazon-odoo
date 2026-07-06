@@ -1,0 +1,388 @@
+<odoo>
+
+    <!-- ═══════════════════════════════════════════════════
+         AI PRICING
+         ═══════════════════════════════════════════════════ -->
+
+    <record id="amazon_ai_pricing_action" model="ir.actions.act_window">
+        <field name="name">AI Pricing Suggestions</field>
+        <field name="res_model">amazon.ai.pricing</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_ai_pricing_list" model="ir.ui.view">
+        <field name="name">amazon.ai.pricing.list</field>
+        <field name="model">amazon.ai.pricing</field>
+        <field name="arch" type="xml">
+            <list string="AI Pricing Suggestions" default_order="generated_at desc"
+                  decoration-success="status=='applied'"
+                  decoration-danger="status=='rejected'"
+                  decoration-warning="confidence_score &lt; 0.7">
+                <field name="product_id"/>
+                <field name="current_price"/>
+                <field name="suggested_price"/>
+                <field name="price_change_pct" string="Change %" widget="float"/>
+                <field name="profit_margin" string="Margin %"/>
+                <field name="confidence_score" widget="progressbar"/>
+                <field name="price_strategy"/>
+                <field name="status"/>
+                <field name="generated_at"/>
+                <button name="action_apply_price" type="object" string="Apply" class="btn-success btn-sm" invisible="status != 'pending'"/>
+                <button name="action_reject_price" type="object" string="Reject" class="btn-outline-danger btn-sm" invisible="status != 'pending'"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_ai_pricing_form" model="ir.ui.view">
+        <field name="name">amazon.ai.pricing.form</field>
+        <field name="model">amazon.ai.pricing</field>
+        <field name="arch" type="xml">
+            <form string="AI Pricing Suggestion">
+                <header>
+                    <button name="action_apply_price" type="object" string="Apply Price" class="btn-primary" invisible="status != 'pending'"/>
+                    <button name="action_reject_price" type="object" string="Reject" invisible="status != 'pending'"/>
+                    <field name="status" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="Product">
+                            <field name="product_id"/>
+                            <field name="instance_id"/>
+                        </group>
+                        <group string="Prices">
+                            <field name="current_price"/>
+                            <field name="cost_price"/>
+                            <field name="suggested_price"/>
+                            <field name="min_price"/>
+                            <field name="max_price"/>
+                            <field name="buy_box_price"/>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="AI Analysis">
+                            <field name="confidence_score" widget="progressbar"/>
+                            <field name="price_strategy"/>
+                            <field name="profit_margin"/>
+                            <field name="price_change_pct"/>
+                        </group>
+                        <group string="Metadata">
+                            <field name="generated_at"/>
+                            <field name="applied_at"/>
+                        </group>
+                    </group>
+                    <group string="AI Reasoning">
+                        <field name="reasoning" nolabel="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- AI Pricing Wizard -->
+    <record id="amazon_ai_pricing_wizard_action" model="ir.actions.act_window">
+        <field name="name">Bulk AI Reprice</field>
+        <field name="res_model">amazon.ai.pricing.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <record id="amazon_ai_pricing_wizard_form" model="ir.ui.view">
+        <field name="name">amazon.ai.pricing.wizard.form</field>
+        <field name="model">amazon.ai.pricing.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Bulk AI Reprice">
+                <group>
+                    <field name="instance_id"/>
+                    <field name="product_count" readonly="1"/>
+                </group>
+                <footer>
+                    <button name="action_generate_suggestions" type="object" string="Generate AI Suggestions" class="btn-primary"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <!-- ═══════════════════════════════════════════════════
+         AI LISTING OPTIMISATION
+         ═══════════════════════════════════════════════════ -->
+
+    <record id="amazon_ai_listing_action" model="ir.actions.act_window">
+        <field name="name">AI Listing Optimiser</field>
+        <field name="res_model">amazon.ai.listing</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_ai_listing_list" model="ir.ui.view">
+        <field name="name">amazon.ai.listing.list</field>
+        <field name="model">amazon.ai.listing</field>
+        <field name="arch" type="xml">
+            <list string="AI Listing Optimisations" default_order="generated_at desc"
+                  decoration-success="applied"
+                  decoration-info="seo_score &gt;= 80"
+                  decoration-warning="seo_score &lt; 60">
+                <field name="product_id"/>
+                <field name="original_title"/>
+                <field name="optimised_title"/>
+                <field name="seo_score" widget="progressbar"/>
+                <field name="applied"/>
+                <field name="generated_at"/>
+                <button name="action_apply_to_amazon" type="object" string="Apply" class="btn-success btn-sm" invisible="applied"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_ai_listing_form" model="ir.ui.view">
+        <field name="name">amazon.ai.listing.form</field>
+        <field name="model">amazon.ai.listing</field>
+        <field name="arch" type="xml">
+            <form string="AI Listing Optimisation">
+                <header>
+                    <button name="action_optimise_with_ai" type="object" string="Re-Optimise with AI" class="btn-warning" icon="fa-magic"/>
+                    <button name="action_apply_to_amazon" type="object" string="Apply to Amazon" class="btn-primary" invisible="applied"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="product_id"/>
+                            <field name="seo_score" widget="progressbar"/>
+                            <field name="applied"/>
+                            <field name="generated_at"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Title Comparison">
+                            <group>
+                                <group string="Original">
+                                    <field name="original_title" nolabel="1"/>
+                                </group>
+                                <group string="Optimised">
+                                    <field name="optimised_title" nolabel="1"/>
+                                </group>
+                            </group>
+                        </page>
+                        <page string="Description">
+                            <group>
+                                <group string="Original">
+                                    <field name="original_description" nolabel="1"/>
+                                </group>
+                                <group string="Optimised">
+                                    <field name="optimised_description" nolabel="1"/>
+                                </group>
+                            </group>
+                        </page>
+                        <page string="SEO Content">
+                            <group>
+                                <field name="bullet_points" widget="text"/>
+                                <field name="backend_keywords"/>
+                                <field name="search_terms"/>
+                            </group>
+                        </page>
+                        <page string="A+ Content">
+                            <field name="a_plus_suggestions" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ═══════════════════════════════════════════════════
+         AI DEMAND FORECAST
+         ═══════════════════════════════════════════════════ -->
+
+    <record id="amazon_ai_forecast_action" model="ir.actions.act_window">
+        <field name="name">AI Demand Forecasts</field>
+        <field name="res_model">amazon.demand.forecast</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_ai_forecast_list" model="ir.ui.view">
+        <field name="name">amazon.demand.forecast.list</field>
+        <field name="model">amazon.demand.forecast</field>
+        <field name="arch" type="xml">
+            <list string="Demand Forecasts" default_order="generated_at desc"
+                  decoration-danger="stockout_risk=='high'"
+                  decoration-warning="stockout_risk=='medium'"
+                  decoration-success="stockout_risk=='low'">
+                <field name="product_id"/>
+                <field name="current_stock"/>
+                <field name="days_of_stock"/>
+                <field name="forecast_30d"/>
+                <field name="forecast_60d"/>
+                <field name="forecast_90d"/>
+                <field name="reorder_point"/>
+                <field name="reorder_qty"/>
+                <field name="stockout_risk"/>
+                <field name="generated_at"/>
+                <button name="action_create_purchase_order" type="object" string="Create PO" class="btn-primary btn-sm" invisible="purchase_order_id"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_ai_forecast_form" model="ir.ui.view">
+        <field name="name">amazon.demand.forecast.form</field>
+        <field name="model">amazon.demand.forecast</field>
+        <field name="arch" type="xml">
+            <form string="Demand Forecast">
+                <header>
+                    <button name="action_generate_forecast" type="object" string="Re-Generate Forecast" class="btn-warning" icon="fa-refresh"/>
+                    <button name="action_create_purchase_order" type="object" string="Create Purchase Order" class="btn-primary" invisible="purchase_order_id"/>
+                </header>
+                <sheet>
+                    <widget name="web_ribbon" title="HIGH RISK" bg_color="text-bg-danger" invisible="stockout_risk != 'high'"/>
+                    <group>
+                        <group string="Product">
+                            <field name="product_id"/>
+                            <field name="instance_id"/>
+                            <field name="current_stock"/>
+                            <field name="days_of_stock"/>
+                            <field name="lead_time_days"/>
+                        </group>
+                        <group string="Forecast">
+                            <field name="forecast_30d"/>
+                            <field name="forecast_60d"/>
+                            <field name="forecast_90d"/>
+                            <field name="stockout_risk"/>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="Reorder">
+                            <field name="reorder_point"/>
+                            <field name="reorder_qty"/>
+                            <field name="purchase_order_id"/>
+                        </group>
+                        <group string="Metadata">
+                            <field name="forecast_date"/>
+                            <field name="generated_at"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="AI Analysis">
+                            <field name="reasoning" nolabel="1"/>
+                        </page>
+                        <page string="Seasonality">
+                            <field name="seasonality_notes" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ═══════════════════════════════════════════════════
+         AI REVIEW ANALYSIS
+         ═══════════════════════════════════════════════════ -->
+
+    <record id="amazon_ai_review_action" model="ir.actions.act_window">
+        <field name="name">AI Review Analysis</field>
+        <field name="res_model">amazon.review.analysis</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_ai_review_list" model="ir.ui.view">
+        <field name="name">amazon.review.analysis.list</field>
+        <field name="model">amazon.review.analysis</field>
+        <field name="arch" type="xml">
+            <list string="Review Analyses" default_order="analysis_date desc"
+                  decoration-success="sentiment_score &gt;= 0.7"
+                  decoration-danger="sentiment_score &lt; 0.4"
+                  decoration-warning="sentiment_score &gt;= 0.4 and sentiment_score &lt; 0.7">
+                <field name="product_id"/>
+                <field name="total_reviews"/>
+                <field name="avg_rating"/>
+                <field name="sentiment_score" widget="progressbar"/>
+                <field name="top_complaint"/>
+                <field name="analysis_date"/>
+                <button name="action_analyse_reviews" type="object" string="Re-Analyse" class="btn-warning btn-sm"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_ai_review_form" model="ir.ui.view">
+        <field name="name">amazon.review.analysis.form</field>
+        <field name="model">amazon.review.analysis</field>
+        <field name="arch" type="xml">
+            <form string="Review Analysis">
+                <header>
+                    <button name="action_analyse_reviews" type="object" string="Re-Analyse with AI" class="btn-warning" icon="fa-star"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="Product">
+                            <field name="product_id"/>
+                            <field name="analysis_date"/>
+                            <field name="total_reviews"/>
+                            <field name="avg_rating"/>
+                            <field name="sentiment_score" widget="progressbar"/>
+                        </group>
+                        <group string="Top Issue">
+                            <field name="top_complaint" nolabel="1"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Positive Themes">
+                            <field name="positive_themes" widget="text" nolabel="1"/>
+                        </page>
+                        <page string="Negative Themes">
+                            <field name="negative_themes" widget="text" nolabel="1"/>
+                        </page>
+                        <page string="Improvement Suggestions">
+                            <field name="improvement_suggestions" widget="text" nolabel="1"/>
+                        </page>
+                        <page string="Listing Changes">
+                            <field name="recommended_changes" widget="text" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ═══════════════════════════════════════════════════
+         SETTINGS VIEW
+         ═══════════════════════════════════════════════════ -->
+
+    <record id="amazon_config_settings_action" model="ir.actions.act_window">
+        <field name="name">Amazon Settings</field>
+        <field name="res_model">res.config.settings</field>
+        <field name="view_mode">form</field>
+        <field name="target">main</field>
+        <field name="context">{'module': 'sdlc_amazon_connector'}</field>
+    </record>
+
+    <record id="res_config_settings_view_form_amazon" model="ir.ui.view">
+        <field name="name">res.config.settings.view.form.amazon</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="base.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//form" position="inside">
+                <app data-string="Odoo Amazon Connector" string="Odoo Amazon Connector" data-key="sdlc_amazon_connector" name="sdlc_amazon_connector" groups="base.group_system">
+                    <block title="AI Features" name="amazon_ai_block">
+                        <setting string="Enable AI Features" help="Turn on AI-powered automation for Amazon listings, pricing, and forecasting.">
+                            <field name="amazon_ai_enabled"/>
+                        </setting>
+                        <setting string="Auto AI Pricing" help="Automatically generate pricing suggestions weekly.">
+                            <field name="amazon_ai_auto_pricing"/>
+                        </setting>
+                        <setting string="Auto AI Listing Optimisation" help="Automatically optimise new product listings.">
+                            <field name="amazon_ai_auto_listing"/>
+                        </setting>
+                        <setting string="Auto Demand Forecast" help="Run AI demand forecasting weekly.">
+                            <field name="amazon_ai_auto_forecast"/>
+                        </setting>
+                        <setting string="AI Review Analysis" help="Enable AI-powered review analysis.">
+                            <field name="amazon_ai_review_analysis"/>
+                        </setting>
+                    </block>
+                    <block title="Inventory" name="amazon_inv_block">
+                        <setting string="Low Stock Alert Threshold" help="Alert when Amazon stock falls below this level.">
+                            <field name="amazon_low_stock_threshold"/>
+                        </setting>
+                    </block>
+                </app>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>

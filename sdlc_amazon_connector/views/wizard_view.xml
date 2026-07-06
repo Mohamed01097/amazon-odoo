@@ -1,0 +1,29 @@
+<odoo>
+    <record id="amazon_product_import_wizard_action" model="ir.actions.act_window">
+        <field name="name">Import/Map Products</field>
+        <field name="res_model">amazon.product.import.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <record id="amazon_product_import_wizard_form" model="ir.ui.view">
+        <field name="name">amazon.product.import.wizard.form</field>
+        <field name="model">amazon.product.import.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Import / Map Products">
+                <group>
+                    <field name="instance_id"/>
+                    <field name="operation"/>
+                    <field name="file_type"/>
+                    <field name="delimiter" invisible="file_type != 'csv'"/>
+                    <field name="file" filename="file_name"/>
+                    <field name="file_name" invisible="1"/>
+                </group>
+                <footer>
+                    <button name="action_import" type="object" string="Import" class="btn-primary"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

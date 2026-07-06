@@ -1,0 +1,87 @@
+<odoo>
+    <record id="amazon_settlement_action" model="ir.actions.act_window">
+        <field name="name">Settlement Reports</field>
+        <field name="res_model">amazon.settlement.report</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_settlement_list" model="ir.ui.view">
+        <field name="name">amazon.settlement.report.list</field>
+        <field name="model">amazon.settlement.report</field>
+        <field name="arch" type="xml">
+            <list string="Settlement Reports">
+                <field name="name"/>
+                <field name="settlement_id"/>
+                <field name="report_type" optional="hide"/>
+                <field name="start_date"/>
+                <field name="end_date"/>
+                <field name="created_time" optional="hide"/>
+                <field name="processing_status" string="Amazon Status"/>
+                <field name="total_amount"/>
+                <field name="instance_id"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_settlement_form" model="ir.ui.view">
+        <field name="name">amazon.settlement.report.form</field>
+        <field name="model">amazon.settlement.report</field>
+        <field name="arch" type="xml">
+            <form string="Settlement Report">
+                <header>
+                    <button name="action_download_report" type="object" string="Download Report" class="btn-primary" invisible="state != 'draft'"/>
+                    <button name="action_process_report" type="object" string="Process" invisible="state != 'downloaded'"/>
+                    <button name="action_reconcile" type="object" string="Reconcile" invisible="state != 'processed'"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="Settlement Identity">
+                            <field name="name"/>
+                            <field name="instance_id"/>
+                            <field name="settlement_id"/>
+                            <field name="report_document_id"/>
+                            <field name="report_type"/>
+                            <field name="marketplace_ids"/>
+                        </group>
+                        <group string="Amounts &amp; Dates">
+                            <field name="start_date"/>
+                            <field name="end_date"/>
+                            <field name="total_amount"/>
+                            <field name="currency_id"/>
+                        </group>
+                    </group>
+                    <group string="Amazon Processing Metadata">
+                        <group>
+                            <field name="processing_status" string="Amazon Status"/>
+                            <field name="created_time"/>
+                        </group>
+                        <group>
+                            <field name="processing_start_time"/>
+                            <field name="processing_end_time"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Lines" name="lines">
+                            <field name="line_ids">
+                                <list>
+                                    <field name="posted_date"/>
+                                    <field name="order_id_ref"/>
+                                    <field name="transaction_type"/>
+                                    <field name="amount_type"/>
+                                    <field name="amount_description"/>
+                                    <field name="amount"/>
+                                    <field name="sale_order_id"/>
+                                    <field name="invoice_id"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Reimbursements" name="reimbursements">
+                            <field name="reimbursement_invoice_ids"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+</odoo>

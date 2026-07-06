@@ -1,0 +1,565 @@
+<odoo>
+    <record id="amazon_product_action" model="ir.actions.act_window">
+        <field name="name">Amazon Products</field>
+        <field name="res_model">amazon.product</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_product_list" model="ir.ui.view">
+        <field name="name">amazon.product.list</field>
+        <field name="model">amazon.product</field>
+        <field name="arch" type="xml">
+            <list string="Amazon Products" decoration-success="status=='Active'" decoration-muted="status=='Inactive'">
+                <field name="product_image" widget="image" options="{'size': [40, 40]}" string=" "/>
+                <field name="name"/>
+                <field name="asin"/>
+                <field name="sku"/>
+                <field name="brand"/>
+                <field name="amazon_price"/>
+                <field name="amazon_qty"/>
+                <field name="odoo_price" optional="show"/>
+                <field name="odoo_stock" optional="show"/>
+                <field name="status"/>
+                <field name="fulfillment_channel"/>
+                <field name="odoo_product_id"/>
+                <field name="instance_id"/>
+                <field name="last_sync_date" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_product_form" model="ir.ui.view">
+        <field name="name">amazon.product.form</field>
+        <field name="model">amazon.product</field>
+        <field name="arch" type="xml">
+            <form string="Amazon Product">
+                <header>
+                    <button name="action_generate_with_ai" type="object" string="Generate with AI" class="btn-warning" icon="fa-magic"/>
+                    <button name="action_ai_detect_product_type" type="object" string="AI Detect Type" class="btn-warning" icon="fa-lightbulb-o"/>
+                    <button name="action_ai_optimize_price" type="object" string="AI Price" class="btn-warning" icon="fa-line-chart"/>
+                    <button name="action_ai_predict_inventory" type="object" string="AI Inventory" class="btn-warning" icon="fa-cubes"/>
+                    <button name="action_create_in_amazon" type="object" string="Create in Amazon" class="btn-primary" invisible="asin"/>
+                    <button name="action_update_in_amazon" type="object" string="Update in Amazon" class="btn-primary" invisible="not asin"/>
+                    <button name="action_pull_from_amazon" type="object" string="Pull from Amazon" class="btn-primary" invisible="not sku"/>
+                    <button name="action_map_to_odoo_product" type="object" string="Map to Odoo Product" invisible="odoo_product_id"/>
+                    <button name="action_download_image" type="object" string="Download Image" invisible="not image_url or product_image"/>
+                    <field name="status" widget="statusbar" statusbar_visible="Active,Inactive,Incomplete"/>
+                </header>
+                <sheet>
+                    <!-- Top summary -->
+                    <div class="oe_button_box" name="button_box"/>
+                    <widget name="web_ribbon" title="Inactive" bg_color="text-bg-danger" invisible="status != 'Inactive'"/>
+                    <widget name="web_ribbon" title="Incomplete" bg_color="text-bg-warning" invisible="status != 'Incomplete'"/>
+                    <field name="product_image" widget="image" class="oe_avatar" options="{'size': [128, 128]}"/>
+                    <div class="oe_title">
+                        <label for="name" string="Item Name"/>
+                        <h1><field name="name" placeholder="Enter product name"/></h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="instance_id"/>
+                            <field name="sku" placeholder="Your unique seller SKU"/>
+                            <field name="asin" readonly="1"/>
+                        </group>
+                        <group>
+                            <field name="odoo_product_id"/>
+                            <field name="last_sync_date" readonly="1"/>
+                        </group>
+                    </group>
+
+                    <!-- ═══ Tabbed Sections (like Amazon Seller Central) ═══ -->
+                    <notebook>
+                        <!-- ── Tab 1: Product Identity ── -->
+                        <page string="Product Identity" name="identity">
+                            <group>
+                                <group string="Product Type">
+                                    <field name="product_type" placeholder="e.g. SHOES, SHIRT, HOME_BED_AND_BATH"/>
+                                    <button name="action_search_product_type" type="object" string="Search Valid Types" class="btn-link" icon="fa-search"/>
+                                    <field name="browse_node" placeholder="e.g. Fashion > Men > Shoes"/>
+                                </group>
+                                <group string="Brand &amp; Identification">
+                                    <field name="brand" placeholder="e.g. Adidas, Nike, Samsung"/>
+                                    <field name="barcode" placeholder="e.g. 714532191586"/>
+                                    <field name="barcode_type"/>
+                                    <button name="action_generate_barcode" type="object" string="Generate ID" class="btn-link" icon="fa-barcode" invisible="barcode"/>
+                                    <field name="no_barcode"/>
+                                </group>
+                            </group>
+                            <separator string="Variations"/>
+                            <group>
+                                <field name="has_variations"/>
+                            </group>
+                            <div invisible="not has_variations">
+                                <div class="fw-bold mb-2">Which of these attributes are different across the product variants?</div>
+                                <div class="d-flex flex-wrap gap-4 mt-2 mb-3">
+                                    <span><field name="var_team_name" class="oe_inline"/> Team Name</span>
+                                    <span><field name="var_athlete" class="oe_inline"/> Athlete</span>
+                                    <span><field name="var_color" class="oe_inline"/> Color</span>
+                                    <span><field name="var_number_of_items" class="oe_inline"/> Number of Items</span>
+                                    <span><field name="var_footwear_size" class="oe_inline"/> Footwear Size</span>
+                                    <span><field name="var_size" class="oe_inline"/> Size</span>
+                                    <span><field name="var_material" class="oe_inline"/> Material</span>
+                                    <span><field name="var_pattern" class="oe_inline"/> Pattern</span>
+                                    <span><field name="var_style" class="oe_inline"/> Style</span>
+                                </div>
+                                <field name="variation_theme" invisible="1"/>
+                                <field name="is_parent" invisible="1"/>
+                                <field name="parent_asin" invisible="1"/>
+                                <field name="parent_product_id" invisible="1"/>
+                            </div>
+                            <group invisible="not has_variations or not is_parent">
+                                <field name="child_ids" string="Product Variations" nolabel="1">
+                                    <list>
+                                        <field name="name"/>
+                                        <field name="sku"/>
+                                        <field name="asin"/>
+                                        <field name="color"/>
+                                        <field name="size"/>
+                                        <field name="amazon_price"/>
+                                        <field name="amazon_qty"/>
+                                    </list>
+                                </field>
+                            </group>
+                        </page>
+
+                        <!-- ── Tab 2: Description ── -->
+                        <page string="Description" name="description">
+                            <separator string="Product Description"/>
+                            <field name="description" nolabel="1" placeholder="Example: This summer, boots by Jette made from high quality suede leather are real gems. They visually highlight the craftsmanship and fine leather braid positioned at the top of the shaft"/>
+
+                            <separator string="Bullet Points"/>
+                            <field name="bullet_point_ids" nolabel="1">
+                                <list editable="bottom">
+                                    <field name="sequence" widget="handle"/>
+                                    <field name="name" placeholder="Example: Breathable Leather Lining"/>
+                                </list>
+                            </field>
+
+                            <separator string="Images"/>
+                            <p class="text-muted">Upload images or enter URLs. Maximum 9 images allowed. First image = MAIN. Drag to reorder.</p>
+                            <field name="image_ids" nolabel="1">
+                                <list editable="bottom">
+                                    <field name="sequence" widget="handle"/>
+                                    <field name="is_main" readonly="1" string="MAIN"/>
+                                    <field name="image" widget="image" options="{'size': [80, 80]}"/>
+                                    <field name="name"/>
+                                    <field name="image_url" placeholder="or paste image URL"/>
+                                </list>
+                            </field>
+                            <group invisible="not image_url">
+                                <separator string="Main Image Preview"/>
+                                <field name="product_image" widget="image" nolabel="1" options="{'size': [300, 300]}"/>
+                                <field name="image_url" widget="url" string="Main Image URL"/>
+                            </group>
+
+                            <separator string="Search &amp; Discovery"/>
+                            <group>
+                                <field name="search_terms" placeholder="Keywords for Amazon search (max 250 chars)"/>
+                            </group>
+                        </page>
+
+                        <!-- ── Tab 3: Product Details (DYNAMIC by product type) ── -->
+                        <page string="Product Details" name="details">
+
+                            <!-- Category selector (auto-detected but overridable) -->
+                            <div class="alert alert-info mb-3" role="alert">
+                                <strong>Product Category:</strong>
+                                <field name="product_type_group" class="oe_inline ms-2" widget="selection"/>
+                                <span class="text-muted ms-2">Auto-detected from Product Type. Fields below change based on this category.</span>
+                            </div>
+
+                            <field name="has_customisations" widget="radio"/>
+
+                            <!-- ═══ COMMON FIELDS (All Types) ═══ -->
+                            <separator string="Basic Information"/>
+                            <group>
+                                <group>
+                                    <field name="manufacturer" placeholder="e.g. Puma, Samsung, Lakme"/>
+                                    <field name="model_number" placeholder="e.g. RX2ER23"/>
+                                    <field name="model_name" placeholder="e.g. Lunar Tempo"/>
+                                    <field name="color" placeholder="e.g. Cranberry"/>
+                                    <field name="color_map" placeholder="e.g. Red"/>
+                                </group>
+                                <group>
+                                    <field name="size" placeholder="e.g. M, L, 42"/>
+                                    <field name="material" placeholder="e.g. Cotton, Leather"/>
+                                    <field name="target_gender"/>
+                                    <field name="age_range" placeholder="e.g. Adult"/>
+                                    <field name="country_of_origin" placeholder="e.g. IN, CN, US"/>
+                                </group>
+                            </group>
+
+                            <!-- ═══ FOOTWEAR FIELDS ═══ -->
+                            <div invisible="product_type_group != 'footwear'">
+                                <separator string="Footwear Details"/>
+                                <group>
+                                    <group>
+                                        <field name="footwear_size_system"/>
+                                        <field name="footwear_age_group" placeholder="e.g. Adult, Big Kid"/>
+                                        <field name="footwear_gender"/>
+                                        <field name="footwear_size_class"/>
+                                        <field name="footwear_width" placeholder="e.g. Medium, Narrow, Wide"/>
+                                        <field name="footwear_size" placeholder="e.g. 8, 8.5, 9"/>
+                                    </group>
+                                    <group>
+                                        <field name="sole_material" placeholder="e.g. Leather and Rubber"/>
+                                        <field name="toe_style" placeholder="e.g. Round Toe, Pointed Toe"/>
+                                        <field name="heel_height" placeholder="e.g. 2"/>
+                                        <field name="heel_height_unit"/>
+                                        <field name="heel_type" placeholder="e.g. Block Heel, Chunky Heel"/>
+                                        <field name="shoe_type"/>
+                                    </group>
+                                </group>
+                                <group>
+                                    <group>
+                                        <field name="closure_type" placeholder="e.g. Buckle, Slip-On, Lace-Up"/>
+                                        <field name="height_map" placeholder="e.g. High Top, Low Top, Mid Top"/>
+                                    </group>
+                                    <group>
+                                        <field name="lining_description" placeholder="e.g. Fabric, Faux Shearling"/>
+                                        <field name="water_resistance_level"/>
+                                    </group>
+                                </group>
+                            </div>
+
+                            <!-- ═══ CLOTHING &amp; APPAREL FIELDS ═══ -->
+                            <div invisible="product_type_group != 'clothing'">
+                                <separator string="Clothing Details"/>
+                                <group>
+                                    <group>
+                                        <field name="style" placeholder="e.g. Casual, Formal, Ethnic"/>
+                                        <field name="pattern" placeholder="e.g. Checkered, Striped, Solid"/>
+                                        <field name="occasion" placeholder="e.g. Casual, Party, Wedding"/>
+                                        <field name="lining_description" placeholder="e.g. Polyester, Cotton"/>
+                                    </group>
+                                    <group>
+                                        <field name="closure_type" placeholder="e.g. Button, Zip, Pull-On"/>
+                                        <field name="seasons" placeholder="e.g. Summer, Winter, All Season"/>
+                                        <field name="item_type_name" placeholder="e.g. T-Shirt, Kurta, Saree"/>
+                                        <field name="lifestyle" placeholder="e.g. Fashion Casual"/>
+                                    </group>
+                                </group>
+                            </div>
+
+                            <!-- ═══ ELECTRONICS FIELDS ═══ -->
+                            <div invisible="product_type_group != 'electronics'">
+                                <separator string="Electronics Details"/>
+                                <group>
+                                    <group>
+                                        <field name="special_features" placeholder="e.g. Bluetooth, Waterproof, Fast Charging"/>
+                                        <field name="part_number" placeholder="Manufacturer Part Number"/>
+                                        <field name="item_type_name" placeholder="e.g. Laptop, Smartphone, Headphone"/>
+                                    </group>
+                                    <group>
+                                        <field name="water_resistance_level"/>
+                                        <field name="unit_count" placeholder="e.g. 1"/>
+                                        <field name="unit_count_type" placeholder="e.g. Count"/>
+                                    </group>
+                                </group>
+                            </div>
+
+                            <!-- ═══ BEAUTY &amp; PERSONAL CARE FIELDS ═══ -->
+                            <div invisible="product_type_group != 'beauty'">
+                                <separator string="Beauty &amp; Personal Care Details"/>
+                                <group>
+                                    <group>
+                                        <field name="item_type_name" placeholder="e.g. Lipstick, Face Cream, Shampoo"/>
+                                        <field name="special_features" placeholder="e.g. Paraben-Free, Organic, Vegan"/>
+                                        <field name="unit_count" placeholder="e.g. 100"/>
+                                        <field name="unit_count_type" placeholder="e.g. Milliliter, Gram"/>
+                                    </group>
+                                    <group>
+                                        <field name="specific_uses" placeholder="e.g. Anti-Aging, Moisturizing"/>
+                                        <field name="lifestyle" placeholder="e.g. Natural, Luxury"/>
+                                        <field name="seasons" placeholder="e.g. All Season, Summer"/>
+                                    </group>
+                                </group>
+                            </div>
+
+                            <!-- ═══ HOME &amp; KITCHEN FIELDS ═══ -->
+                            <div invisible="product_type_group != 'home'">
+                                <separator string="Home &amp; Kitchen Details"/>
+                                <group>
+                                    <group>
+                                        <field name="item_type_name" placeholder="e.g. Bedsheet, Cookware, Lamp"/>
+                                        <field name="style" placeholder="e.g. Modern, Traditional, Minimalist"/>
+                                        <field name="pattern" placeholder="e.g. Solid, Floral, Geometric"/>
+                                    </group>
+                                    <group>
+                                        <field name="special_features" placeholder="e.g. Dishwasher Safe, Non-Stick"/>
+                                        <field name="specific_uses" placeholder="e.g. Cooking, Storage, Decoration"/>
+                                        <field name="unit_count" placeholder="e.g. 6"/>
+                                        <field name="unit_count_type" placeholder="e.g. Count, Set"/>
+                                    </group>
+                                </group>
+                            </div>
+
+                            <!-- ═══ SPORTS &amp; OUTDOORS FIELDS ═══ -->
+                            <div invisible="product_type_group != 'sports'">
+                                <separator string="Sports &amp; Outdoors Details"/>
+                                <group>
+                                    <group>
+                                        <field name="sport_type" placeholder="e.g. Cricket, Football, Yoga"/>
+                                        <field name="item_type_name" placeholder="e.g. Running Shoes, Yoga Mat"/>
+                                        <field name="special_features" placeholder="e.g. Breathable, Anti-Slip"/>
+                                    </group>
+                                    <group>
+                                        <field name="specific_uses" placeholder="e.g. Training, Competition"/>
+                                        <field name="lifestyle" placeholder="e.g. Active, Outdoor"/>
+                                        <field name="water_resistance_level"/>
+                                    </group>
+                                </group>
+                            </div>
+
+                            <!-- ═══ JEWELRY &amp; WATCHES FIELDS ═══ -->
+                            <div invisible="product_type_group != 'jewelry'">
+                                <separator string="Jewelry &amp; Watch Details"/>
+                                <group>
+                                    <group>
+                                        <field name="item_type_name" placeholder="e.g. Ring, Necklace, Watch"/>
+                                        <field name="style" placeholder="e.g. Classic, Contemporary"/>
+                                        <field name="occasion" placeholder="e.g. Wedding, Daily Wear, Party"/>
+                                    </group>
+                                    <group>
+                                        <field name="special_features" placeholder="e.g. Hypoallergenic, Adjustable"/>
+                                        <field name="embellishment_feature" placeholder="e.g. Gemstone, Diamond, Pearl"/>
+                                        <field name="closure_type" placeholder="e.g. Lobster Claw, Spring Ring"/>
+                                    </group>
+                                </group>
+                            </div>
+
+                            <!-- ═══ GENERAL / OTHER (fallback — show everything) ═══ -->
+                            <div invisible="product_type_group not in ('general', 'food', 'books', 'toys', 'automotive')">
+                                <separator string="Additional Details"/>
+                                <group>
+                                    <group>
+                                        <field name="style" placeholder="e.g. Classic, Modern"/>
+                                        <field name="pattern" placeholder="e.g. Solid, Printed"/>
+                                        <field name="item_type_name" placeholder="Product type name"/>
+                                        <field name="special_features" placeholder="Comma-separated features"/>
+                                        <field name="lifestyle" placeholder="e.g. Casual"/>
+                                    </group>
+                                    <group>
+                                        <field name="occasion" placeholder="e.g. Casual, Gift"/>
+                                        <field name="specific_uses" placeholder="e.g. Cooking, Gaming"/>
+                                        <field name="sport_type" placeholder="e.g. Cricket"/>
+                                        <field name="unit_count" placeholder="e.g. 1"/>
+                                        <field name="unit_count_type" placeholder="e.g. Count"/>
+                                    </group>
+                                </group>
+                            </div>
+
+                            <!-- ═══ COMMON BOTTOM SECTIONS (All Types) ═══ -->
+                            <separator string="External Product Information"/>
+                            <group>
+                                <group>
+                                    <field name="external_info_entity" placeholder="e.g. HSN Code"/>
+                                    <field name="external_info_value" placeholder="e.g. 610510"/>
+                                </group>
+                                <group>
+                                    <field name="subject_character" placeholder="e.g. Batman"/>
+                                    <field name="theme" placeholder="e.g. Sports, Cartoon"/>
+                                </group>
+                            </group>
+
+                            <separator string="Manufacturer &amp; Compliance"/>
+                            <group>
+                                <group>
+                                    <field name="manufacturer_contact" placeholder="Manufacturer Name, Address, Contact"/>
+                                    <field name="importer_contact" placeholder="Importer Name, Address, Contact"/>
+                                </group>
+                                <group>
+                                    <field name="packer_contact" placeholder="Packer Name, Address, Contact"/>
+                                    <field name="part_number" placeholder="Manufacturer Part Number"/>
+                                </group>
+                            </group>
+
+                            <separator string="Dimensions &amp; Weight"/>
+                            <group>
+                                <group string="Item">
+                                    <field name="item_weight"/>
+                                    <field name="item_length"/>
+                                    <field name="item_width"/>
+                                    <field name="item_height"/>
+                                </group>
+                                <group string="Package">
+                                    <field name="package_weight"/>
+                                    <field name="package_length"/>
+                                    <field name="package_width"/>
+                                    <field name="package_height"/>
+                                </group>
+                            </group>
+                        </page>
+
+                        <!-- ── Tab 4: Offer ── -->
+                        <page string="Offer" name="offer">
+                            <!-- Info banner -->
+                            <div class="alert alert-info" role="alert">
+                                <field name="skip_offer" class="oe_inline"/>
+                                <label for="skip_offer" string=" Let me skip the offer data and add it later."/>
+                                <span class="text-muted ms-2">You have the option to save as inactive now and add its offer back in later.</span>
+                            </div>
+
+                            <div invisible="skip_offer">
+                                <!-- SKU &amp; Quantity -->
+                                <separator string="SKU &amp; Quantity"/>
+                                <group>
+                                    <group>
+                                        <field name="sku" string="SKU" placeholder="Example: ABC123" readonly="1"/>
+                                        <field name="amazon_qty" string="Quantity" placeholder="152"/>
+                                    </group>
+                                    <group>
+                                        <field name="odoo_stock" string="Odoo Stock (readonly)"/>
+                                    </group>
+                                </group>
+
+                                <!-- Pricing -->
+                                <separator string="Pricing"/>
+                                <group>
+                                    <group>
+                                        <field name="amazon_price" string="Your Price"/>
+                                        <field name="mrp" string="MRP / List Price"/>
+                                        <field name="odoo_price" string="Odoo Price (readonly)"/>
+                                    </group>
+                                    <group>
+                                        <field name="sale_price"/>
+                                        <field name="sale_start_date" invisible="not sale_price"/>
+                                        <field name="sale_end_date" invisible="not sale_price"/>
+                                        <field name="tax_code" placeholder="Product Tax Code"/>
+                                    </group>
+                                </group>
+
+                                <!-- Fulfillment Channel -->
+                                <separator string="Fulfillment Channel"/>
+                                <group>
+                                    <field name="fulfillment_channel" widget="radio"/>
+                                </group>
+                                <div class="alert alert-warning" role="alert" invisible="fulfillment_channel != 'AFN'">
+                                    <strong>Note:</strong> You are selecting Fulfilled by Amazon (FBA). Amazon will handle shipping and customer service.
+                                </div>
+                                <group invisible="fulfillment_channel == 'AFN'">
+                                    <group>
+                                        <field name="handling_time"/>
+                                        <field name="max_order_qty"/>
+                                    </group>
+                                </group>
+
+                                <!-- Condition -->
+                                <separator string="Condition"/>
+                                <group>
+                                    <group>
+                                        <field name="condition_type"/>
+                                        <field name="condition_note" invisible="condition_type == 'new_new'" placeholder="Describe the item condition..."/>
+                                    </group>
+                                </group>
+                            </div>
+
+                            <!-- Item Dimensions (always shown) -->
+                            <separator string="Item Dimensions"/>
+                            <group>
+                                <group string="Item Length">
+                                    <field name="offer_item_length" string="Item Length" placeholder="Example: 10"/>
+                                    <field name="offer_item_length_unit" string="Item Length Unit"/>
+                                </group>
+                            </group>
+                            <group>
+                                <group string="Item Width">
+                                    <field name="offer_item_width" string="Item Width" placeholder="Example: 2"/>
+                                    <field name="offer_item_width_unit" string="Item Width Unit"/>
+                                </group>
+                            </group>
+                            <group>
+                                <group string="Item Height">
+                                    <field name="offer_item_height" string="Item Height" placeholder="Example: 2.7"/>
+                                    <field name="offer_item_height_unit" string="Item Height Unit"/>
+                                </group>
+                            </group>
+                        </page>
+
+                        <!-- ── Tab 5: Safety &amp; Compliance ── -->
+                        <page string="Safety &amp; Compliance" name="safety">
+                            <!-- Country/Region of Origin -->
+                            <separator string="Country/Region of Origin"/>
+                            <group>
+                                <group>
+                                    <field name="compliance_country_of_origin" placeholder="Example: China"/>
+                                </group>
+                            </group>
+
+                            <!-- Item Weight -->
+                            <separator string="Item Weight"/>
+                            <group>
+                                <group>
+                                    <field name="compliance_item_weight" string="Item Weight" placeholder="Example: 30.0, 1.5"/>
+                                    <field name="compliance_item_weight_unit" string="Item Weight Unit"/>
+                                </group>
+                            </group>
+
+                            <!-- Outer Material -->
+                            <separator string="Outer Material"/>
+                            <group>
+                                <group>
+                                    <field name="outer_material" placeholder="Example: Canvas, Corduroy"/>
+                                </group>
+                            </group>
+
+                            <!-- Safety Warnings -->
+                            <separator string="Safety Warnings"/>
+                            <group>
+                                <group>
+                                    <field name="safety_warning" placeholder="Safety warnings for the product"/>
+                                    <field name="cpsia_warning"/>
+                                </group>
+                            </group>
+
+                            <!-- Hazardous Materials -->
+                            <separator string="Hazardous Materials"/>
+                            <group>
+                                <group>
+                                    <field name="hazmat"/>
+                                    <field name="hazmat_info" invisible="not hazmat" placeholder="Describe hazardous material details..."/>
+                                </group>
+                            </group>
+
+                            <!-- Battery &amp; Expiry -->
+                            <separator string="Battery &amp; Expiry"/>
+                            <group>
+                                <group>
+                                    <field name="battery_type"/>
+                                    <field name="is_expirable"/>
+                                </group>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="amazon_product_search" model="ir.ui.view">
+        <field name="name">amazon.product.search</field>
+        <field name="model">amazon.product</field>
+        <field name="arch" type="xml">
+            <search string="Amazon Products">
+                <field name="name"/>
+                <field name="asin"/>
+                <field name="sku"/>
+                <field name="brand"/>
+                <field name="product_type"/>
+                <filter string="Active" name="active" domain="[('status','=','Active')]"/>
+                <filter string="Mapped" name="mapped" domain="[('odoo_product_id','!=',False)]"/>
+                <filter string="Unmapped" name="unmapped" domain="[('odoo_product_id','=',False)]"/>
+                <separator/>
+                <filter string="FBA" name="fba" domain="[('fulfillment_channel','=','AFN')]"/>
+                <filter string="FBM" name="fbm" domain="[('fulfillment_channel','=','MFN')]"/>
+                <group>
+                    <filter string="Instance" name="group_instance" context="{'group_by': 'instance_id'}"/>
+                    <filter string="Status" name="group_status" context="{'group_by': 'status'}"/>
+                    <filter string="Fulfillment" name="group_fulfillment" context="{'group_by': 'fulfillment_channel'}"/>
+                    <filter string="Brand" name="group_brand" context="{'group_by': 'brand'}"/>
+                    <filter string="Product Type" name="group_type" context="{'group_by': 'product_type'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+</odoo>

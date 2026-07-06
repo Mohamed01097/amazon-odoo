@@ -1,0 +1,124 @@
+<odoo>
+    <record id="amazon_instance_action" model="ir.actions.act_window">
+        <field name="name">Amazon Instances</field>
+        <field name="res_model">amazon.instance</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_instance_list" model="ir.ui.view">
+        <field name="name">amazon.instance.list</field>
+        <field name="model">amazon.instance</field>
+        <field name="arch" type="xml">
+            <list string="Amazon Instances">
+                <field name="name"/>
+                <field name="seller_id"/>
+                <field name="marketplace_id"/>
+                <field name="region"/>
+                <field name="product_count"/>
+                <field name="order_count"/>
+                <field name="last_order_sync"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_instance_form" model="ir.ui.view">
+        <field name="name">amazon.instance.form</field>
+        <field name="model">amazon.instance</field>
+        <field name="arch" type="xml">
+            <form string="Amazon Instance">
+                <header>
+                    <button name="action_test_connection" type="object" string="Test Connection" class="btn-primary"/>
+                    <button name="action_full_sync" type="object" string="Full Sync" class="btn-warning" icon="fa-refresh"/>
+                    <button name="action_sync_products" type="object" string="Sync Products"/>
+                    <button name="action_import_orders" type="object" string="Import Orders"/>
+                    <button name="action_export_stock" type="object" string="Export Stock"/>
+                    <button name="action_pull_stock" type="object" string="Pull Stock"/>
+                    <button name="action_update_prices" type="object" string="Push Prices"/>
+                    <button name="action_pull_prices" type="object" string="Pull Prices"/>
+                    <button name="action_export_all_products" type="object" string="Export Products"/>
+                    <button name="action_import_settlement_reports" type="object" string="Import Settlements"/>
+                    <button name="action_check_canceled_orders" type="object" string="Check Cancellations"/>
+                    <button name="action_import_removal_orders" type="object" string="Import Removals"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_view_products" type="object" class="oe_stat_button" icon="fa-cube">
+                            <field name="product_count" widget="statinfo" string="Products"/>
+                        </button>
+                        <button name="action_view_orders" type="object" class="oe_stat_button" icon="fa-shopping-cart">
+                            <field name="order_count" widget="statinfo" string="Orders"/>
+                        </button>
+                        <button name="action_view_settlements" type="object" class="oe_stat_button" icon="fa-money">
+                            <field name="settlement_count" widget="statinfo" string="Settlements"/>
+                        </button>
+                        <button name="action_view_sync_logs" type="object" class="oe_stat_button" icon="fa-history">
+                            <field name="sync_log_count" widget="statinfo" string="Sync Logs"/>
+                        </button>
+                    </div>
+                    <group>
+                        <group string="Credentials">
+                            <field name="name"/>
+                            <field name="seller_id"/>
+                            <field name="marketplace_id"/>
+                            <field name="region"/>
+                            <field name="refresh_token"/>
+                            <field name="client_id"/>
+                            <field name="client_secret" password="True"/>
+                            <field name="aws_access_key"/>
+                            <field name="aws_secret_key" password="True"/>
+                        </group>
+                        <group string="Configuration">
+                            <field name="fulfillment_program"/>
+                            <field name="fba_warehouse_id"/>
+                            <field name="fbm_warehouse_id"/>
+                            <field name="default_currency_id"/>
+                            <field name="active"/>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="AI Configuration">
+                            <field name="ai_provider"/>
+                            <field name="ai_api_key" password="True"/>
+                            <field name="ai_model" placeholder="e.g. llama-3.3-70b-versatile"/>
+                            <field name="ai_connection_status" readonly="1"/>
+                            <button name="action_test_ai_connection" type="object" string="Test AI Connection" class="btn-warning" icon="fa-bolt"/>
+                        </group>
+                        <group string="Last Sync">
+                            <field name="last_product_sync"/>
+                            <field name="last_order_sync"/>
+                            <field name="last_stock_sync"/>
+                        </group>
+                    </group>
+
+                    <separator string="Auto Sync Scheduler"/>
+                    <div class="alert alert-info" role="alert">
+                        <field name="auto_sync_enabled" class="oe_inline"/>
+                        <label for="auto_sync_enabled" string=" Enable Auto Sync — Automatically sync orders, products, stock, and prices on a schedule."/>
+                    </div>
+                    <group invisible="not auto_sync_enabled">
+                        <group string="Amazon Sync Intervals">
+                            <field name="order_sync_interval"/>
+                            <field name="product_sync_interval"/>
+                            <field name="stock_push_interval"/>
+                            <field name="stock_pull_interval"/>
+                            <field name="price_push_interval"/>
+                            <field name="price_pull_interval"/>
+                            <field name="settlement_sync_interval"/>
+                            <field name="alert_scan_interval"/>
+                        </group>
+                        <group string="AI Auto-Run Intervals">
+                            <field name="ai_pricing_interval"/>
+                            <field name="ai_listing_interval"/>
+                            <field name="ai_forecast_interval"/>
+                            <field name="ai_review_interval"/>
+                            <field name="ai_health_interval"/>
+                        </group>
+                    </group>
+                    <group invisible="not auto_sync_enabled">
+                        <button name="action_apply_sync_schedule" type="object" string="Apply Schedule" class="btn-primary" icon="fa-clock-o"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+</odoo>

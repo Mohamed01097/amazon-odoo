@@ -1,0 +1,6 @@
+<odoo>
+    <record id="amazon_dashboard_action" model="ir.actions.client">
+        <field name="name">Amazon AI Dashboard</field>
+        <field name="tag">amazon_dashboard</field>
+    </record>
+</odoo>

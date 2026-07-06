@@ -1,0 +1,39 @@
+<odoo>
+
+    <!-- ═══════════════ User Guidance Action ═══════════════ -->
+    <record id="amazon_user_guidance_action" model="ir.actions.act_window">
+        <field name="name">User Guide</field>
+        <field name="res_model">amazon.user.guidance</field>
+        <field name="view_mode">form</field>
+        <field name="target">current</field>
+    </record>
+
+    <record id="amazon_user_guidance_form" model="ir.ui.view">
+        <field name="name">amazon.user.guidance.form</field>
+        <field name="model">amazon.user.guidance</field>
+        <field name="arch" type="xml">
+            <form string="Amazon Connector - User Guide" create="0" edit="0" delete="0">
+                <sheet>
+                    <notebook>
+                        <page string="User Guide" name="guide">
+                            <field name="guidance_content" nolabel="1" readonly="1"/>
+                        </page>
+                        <page string="AI Features" name="ai_features">
+                            <field name="ai_summary_content" nolabel="1" readonly="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ═══════════════ AI Features Summary Action ═══════════════ -->
+    <record id="amazon_ai_features_action" model="ir.actions.act_window">
+        <field name="name">AI Features Overview</field>
+        <field name="res_model">amazon.user.guidance</field>
+        <field name="view_mode">form</field>
+        <field name="target">current</field>
+        <field name="context">{'default_page': 'ai_features'}</field>
+    </record>
+
+</odoo>

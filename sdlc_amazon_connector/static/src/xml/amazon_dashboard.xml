@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+    <t t-name="sdlc_amazon_connector.Dashboard">
+        <div class="o_action amazon-dash" style="overflow-y:auto;height:100vh;background:#f0f2f5;">
+
+            <!-- Header -->
+            <div style="background:linear-gradient(135deg,#232f3e,#37475a);padding:12px 24px;" class="d-flex justify-content-between align-items-center sticky-top flex-wrap gap-2">
+                <span style="color:#ff9900;font-size:20px;font-weight:700;">Amazon AI Dashboard</span>
+                <div class="d-flex gap-2 align-items-center flex-wrap">
+                    <select class="form-select form-select-sm" style="width:180px;background:#fff;" t-on-change="onInstanceChange">
+                        <option value="all">All Instances</option>
+                        <t t-foreach="state.instances" t-as="inst" t-key="inst.id">
+                            <option t-att-value="inst.id" t-att-selected="state.selectedInstance === inst.id" t-out="inst.name"/>
+                        </t>
+                    </select>
+                    <select class="form-select form-select-sm" style="width:140px;background:#fff;" t-on-change="onDateRangeChange">
+                        <option value="7">Last 7 Days</option>
+                        <option value="14">Last 14 Days</option>
+                        <option value="30" selected="">Last 30 Days</option>
+                        <option value="60">Last 60 Days</option>
+                        <option value="90">Last 90 Days</option>
+                        <option value="custom">Custom Date</option>
+                    </select>
+                    <t t-if="state.dateRange === 'custom'">
+                        <input type="date" class="form-control form-control-sm" style="width:130px;" t-model="state.customFrom"/>
+                        <span style="color:#fff;">to</span>
+                        <input type="date" class="form-control form-control-sm" style="width:130px;" t-model="state.customTo"/>
+                        <button class="btn btn-sm text-white" style="background:#ff9900;" t-on-click="onApplyCustomDate">Apply</button>
+                    </t>
+                    <button class="btn btn-sm text-white" style="background:#ff9900;" t-on-click="getAIInsights" t-att-disabled="state.aiLoading">
+                        <i class="fa fa-magic me-1"/><t t-if="state.aiLoading">...</t><t t-else="">AI Insights</t>
+                    </button>
+                    <button class="btn btn-sm text-white" style="background:#00a854;" t-on-click="optimizeStore" t-att-disabled="state.optimizing">
+                        <i class="fa fa-rocket me-1"/><t t-if="state.optimizing">...</t><t t-else="">Optimize</t>
+                    </button>
+                </div>
+            </div>
+
+            <div class="p-3" t-if="!state.loading">
+
+                <!-- KPI CARDS -->
+                <div class="row g-3 mb-3">
+                    <div class="col-lg-3 col-md-6">
+                        <div class="card border-0 h-100" style="background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;cursor:pointer;border-radius:12px;" t-on-click="openOrders">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between"><div><div style="opacity:0.8;font-size:13px;">Orders (Period)</div><h2 class="mb-0 mt-1" t-out="state.kpis.orders_period || 0"/></div><i class="fa fa-shopping-cart" style="font-size:36px;opacity:0.3;"/></div>
+                                <div class="mt-2" style="font-size:12px;opacity:0.8;">Today: <b t-out="state.kpis.orders_today || 0"/> | Total: <b t-out="state.kpis.total_orders || 0"/></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-md-6">
+                        <div class="card border-0 h-100" style="background:linear-gradient(135deg,#11998e,#38ef7d);color:#fff;border-radius:12px;">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between"><div><div style="opacity:0.8;font-size:13px;">Revenue (Period)</div><h2 class="mb-0 mt-1" t-out="formatCurrency(state.kpis.revenue_period)"/></div><i class="fa fa-inr" style="font-size:36px;opacity:0.3;"/></div>
+                                <div class="mt-2" style="font-size:12px;opacity:0.8;">Avg Order: <b t-out="formatCurrency(state.kpis.avg_order_value)"/></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-md-6">
+                        <div class="card border-0 h-100" style="background:linear-gradient(135deg,#fc5c7d,#6a82fb);color:#fff;cursor:pointer;border-radius:12px;" t-on-click="openProducts">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between"><div><div style="opacity:0.8;font-size:13px;">Active Products</div><h2 class="mb-0 mt-1" t-out="state.kpis.total_products || 0"/></div><i class="fa fa-cube" style="font-size:36px;opacity:0.3;"/></div>
+                                <div class="mt-2" style="font-size:12px;opacity:0.8;">Health: <b t-out="state.kpis.avg_health || 0"/>/100</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-md-6">
+                        <div class="card border-0 h-100" style="background:linear-gradient(135deg,#f093fb,#f5576c);color:#fff;border-radius:12px;">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between"><div><div style="opacity:0.8;font-size:13px;">Customers</div><h2 class="mb-0 mt-1" t-out="state.kpis.total_customers || 0"/></div><i class="fa fa-users" style="font-size:36px;opacity:0.3;"/></div>
+                                <div class="mt-2" style="font-size:12px;opacity:0.8;">FBM: <b t-out="state.kpis.fbm_count || 0"/> | FBA: <b t-out="state.kpis.fba_count || 0"/></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STATUS PILLS -->
+                <div class="row g-2 mb-3">
+                    <div class="col"><div class="text-center p-2 rounded-3" style="background:#fff3cd;"><div style="font-size:22px;font-weight:700;color:#856404;" t-out="state.kpis.pending_orders || 0"/><div style="font-size:11px;color:#856404;">Pending</div></div></div>
+                    <div class="col" style="cursor:pointer;" t-on-click="openDelivery"><div class="text-center p-2 rounded-3" style="background:#d4edda;"><div style="font-size:22px;font-weight:700;color:#155724;" t-out="state.kpis.shipped_orders || 0"/><div style="font-size:11px;color:#155724;">Shipped</div></div></div>
+                    <div class="col"><div class="text-center p-2 rounded-3" style="background:#f8d7da;"><div style="font-size:22px;font-weight:700;color:#721c24;" t-out="state.kpis.cancelled_orders || 0"/><div style="font-size:11px;color:#721c24;">Cancelled</div></div></div>
+                    <div class="col"><div class="text-center p-2 rounded-3" style="background:#fff3cd;"><div style="font-size:22px;font-weight:700;color:#856404;" t-out="state.kpis.low_stock || 0"/><div style="font-size:11px;color:#856404;">Low Stock</div></div></div>
+                    <div class="col"><div class="text-center p-2 rounded-3" style="background:#f8d7da;"><div style="font-size:22px;font-weight:700;color:#721c24;" t-out="state.kpis.out_of_stock || 0"/><div style="font-size:11px;color:#721c24;">Out of Stock</div></div></div>
+                    <div class="col" style="cursor:pointer;" t-on-click="openAlerts"><div class="text-center p-2 rounded-3" style="background:linear-gradient(135deg,#ff416c,#ff4b2b);color:#fff;"><div style="font-size:22px;font-weight:700;"><t t-out="state.kpis.critical_alerts || 0"/>/<t t-out="state.kpis.active_alerts || 0"/></div><div style="font-size:11px;">Alerts</div></div></div>
+                </div>
+
+                <!-- CHARTS -->
+                <div class="row g-3 mb-3">
+                    <div class="col-lg-8">
+                        <div class="card border-0 shadow-sm" style="border-radius:12px;">
+                            <div class="card-header bg-white border-0 pt-3 px-3"><b><i class="fa fa-line-chart me-2" style="color:#667eea;"/>Sales Trend</b></div>
+                            <div class="card-body pt-0"><canvas t-ref="salesChart" height="80"/></div>
+                        </div>
+                    </div>
+                    <div class="col-lg-4">
+                        <div class="card border-0 shadow-sm" style="border-radius:12px;">
+                            <div class="card-header bg-white border-0 pt-3 px-3"><b><i class="fa fa-pie-chart me-2" style="color:#f5576c;"/>Order Status</b></div>
+                            <div class="card-body pt-0"><canvas t-ref="statusChart"/></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="row g-3 mb-3">
+                    <div class="col-lg-6">
+                        <div class="card border-0 shadow-sm" style="border-radius:12px;">
+                            <div class="card-header bg-white border-0 pt-3 px-3"><b><i class="fa fa-bar-chart me-2" style="color:#ff9900;"/>Top Products</b></div>
+                            <div class="card-body pt-0"><canvas t-ref="productsChart" height="120"/></div>
+                        </div>
+                    </div>
+                    <div class="col-lg-6">
+                        <div class="card border-0 shadow-sm" style="border-radius:12px;">
+                            <div class="card-header bg-white border-0 pt-3 px-3"><b><i class="fa fa-area-chart me-2" style="color:#11998e;"/>Revenue vs Orders</b></div>
+                            <div class="card-body pt-0"><canvas t-ref="revenueChart" height="120"/></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AI + SYNCS -->
+                <div class="row g-3 mb-3">
+                    <div class="col-lg-7">
+                        <div class="card border-0 shadow-sm" style="border-radius:12px;border-left:4px solid #ff9900 !important;">
+                            <div class="card-header bg-white border-0 pt-3 px-3 d-flex justify-content-between">
+                                <b><i class="fa fa-magic me-2" style="color:#ff9900;"/>AI Insights</b>
+                                <button class="btn btn-sm" style="background:#ff9900;color:#fff;" t-on-click="getAIInsights"><i class="fa fa-refresh"/></button>
+                            </div>
+                            <div class="card-body pt-0">
+                                <pre style="white-space:pre-wrap;font-family:inherit;background:#fffbf0;padding:12px;border-radius:8px;border:1px solid #ffe0b2;max-height:300px;overflow-y:auto;margin:0;" t-out="state.aiInsights"/>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-5">
+                        <div class="card border-0 shadow-sm" style="border-radius:12px;">
+                            <div class="card-header bg-white border-0 pt-3 px-3 d-flex justify-content-between">
+                                <b><i class="fa fa-history me-2" style="color:#6a82fb;"/>Recent Activity</b>
+                                <button class="btn btn-sm btn-outline-secondary" t-on-click="openSyncLogs">All</button>
+                            </div>
+                            <div class="card-body p-0" style="max-height:300px;overflow-y:auto;">
+                                <table class="table table-sm table-hover mb-0">
+                                    <t t-foreach="state.recentSyncs" t-as="sync" t-key="sync_index">
+                                        <tr>
+                                            <td class="ps-3" style="width:50px;">
+                                                <span t-if="sync.state === 'success'" class="badge" style="background:#00a854;">OK</span>
+                                                <span t-elif="sync.state === 'failed'" class="badge bg-danger">FAIL</span>
+                                                <span t-else="" class="badge bg-warning text-dark">PART</span>
+                                            </td>
+                                            <td><b t-out="sync.operation"/></td>
+                                            <td class="text-muted" style="font-size:12px;" t-out="sync.summary"/>
+                                            <td class="text-muted" style="font-size:11px;" t-out="sync.date"/>
+                                        </tr>
+                                    </t>
+                                    <tr t-if="!state.recentSyncs.length"><td class="text-center text-muted py-3" colspan="4">No activity yet</td></tr>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div style="height:80px;"/>
+            </div>
+
+            <div t-if="state.loading" class="d-flex flex-column align-items-center justify-content-center" style="height:80vh;">
+                <i class="fa fa-spinner fa-spin fa-3x" style="color:#ff9900;"/>
+                <p class="mt-3 text-muted">Loading Dashboard...</p>
+            </div>
+        </div>
+    </t>
+</templates>

@@ -1,0 +1,198 @@
+<odoo>
+
+    <!-- ═══════════════════════════════════════════════════
+         PRODUCT HEALTH SCORE
+         ═══════════════════════════════════════════════════ -->
+
+    <record id="amazon_health_action" model="ir.actions.act_window">
+        <field name="name">Product Health Scores</field>
+        <field name="res_model">amazon.product.health</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_health_list" model="ir.ui.view">
+        <field name="name">amazon.product.health.list</field>
+        <field name="model">amazon.product.health</field>
+        <field name="arch" type="xml">
+            <list string="Product Health" default_order="health_score asc"
+                  decoration-danger="health_grade in ('D','F')"
+                  decoration-warning="health_grade == 'C'"
+                  decoration-success="health_grade in ('A','B')">
+                <field name="product_id"/>
+                <field name="health_score" widget="progressbar"/>
+                <field name="health_grade"/>
+                <field name="listing_score" string="Listing" widget="progressbar" optional="show"/>
+                <field name="pricing_score" string="Price" widget="progressbar" optional="show"/>
+                <field name="stock_score" string="Stock" widget="progressbar" optional="show"/>
+                <field name="sales_score" string="Sales" widget="progressbar" optional="show"/>
+                <field name="review_score" string="Reviews" widget="progressbar" optional="show"/>
+                <field name="issue_count"/>
+                <field name="days_of_stock"/>
+                <field name="sales_last_30d"/>
+                <field name="has_critical_alert" invisible="1"/>
+                <field name="generated_at"/>
+                <button name="action_calculate_health" type="object" string="Refresh" class="btn-sm btn-warning" icon="fa-refresh"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_health_form" model="ir.ui.view">
+        <field name="name">amazon.product.health.form</field>
+        <field name="model">amazon.product.health</field>
+        <field name="arch" type="xml">
+            <form string="Product Health">
+                <header>
+                    <button name="action_calculate_health" type="object" string="Recalculate" class="btn-primary" icon="fa-refresh"/>
+                </header>
+                <sheet>
+                    <widget name="web_ribbon" title="CRITICAL" bg_color="text-bg-danger" invisible="health_grade not in ('D','F')"/>
+                    <div class="oe_title">
+                        <h1>
+                            Health: <field name="health_score" widget="progressbar" class="w-50"/>
+                            <field name="health_grade" class="ms-2"/>
+                        </h1>
+                    </div>
+                    <group>
+                        <group string="Product">
+                            <field name="product_id"/>
+                            <field name="instance_id"/>
+                            <field name="generated_at"/>
+                        </group>
+                        <group string="Key Metrics">
+                            <field name="days_of_stock"/>
+                            <field name="sales_last_7d"/>
+                            <field name="sales_last_30d"/>
+                            <field name="issue_count"/>
+                        </group>
+                    </group>
+                    <group string="Component Scores">
+                        <group>
+                            <field name="listing_score" widget="progressbar"/>
+                            <field name="pricing_score" widget="progressbar"/>
+                            <field name="stock_score" widget="progressbar"/>
+                        </group>
+                        <group>
+                            <field name="sales_score" widget="progressbar"/>
+                            <field name="review_score" widget="progressbar"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Issues">
+                            <field name="issues" widget="text" nolabel="1"/>
+                        </page>
+                        <page string="Recommendations">
+                            <field name="recommendations" widget="text" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ═══════════════════════════════════════════════════
+         SMART ALERTS
+         ═══════════════════════════════════════════════════ -->
+
+    <record id="amazon_alert_action" model="ir.actions.act_window">
+        <field name="name">Smart Alerts</field>
+        <field name="res_model">amazon.smart.alert</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('state', 'in', ['new', 'acknowledged'])]</field>
+        <field name="context">{'search_default_group_severity': 1}</field>
+    </record>
+
+    <record id="amazon_alert_all_action" model="ir.actions.act_window">
+        <field name="name">All Alerts (History)</field>
+        <field name="res_model">amazon.smart.alert</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_alert_search" model="ir.ui.view">
+        <field name="name">amazon.smart.alert.search</field>
+        <field name="model">amazon.smart.alert</field>
+        <field name="arch" type="xml">
+            <search string="Alert Search">
+                <field name="title"/>
+                <field name="product_id"/>
+                <field name="alert_type"/>
+                <separator/>
+                <filter string="New" name="new" domain="[('state','=','new')]"/>
+                <filter string="Critical" name="critical" domain="[('severity','=','4_critical')]"/>
+                <filter string="Urgent" name="urgent" domain="[('severity','=','3_urgent')]"/>
+                <separator/>
+                <filter string="Stockout" name="stockout" domain="[('alert_type','in',['stockout','low_stock'])]"/>
+                <filter string="Pricing" name="pricing" domain="[('alert_type','in',['price_war','negative_margin','competitor_price'])]"/>
+                <filter string="Listing" name="listing" domain="[('alert_type','in',['listing_suppressed','hijack'])]"/>
+                <group>
+                    <filter string="Severity" name="group_severity" context="{'group_by': 'severity'}"/>
+                    <filter string="Type" name="group_type" context="{'group_by': 'alert_type'}"/>
+                    <filter string="State" name="group_state" context="{'group_by': 'state'}"/>
+                    <filter string="Product" name="group_product" context="{'group_by': 'product_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="amazon_alert_list" model="ir.ui.view">
+        <field name="name">amazon.smart.alert.list</field>
+        <field name="model">amazon.smart.alert</field>
+        <field name="arch" type="xml">
+            <list string="Smart Alerts" default_order="severity desc, create_date desc"
+                  decoration-danger="severity == '4_critical'"
+                  decoration-warning="severity == '3_urgent'"
+                  decoration-info="severity == '2_warning'"
+                  decoration-muted="state in ('resolved','dismissed')">
+                <field name="severity"/>
+                <field name="alert_type"/>
+                <field name="title"/>
+                <field name="product_id"/>
+                <field name="state"/>
+                <field name="create_date"/>
+                <field name="suggested_action" optional="show"/>
+                <button name="action_acknowledge" type="object" string="Ack" class="btn-sm btn-outline-primary" invisible="state != 'new'"/>
+                <button name="action_resolve" type="object" string="Resolve" class="btn-sm btn-success" invisible="state not in ('new','acknowledged')"/>
+                <button name="action_dismiss" type="object" string="Dismiss" class="btn-sm btn-outline-secondary" invisible="state not in ('new','acknowledged')"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_alert_form" model="ir.ui.view">
+        <field name="name">amazon.smart.alert.form</field>
+        <field name="model">amazon.smart.alert</field>
+        <field name="arch" type="xml">
+            <form string="Smart Alert">
+                <header>
+                    <button name="action_acknowledge" type="object" string="Acknowledge" invisible="state != 'new'"/>
+                    <button name="action_resolve" type="object" string="Resolve" class="btn-primary" invisible="state not in ('new','acknowledged')"/>
+                    <button name="action_dismiss" type="object" string="Dismiss" invisible="state not in ('new','acknowledged')"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <widget name="web_ribbon" title="CRITICAL" bg_color="text-bg-danger" invisible="severity != '4_critical'"/>
+                    <widget name="web_ribbon" title="URGENT" bg_color="text-bg-warning" invisible="severity != '3_urgent'"/>
+                    <group>
+                        <group string="Alert">
+                            <field name="alert_type"/>
+                            <field name="severity"/>
+                            <field name="title"/>
+                            <field name="product_id"/>
+                            <field name="instance_id"/>
+                        </group>
+                        <group string="Resolution">
+                            <field name="resolved_at"/>
+                            <field name="resolved_by"/>
+                            <field name="resolution_note"/>
+                        </group>
+                    </group>
+                    <group string="Details">
+                        <field name="description" nolabel="1"/>
+                    </group>
+                    <group string="Suggested Action">
+                        <field name="suggested_action" nolabel="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+</odoo>

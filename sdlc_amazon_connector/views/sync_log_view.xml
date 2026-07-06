@@ -1,0 +1,120 @@
+<odoo>
+
+    <!-- Search view FIRST (referenced by actions) -->
+    <record id="amazon_sync_log_search" model="ir.ui.view">
+        <field name="name">amazon.sync.log.search</field>
+        <field name="model">amazon.sync.log</field>
+        <field name="arch" type="xml">
+            <search string="Sync Log Search">
+                <field name="operation"/>
+                <field name="instance_id"/>
+                <field name="state"/>
+                <separator/>
+                <filter string="Success" name="success" domain="[('state','=','success')]"/>
+                <filter string="Failed" name="failed" domain="[('state','=','failed')]"/>
+                <filter string="Partial" name="partial" domain="[('state','=','partial')]"/>
+                <separator/>
+                <filter string="Orders" name="orders" domain="[('operation','in',['order_import','order_status_update'])]"/>
+                <filter string="Products" name="products" domain="[('operation','in',['product_import','product_export','product_create','product_update'])]"/>
+                <filter string="Stock" name="stock" domain="[('operation','in',['stock_export','stock_pull'])]"/>
+                <filter string="Prices" name="prices" domain="[('operation','in',['price_export','price_pull'])]"/>
+                <filter string="AI" name="ai" domain="[('operation','like','ai_')]"/>
+                <separator/>
+                <group>
+                    <filter string="Operation" name="group_operation" context="{'group_by': 'operation'}"/>
+                    <filter string="Status" name="group_state" context="{'group_by': 'state'}"/>
+                    <filter string="Instance" name="group_instance" context="{'group_by': 'instance_id'}"/>
+                    <filter string="Date" name="group_date" context="{'group_by': 'create_date:day'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- Actions -->
+    <record id="amazon_sync_log_action" model="ir.actions.act_window">
+        <field name="name">Sync Logs</field>
+        <field name="res_model">amazon.sync.log</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="amazon_sync_log_search"/>
+    </record>
+
+    <record id="amazon_sync_report_action" model="ir.actions.act_window">
+        <field name="name">Sync Reports</field>
+        <field name="res_model">amazon.sync.log</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('state', '!=', 'started')]</field>
+        <field name="context">{'search_default_group_operation': 1}</field>
+        <field name="search_view_id" ref="amazon_sync_log_search"/>
+    </record>
+
+    <!-- List view -->
+    <record id="amazon_sync_log_list" model="ir.ui.view">
+        <field name="name">amazon.sync.log.list</field>
+        <field name="model">amazon.sync.log</field>
+        <field name="arch" type="xml">
+            <list string="Sync Logs" decoration-success="state=='success'" decoration-danger="state=='failed'" decoration-warning="state=='partial'" decoration-muted="state=='started'" default_order="create_date desc">
+                <field name="create_date" string="Date"/>
+                <field name="instance_id"/>
+                <field name="operation"/>
+                <field name="state"/>
+                <field name="records_processed"/>
+                <field name="records_created"/>
+                <field name="records_updated"/>
+                <field name="records_failed"/>
+                <field name="duration_seconds" string="Duration (s)"/>
+                <field name="summary" optional="show"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- Form view -->
+    <record id="amazon_sync_log_form" model="ir.ui.view">
+        <field name="name">amazon.sync.log.form</field>
+        <field name="model">amazon.sync.log</field>
+        <field name="arch" type="xml">
+            <form string="Sync Log" create="0" edit="0">
+                <header>
+                    <field name="state" widget="statusbar" statusbar_visible="started,success,failed"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="Operation">
+                            <field name="instance_id"/>
+                            <field name="operation"/>
+                            <field name="res_model"/>
+                            <field name="res_id"/>
+                        </group>
+                        <group string="Timing">
+                            <field name="started_at"/>
+                            <field name="finished_at"/>
+                            <field name="duration_seconds"/>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="Counters">
+                            <field name="records_processed"/>
+                            <field name="records_created"/>
+                            <field name="records_updated"/>
+                            <field name="records_failed"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Summary">
+                            <field name="summary"/>
+                        </page>
+                        <page string="Error Details" invisible="not error_message">
+                            <field name="error_message"/>
+                        </page>
+                        <page string="Request Data" invisible="not request_data">
+                            <field name="request_data"/>
+                        </page>
+                        <page string="Response Data" invisible="not response_data">
+                            <field name="response_data"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+</odoo>

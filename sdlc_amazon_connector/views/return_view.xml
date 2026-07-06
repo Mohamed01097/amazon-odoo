@@ -1,0 +1,56 @@
+<odoo>
+    <record id="amazon_return_action" model="ir.actions.act_window">
+        <field name="name">Return Reports</field>
+        <field name="res_model">amazon.return.report</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_return_list" model="ir.ui.view">
+        <field name="name">amazon.return.report.list</field>
+        <field name="model">amazon.return.report</field>
+        <field name="arch" type="xml">
+            <list string="Return Reports">
+                <field name="name"/>
+                <field name="report_date"/>
+                <field name="line_count"/>
+                <field name="state"/>
+                <field name="instance_id"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_return_form" model="ir.ui.view">
+        <field name="name">amazon.return.report.form</field>
+        <field name="model">amazon.return.report</field>
+        <field name="arch" type="xml">
+            <form string="Return Report">
+                <header>
+                    <button name="action_download_report" type="object" string="Download Report" class="btn-primary" invisible="state != 'draft'"/>
+                    <button name="action_process_returns" type="object" string="Process Returns" invisible="state != 'downloaded'"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <field name="name"/>
+                        <field name="instance_id"/>
+                        <field name="report_date"/>
+                    </group>
+                    <field name="line_ids">
+                        <list>
+                            <field name="amazon_order_id"/>
+                            <field name="sku"/>
+                            <field name="asin"/>
+                            <field name="product_name"/>
+                            <field name="quantity"/>
+                            <field name="return_date"/>
+                            <field name="return_reason"/>
+                            <field name="status"/>
+                            <field name="state"/>
+                            <field name="credit_note_id"/>
+                        </list>
+                    </field>
+                </sheet>
+            </form>
+        </field>
+    </record>
+</odoo>

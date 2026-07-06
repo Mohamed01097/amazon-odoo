@@ -1,0 +1,166 @@
+<odoo>
+    <!-- ═══ FBA + FBM Schedulers ═══ -->
+
+    <record id="cron_amazon_import_orders" model="ir.cron">
+        <field name="name">Amazon: Import All Orders (FBM + FBA)</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_import_orders()</field>
+        <field name="interval_number">30</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+    </record>
+
+    <record id="cron_amazon_sync_products" model="ir.cron">
+        <field name="name">Amazon: Sync Products</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_sync_products()</field>
+        <field name="interval_number">6</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+    </record>
+
+    <record id="cron_amazon_update_prices" model="ir.cron">
+        <field name="name">Amazon: Update Product Prices</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_update_prices()</field>
+        <field name="interval_number">4</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+    </record>
+
+    <record id="cron_amazon_import_settlement" model="ir.cron">
+        <field name="name">Amazon: Import Settlement Reports</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_import_settlement_reports()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="active">False</field>
+    </record>
+
+    <record id="cron_amazon_check_canceled" model="ir.cron">
+        <field name="name">Amazon: Check Canceled Orders</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_check_canceled_orders()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+    </record>
+
+    <!-- ═══ FBM Schedulers ═══ -->
+
+    <record id="cron_amazon_import_fbm_orders" model="ir.cron">
+        <field name="name">Amazon: Import FBM Orders</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_import_fbm_orders()</field>
+        <field name="interval_number">15</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+    </record>
+
+    <record id="cron_amazon_export_stock" model="ir.cron">
+        <field name="name">Amazon: Export Stock Levels</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_export_stock()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+    </record>
+
+    <record id="cron_amazon_update_fbm_status" model="ir.cron">
+        <field name="name">Amazon: Update FBM Order Status</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_update_fbm_order_status()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+    </record>
+
+    <!-- ═══ FBA Schedulers ═══ -->
+
+    <record id="cron_amazon_import_removal" model="ir.cron">
+        <field name="name">Amazon: Import Removal Orders</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_import_removal_orders()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="active">False</field>
+    </record>
+
+    <record id="cron_amazon_pull_stock" model="ir.cron">
+        <field name="name">Amazon: Pull Stock Levels</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_pull_stock()</field>
+        <field name="interval_number">4</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+    </record>
+
+    <record id="cron_amazon_pull_prices" model="ir.cron">
+        <field name="name">Amazon: Pull Prices</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_pull_prices()</field>
+        <field name="interval_number">6</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+    </record>
+
+    <record id="cron_amazon_full_sync" model="ir.cron">
+        <field name="name">Amazon: Full Bidirectional Sync</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_full_sync()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+    </record>
+
+    <!-- ═══ Master Auto-Sync Scheduler ═══ -->
+
+    <record id="cron_amazon_master_scheduler" model="ir.cron">
+        <field name="name">Amazon: Master Auto-Sync Scheduler</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_master_scheduler()</field>
+        <field name="interval_number">15</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="priority">1</field>
+    </record>
+
+    <!-- ═══ AI + Smart Alert Schedulers ═══ -->
+
+    <record id="cron_amazon_smart_alerts" model="ir.cron">
+        <field name="name">Amazon: Smart Alert Scan</field>
+        <field name="model_id" ref="model_amazon_smart_alert"/>
+        <field name="state">code</field>
+        <field name="code">model.run_alert_scan()</field>
+        <field name="interval_number">4</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+    </record>
+
+    <record id="cron_amazon_health_scores" model="ir.cron">
+        <field name="name">Amazon: Calculate Product Health Scores</field>
+        <field name="model_id" ref="model_amazon_product_health"/>
+        <field name="state">code</field>
+        <field name="code">
+for inst in env['amazon.instance'].search([]):
+    model.calculate_all_health_scores(inst.id)
+</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="active">False</field>
+    </record>
+
+</odoo>

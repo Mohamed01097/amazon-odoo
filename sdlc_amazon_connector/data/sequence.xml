@@ -1,0 +1,57 @@
+<odoo>
+    <record id="seq_amazon_settlement_report" model="ir.sequence">
+        <field name="name">Amazon Settlement Report</field>
+        <field name="code">amazon.settlement.report</field>
+        <field name="prefix">SETTLE/</field>
+        <field name="padding">4</field>
+    </record>
+
+    <record id="seq_amazon_return_report" model="ir.sequence">
+        <field name="name">Amazon Return Report</field>
+        <field name="code">amazon.return.report</field>
+        <field name="prefix">RET/</field>
+        <field name="padding">4</field>
+    </record>
+
+    <record id="seq_amazon_removal_order" model="ir.sequence">
+        <field name="name">Amazon Removal Order</field>
+        <field name="code">amazon.removal.order</field>
+        <field name="prefix">REM/</field>
+        <field name="padding">4</field>
+    </record>
+
+    <record id="seq_amazon_inbound_shipment" model="ir.sequence">
+        <field name="name">Amazon Inbound Shipment</field>
+        <field name="code">amazon.inbound.shipment</field>
+        <field name="prefix">INB/</field>
+        <field name="padding">4</field>
+    </record>
+
+    <record id="seq_amazon_fba_inventory_report" model="ir.sequence">
+        <field name="name">Amazon FBA Inventory Report</field>
+        <field name="code">amazon.fba.inventory.report</field>
+        <field name="prefix">FBAINV/</field>
+        <field name="padding">4</field>
+    </record>
+
+    <record id="seq_amazon_rating_report" model="ir.sequence">
+        <field name="name">Amazon Rating Report</field>
+        <field name="code">amazon.rating.report</field>
+        <field name="prefix">RATE/</field>
+        <field name="padding">4</field>
+    </record>
+
+    <record id="seq_amazon_vcs_tax_report" model="ir.sequence">
+        <field name="name">Amazon VCS Tax Report</field>
+        <field name="code">amazon.vcs.tax.report</field>
+        <field name="prefix">VCS/</field>
+        <field name="padding">4</field>
+    </record>
+
+    <record id="seq_amazon_outbound_order" model="ir.sequence">
+        <field name="name">Amazon MCF Outbound Order</field>
+        <field name="code">amazon.outbound.order</field>
+        <field name="prefix">MCF/</field>
+        <field name="padding">4</field>
+    </record>
+</odoo>
