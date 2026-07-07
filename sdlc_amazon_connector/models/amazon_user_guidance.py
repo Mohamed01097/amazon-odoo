@@ -82,12 +82,11 @@ class AmazonUserGuidance(models.TransientModel):
                 </div>
 
                 <div style="background: #FFF0F5; border-radius: 10px; padding: 20px; margin-bottom: 16px; border-left: 4px solid #C62828;">
-                    <h3 style="margin-top: 0; color: #C62828;">Step 3 &mdash; AWS Access Key &amp; Secret Key (IAM)</h3>
+                    <h3 style="margin-top: 0; color: #C62828;">Step 3 &mdash; AWS Fields Are Optional</h3>
                     <ol style="line-height: 1.8; font-size: 14px;">
-                        <li>Open the <i>AWS IAM Console</i>.</li>
-                        <li>Use the IAM user (or role) you attached to your SP-API app's IAM ARN.</li>
-                        <li>Generate an access key pair. The <b>Access Key</b> starts with <code>AKIA</code> and is 20 chars. The <b>Secret Key</b> is 40 chars (mixed letters, digits, <code>+</code>, <code>/</code>, <code>=</code>).</li>
-                        <li><b>Common mistake</b>: do not swap the two. If your "Access Key" doesn't start with <code>AKIA</code>, you've pasted the wrong value.</li>
+                        <li>Current SP-API requests use the Login With Amazon access token only.</li>
+                        <li><b>AWS Access Key</b> and <b>AWS Secret Key</b> remain on the form only for older records and backward compatibility.</li>
+                        <li>You can leave both AWS fields empty. Test Connection and sync actions do not require them.</li>
                     </ol>
                 </div>
 
@@ -96,7 +95,7 @@ class AmazonUserGuidance(models.TransientModel):
                     <ol style="line-height: 1.8; font-size: 14px;">
                         <li><i>Configuration &rarr; Instances &rarr; New</i>.</li>
                         <li>Give the instance a meaningful <b>Name</b> (e.g. "Acme US Marketplace").</li>
-                        <li>Paste all seven credentials. Optionally set <b>FBA Warehouse</b>, <b>FBM Warehouse</b>, and <b>Default Currency</b> &mdash; these are used by order/stock sync but not by Test Connection.</li>
+                        <li>Paste the required SP-API credentials: <b>Seller ID</b>, <b>Marketplace ID</b>, <b>Refresh Token</b>, <b>Client ID</b>, and <b>Client Secret</b>. Optionally set <b>FBA Warehouse</b>, <b>FBM Warehouse</b>, and <b>Default Currency</b> &mdash; these are used by order/stock sync but not by Test Connection.</li>
                         <li>Click <b>Save manually</b> (the cloud icon).</li>
                         <li>Click <b>Test Connection</b>. A green "Connection successful" notification confirms credentials are valid.</li>
                         <li>Optionally configure AI in the same form: pick a provider, paste its API key, click <b>Test AI Connection</b>.</li>
@@ -110,7 +109,7 @@ class AmazonUserGuidance(models.TransientModel):
 
                 <div style="margin-bottom: 16px; padding: 16px; background: #FFF8F8; border-radius: 8px;">
                     <h4 style="margin: 0 0 8px; color: #C62828;">UserError: Missing required fields: ...</h4>
-                    <p style="font-size: 13px; color: #555; margin: 0;">One of the seven core fields (Seller ID, Marketplace ID, Refresh Token, Client ID, Client Secret, AWS Access Key, AWS Secret Key) is blank or whitespace-only. Fill it and Save before clicking any action button.</p>
+                    <p style="font-size: 13px; color: #555; margin: 0;">One of the required SP-API fields (Seller ID, Marketplace ID, Refresh Token, Client ID, Client Secret) is blank or whitespace-only. Fill it and Save before clicking any action button. AWS Access Key and AWS Secret Key are optional.</p>
                 </div>
 
                 <div style="margin-bottom: 16px; padding: 16px; background: #FFF8F8; border-radius: 8px;">

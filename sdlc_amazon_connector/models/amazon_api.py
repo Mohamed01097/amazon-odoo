@@ -2,17 +2,14 @@
 import base64
 import csv
 import gzip
-import hashlib
-import hmac
 import io
 import json
 import logging
 import time
-from datetime import datetime, timezone
-from urllib.parse import urlencode, urlparse, quote
+from urllib.parse import quote
 
 import requests
-from requests.exceptions import ConnectionError as ReqConnectionError, Timeout, HTTPError
+from requests.exceptions import ConnectionError as ReqConnectionError, Timeout
 
 _logger = logging.getLogger(__name__)
 
@@ -26,14 +23,6 @@ REGION_ENDPOINTS = {
     'eu': 'https://sellingpartnerapi-eu.amazon.com',
     'fe': 'https://sellingpartnerapi-fe.amazon.com',
 }
-
-REGION_AWS_REGION = {
-    'na': 'us-east-1',
-    'eu': 'eu-west-1',
-    'fe': 'us-west-2',
-}
-
-SERVICE = 'execute-api'
 
 # ── Report types ──
 REPORT_MERCHANT_LISTINGS = 'GET_MERCHANT_LISTINGS_ALL_DATA'
@@ -61,122 +50,61 @@ FEED_INVOICE_UPLOAD = 'UPLOAD_VAT_INVOICE'
 class AmazonAPI():
 
     # ══════════════════════════════════════════════════
-    # AWS Signature V4
+    # SP-API requests
     # ══════════════════════════════════════════════════
 
-    def _sign(self, key, msg):
-        return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
+    def _amazon_request(self, instance, access_token, method, path, params=None,
+                        data=None, json_data=None, headers=None, body=None,
+                        raw_body=None, extra_headers=None):
+        """Make an LWA token-authenticated SP-API request.
 
-    def _get_signature_key(self, secret_key, date_stamp, region, service):
-        k_date = self._sign(('AWS4' + secret_key).encode('utf-8'), date_stamp)
-        k_region = self._sign(k_date, region)
-        k_service = self._sign(k_region, service)
-        k_signing = self._sign(k_service, 'aws4_request')
-        return k_signing
-
-    def _signed_request(self, instance, access_token, method, url, params=None, body=None, raw_body=None, extra_headers=None):
-        """Make an AWS Sig V4 signed request to SP-API."""
-        parsed = urlparse(url)
-        host = parsed.hostname
-        path = parsed.path or '/'
-        aws_region = REGION_AWS_REGION.get(instance.region, 'us-west-2')
-
-        now = datetime.now(timezone.utc)
-        amz_date = now.strftime('%Y%m%dT%H%M%SZ')
-        date_stamp = now.strftime('%Y%m%d')
-
-        if params:
-            canonical_querystring = urlencode(sorted(params.items()), quote_via=quote)
-        else:
-            canonical_querystring = ''
-
-        if raw_body is not None:
-            payload = raw_body
-        elif body is not None:
-            payload = json.dumps(body)
-        else:
-            payload = ''
-        payload_bytes = payload.encode('utf-8') if isinstance(payload, str) else payload
-        payload_hash = hashlib.sha256(payload_bytes).hexdigest()
-
-        headers = {
-            'host': host,
-            'x-amz-access-token': access_token,
-            'x-amz-date': amz_date,
-            'x-amz-content-sha256': payload_hash,
-        }
-        if body is not None:
-            headers['content-type'] = 'application/json'
-        if extra_headers:
-            for k, v in extra_headers.items():
-                headers[k.lower()] = v
-
-        signed_header_keys = sorted(headers.keys())
-        canonical_headers = ''.join('%s:%s\n' % (k, headers[k]) for k in signed_header_keys)
-        signed_headers = ';'.join(signed_header_keys)
-
-        canonical_request = '\n'.join([
-            method.upper(), path, canonical_querystring,
-            canonical_headers, signed_headers, payload_hash,
-        ])
-
-        credential_scope = '%s/%s/%s/aws4_request' % (date_stamp, aws_region, SERVICE)
-        string_to_sign = '\n'.join([
-            'AWS4-HMAC-SHA256', amz_date, credential_scope,
-            hashlib.sha256(canonical_request.encode('utf-8')).hexdigest(),
-        ])
-
-        signing_key = self._get_signature_key(
-            instance.aws_secret_key, date_stamp, aws_region, SERVICE
+        Amazon SP-API no longer needs IAM credentials or AWS Signature V4 for
+        these calls. The LWA access token is sent in ``x-amz-access-token``.
+        """
+        endpoint = self._get_endpoint(instance)
+        url = path if str(path).startswith(('http://', 'https://')) else "%s/%s" % (
+            endpoint.rstrip('/'), str(path).lstrip('/'),
         )
-        signature = hmac.new(signing_key, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
-
-        authorization = (
-            'AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s'
-            % (instance.aws_access_key, credential_scope, signed_headers, signature)
-        )
-
         request_headers = {
             'x-amz-access-token': access_token,
-            'x-amz-date': amz_date,
-            'x-amz-content-sha256': payload_hash,
-            'Authorization': authorization,
-            'User-Agent': 'SDLC-Amazon-Connector/1.0',
+            'content-type': 'application/json',
+            'accept': 'application/json',
+            'user-agent': 'Odoo Amazon Connector / Odoo 19',
         }
-        if body is not None:
-            request_headers['Content-Type'] = 'application/json'
+        if body is not None and json_data is None:
+            json_data = body
+        if raw_body is not None:
+            data = raw_body
+            json_data = None
         if extra_headers:
             request_headers.update(extra_headers)
+        if headers:
+            request_headers.update(headers)
 
-        full_url = url
-        if canonical_querystring:
-            full_url = '%s?%s' % (url, canonical_querystring)
-
-        send_data = payload_bytes if raw_body is not None else (payload if body is not None else None)
-
-        http_methods = {
-            'GET': requests.get,
-            'POST': requests.post,
-            'PUT': requests.put,
-            'PATCH': requests.patch,
-            'DELETE': requests.delete,
-        }
-        http_func = http_methods.get(method.upper())
-        if not http_func:
+        method = method.upper()
+        if method not in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE'):
             raise ValueError("Unsupported HTTP method: %s" % method)
 
         # Retry with exponential backoff for transient failures
         last_exc = None
+        response = None
         for attempt in range(MAX_RETRIES + 1):
             try:
-                kwargs = {'headers': request_headers, 'timeout': 30}
-                if method.upper() in ('POST', 'PUT', 'PATCH') and send_data is not None:
-                    kwargs['data'] = send_data
-                response = http_func(full_url, **kwargs)
+                kwargs = {
+                    'headers': request_headers,
+                    'params': params,
+                    'timeout': 30,
+                }
+                if method in ('POST', 'PUT', 'PATCH'):
+                    if json_data is not None:
+                        kwargs['json'] = json_data
+                    elif data is not None:
+                        kwargs['data'] = data
+                response = requests.request(method, url, **kwargs)
 
                 # 400 = validation error with useful JSON — return as-is
                 if response.status_code == 400:
-                    _logger.warning("Amazon %s %s returned 400: %s", method, path, response.text[:500])
+                    _logger.warning("Amazon %s %s returned 400: %s", method, url, response.text[:500])
                     return response
 
                 # 403 = authorization failure. Amazon returns the real reason
@@ -184,7 +112,7 @@ class AmazonAPI():
                 # the JSON body. Log it so the cause is visible — otherwise the
                 # caller only sees a bare "403 Client Error".
                 if response.status_code == 403:
-                    _logger.warning("Amazon %s %s returned 403: %s", method, path, response.text[:500])
+                    _logger.warning("Amazon %s %s returned 403: %s", method, url, response.text[:500])
 
                 # Retryable server errors (429, 5xx)
                 if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
@@ -198,7 +126,7 @@ class AmazonAPI():
                             pass
                     _logger.warning(
                         "Amazon %s %s returned %s — retrying in %.1fs (attempt %d/%d)",
-                        method, path, response.status_code, wait, attempt + 1, MAX_RETRIES,
+                        method, url, response.status_code, wait, attempt + 1, MAX_RETRIES,
                     )
                     time.sleep(wait)
                     continue
@@ -212,7 +140,7 @@ class AmazonAPI():
                     wait = RETRY_BACKOFF_BASE * (2 ** attempt)
                     _logger.warning(
                         "Amazon %s %s network error: %s — retrying in %.1fs (attempt %d/%d)",
-                        method, path, exc, wait, attempt + 1, MAX_RETRIES,
+                        method, url, exc, wait, attempt + 1, MAX_RETRIES,
                     )
                     time.sleep(wait)
                     continue
@@ -224,6 +152,20 @@ class AmazonAPI():
         if last_exc:
             raise last_exc
         return response
+
+    def _signed_request(self, instance, access_token, method, url, params=None,
+                        body=None, raw_body=None, extra_headers=None):
+        """Backward-compatible alias for older call sites.
+
+        The implementation is intentionally token-only; no AWS SigV4
+        Authorization header is generated.
+        """
+        data = raw_body
+        json_data = None if raw_body is not None else body
+        return self._amazon_request(
+            instance, access_token, method, url, params=params,
+            data=data, json_data=json_data, headers=extra_headers,
+        )
 
     # ══════════════════════════════════════════════════
     # Helpers
@@ -242,13 +184,27 @@ class AmazonAPI():
             "client_secret": instance.client_secret,
         }
         response = requests.post(url, data=payload, timeout=30)
-        response.raise_for_status()
         try:
             data = response.json()
         except ValueError as exc:
+            response.raise_for_status()
             raise requests.exceptions.RequestException(
                 "Amazon OAuth endpoint returned a non-JSON response."
             ) from exc
+        if not response.ok:
+            error = data.get("error") or "oauth_error"
+            description = data.get("error_description") or data.get("message") or response.text
+            raise requests.exceptions.HTTPError(
+                "Amazon OAuth error %s: %s" % (error, description),
+                response=response,
+            )
+        response.raise_for_status()
+        if not data.get("access_token"):
+            error = data.get("error") or "missing_access_token"
+            description = data.get("error_description") or data.get("message") or "No access token returned."
+            raise requests.exceptions.RequestException(
+                "Amazon OAuth error %s: %s" % (error, description)
+            )
         return data.get("access_token")
 
     # ══════════════════════════════════════════════════
@@ -266,19 +222,19 @@ class AmazonAPI():
             body["dataStartTime"] = start_date
         if end_date:
             body["dataEndTime"] = end_date
-        resp = self._signed_request(instance, access_token, 'POST', url, body=body)
+        resp = self._amazon_request(instance, access_token, 'POST', url, body=body)
         return resp.json()
 
     def get_report(self, instance, access_token, report_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/reports/2021-06-30/reports/{report_id}"
-        resp = self._signed_request(instance, access_token, 'GET', url)
+        resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
     def get_report_document(self, instance, access_token, document_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/reports/2021-06-30/documents/{document_id}"
-        resp = self._signed_request(instance, access_token, 'GET', url)
+        resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
     def download_report_document(self, document_url, compression=None, encryption=None):
@@ -445,7 +401,7 @@ class AmazonAPI():
         seen_ids = set()
         out = []
         for _ in range(max_pages):
-            resp = self._signed_request(instance, access_token, 'GET', url, params=params)
+            resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
             data = resp.json()
             for rpt in data.get('reports', []) or []:
                 rid = rpt.get('reportId')
@@ -476,25 +432,25 @@ class AmazonAPI():
             params["FulfillmentChannels"] = fulfillment_channels
         if next_token:
             params["NextToken"] = next_token
-        resp = self._signed_request(instance, access_token, 'GET', url, params=params)
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return resp.json()
 
     def get_order(self, instance, access_token, order_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/orders/v0/orders/{order_id}"
-        resp = self._signed_request(instance, access_token, 'GET', url)
+        resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
     def get_order_items(self, instance, access_token, order_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/orders/v0/orders/{order_id}/orderItems"
-        resp = self._signed_request(instance, access_token, 'GET', url)
+        resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
     def get_order_address(self, instance, access_token, order_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/orders/v0/orders/{order_id}/address"
-        resp = self._signed_request(instance, access_token, 'GET', url)
+        resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
     # ══════════════════════════════════════════════════
@@ -505,7 +461,7 @@ class AmazonAPI():
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/feeds/2021-06-30/documents"
         body = {"contentType": content_type}
-        resp = self._signed_request(instance, access_token, 'POST', url, body=body)
+        resp = self._amazon_request(instance, access_token, 'POST', url, body=body)
         return resp.json()
 
     def upload_feed_document(self, upload_url, content, content_type='text/xml; charset=UTF-8'):
@@ -522,13 +478,13 @@ class AmazonAPI():
             "marketplaceIds": [instance.marketplace_id],
             "inputFeedDocumentId": document_id,
         }
-        resp = self._signed_request(instance, access_token, 'POST', url, body=body)
+        resp = self._amazon_request(instance, access_token, 'POST', url, body=body)
         return resp.json()
 
     def get_feed(self, instance, access_token, feed_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/feeds/2021-06-30/feeds/{feed_id}"
-        resp = self._signed_request(instance, access_token, 'GET', url)
+        resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
     def submit_feed(self, instance, access_token, feed_type, content, content_type='text/xml; charset=UTF-8'):
@@ -696,7 +652,7 @@ class AmazonAPI():
             params["identifiersType"] = id_type
         if next_token:
             params["pageToken"] = next_token
-        resp = self._signed_request(instance, access_token, 'GET', url, params=params)
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return resp.json()
 
     # ══════════════════════════════════════════════════
@@ -711,7 +667,7 @@ class AmazonAPI():
             "marketplaceIds": instance.marketplace_id,
             "keywords": keywords,
         }
-        resp = self._signed_request(instance, access_token, 'GET', url, params=params)
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return resp.json()
 
     def get_product_type_definition(self, instance, access_token, product_type):
@@ -723,7 +679,7 @@ class AmazonAPI():
             "requirements": "LISTING",
             "locale": "en_US",
         }
-        resp = self._signed_request(instance, access_token, 'GET', url, params=params)
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return resp.json()
 
     # ══════════════════════════════════════════════════
@@ -738,7 +694,7 @@ class AmazonAPI():
             "marketplaceIds": instance.marketplace_id,
             "includedData": "summaries,attributes,fulfillmentAvailability,issues,offers",
         }
-        resp = self._signed_request(instance, access_token, 'GET', url, params=params)
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         data = resp.json()
         _logger.info("Amazon GET listing %s response keys: %s", sku, list(data.keys()))
         return data
@@ -753,9 +709,9 @@ class AmazonAPI():
         _logger.info("Amazon %s listing %s — body keys: %s", method, sku,
                       list(body.keys()) if body else 'none')
 
-        # Make the signed request but handle HTTP errors ourselves
+        # Make the token-authenticated request but handle HTTP errors ourselves.
         try:
-            resp = self._signed_request(instance, access_token, method, url, params=params, body=body)
+            resp = self._amazon_request(instance, access_token, method, url, params=params, body=body)
         except requests.exceptions.HTTPError as exc:
             # Try to extract JSON error from response body
             if exc.response is not None:
@@ -798,19 +754,19 @@ class AmazonAPI():
     def create_fulfillment_order(self, instance, access_token, body):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/fba/outbound/2020-07-01/fulfillmentOrders"
-        resp = self._signed_request(instance, access_token, 'POST', url, body=body)
+        resp = self._amazon_request(instance, access_token, 'POST', url, body=body)
         return resp.json()
 
     def get_fulfillment_order(self, instance, access_token, fulfillment_order_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/fba/outbound/2020-07-01/fulfillmentOrders/{fulfillment_order_id}"
-        resp = self._signed_request(instance, access_token, 'GET', url)
+        resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
     def cancel_fulfillment_order(self, instance, access_token, fulfillment_order_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/fba/outbound/2020-07-01/fulfillmentOrders/{fulfillment_order_id}/cancel"
-        resp = self._signed_request(instance, access_token, 'PUT', url, body={})
+        resp = self._amazon_request(instance, access_token, 'PUT', url, body={})
         return resp.json()
 
     # ══════════════════════════════════════════════════
@@ -827,7 +783,7 @@ class AmazonAPI():
         }
         if next_token:
             params["nextToken"] = next_token
-        resp = self._signed_request(instance, access_token, 'GET', url, params=params)
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return resp.json()
 
     # ══════════════════════════════════════════════════
@@ -837,25 +793,25 @@ class AmazonAPI():
     def create_inbound_plan(self, instance, access_token, body):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans"
-        resp = self._signed_request(instance, access_token, 'POST', url, body=body)
+        resp = self._amazon_request(instance, access_token, 'POST', url, body=body)
         return resp.json()
 
     def get_inbound_plan(self, instance, access_token, plan_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
-        resp = self._signed_request(instance, access_token, 'GET', url)
+        resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
     def get_shipment(self, instance, access_token, plan_id, shipment_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/shipments/{shipment_id}"
-        resp = self._signed_request(instance, access_token, 'GET', url)
+        resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
     def get_shipment_items(self, instance, access_token, plan_id, shipment_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/shipments/{shipment_id}/items"
-        resp = self._signed_request(instance, access_token, 'GET', url)
+        resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
     # ══════════════════════════════════════════════════
@@ -870,5 +826,5 @@ class AmazonAPI():
             "Asins": asin,
             "ItemType": "Asin",
         }
-        resp = self._signed_request(instance, access_token, 'GET', url, params=params)
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return resp.json()

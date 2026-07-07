@@ -188,8 +188,6 @@ class AmazonInstance(models.Model):
             'refresh_token': 'Refresh Token',
             'client_id': 'Client ID',
             'client_secret': 'Client Secret',
-            'aws_access_key': 'AWS Access Key',
-            'aws_secret_key': 'AWS Secret Key',
             'seller_id': 'Seller ID',
             'marketplace_id': 'Marketplace ID',
         }
@@ -210,8 +208,14 @@ class AmazonInstance(models.Model):
             raise UserError("Amazon OAuth request timed out.") from exc
         except requests.exceptions.HTTPError as exc:
             if exc.response is not None:
-                body = (exc.response.text or "").strip()[:1200]
-                raise UserError("Amazon HTTP %s: %s" % (exc.response.status_code, body)) from exc
+                try:
+                    data = exc.response.json()
+                    error = data.get('error') or data.get('code') or 'Amazon error'
+                    description = data.get('error_description') or data.get('message') or data.get('details') or exc.response.text
+                    body = "%s: %s" % (error, description)
+                except ValueError:
+                    body = (exc.response.text or str(exc)).strip()
+                raise UserError("Amazon HTTP %s: %s" % (exc.response.status_code, body[:1200])) from exc
             raise UserError("Amazon HTTP error: %s" % exc) from exc
         except Exception as exc:
             raise UserError("Connection failed: %s" % exc) from exc
@@ -1002,14 +1006,8 @@ class AmazonInstance(models.Model):
             upload_resp = req.put(upload_url, data=pdf_content, headers={'Content-Type': 'application/pdf'}, timeout=60)
             upload_resp.raise_for_status()
 
-            # Submit the feed referencing the document
-            amazon_order_ref = invoice.amazon_order_ref or ''
-            feed_body = {
-                'feedType': FEED_INVOICE_UPLOAD,
-                'marketplaceIds': [self.marketplace_id],
-                'inputFeedDocumentId': doc_id,
-            }
-            feed_result = api.create_feed(self, access_token, feed_body)
+            # Submit the feed referencing the document.
+            feed_result = api.create_feed(self, access_token, FEED_INVOICE_UPLOAD, doc_id)
             feed_id = feed_result.get('feedId', '')
 
             _logger.info("Invoice %s uploaded to Amazon — feed ID: %s", invoice.name, feed_id)

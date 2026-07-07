@@ -51,7 +51,7 @@
         TECHNICAL:
         - API retry with exponential backoff (429, 5xx)
         - Comprehensive sync logging for all operations
-        - AWS Signature V4 authentication
+        - Login With Amazon (LWA) token authentication
         - Rate-limit aware request handling
         - 25+ marketplace support (NA, EU, Far East)
     """,
