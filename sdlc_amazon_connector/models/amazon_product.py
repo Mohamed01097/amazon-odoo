@@ -47,7 +47,10 @@ class AmazonProduct(models.Model):
     ], string='Product ID Type', default='EAN')
     no_barcode = fields.Boolean('No Product ID (GTIN Exemption)')
     asin = fields.Char('ASIN')
-    sku = fields.Char('SKU')
+    sku = fields.Char(
+        'Amazon SKU',
+        help="Amazon seller SKU. For automatic mapping, this must match the Odoo product Internal Reference.",
+    )
 
     # Variations
     has_variations = fields.Boolean('This product has variations')
@@ -315,8 +318,8 @@ class AmazonProduct(models.Model):
     skip_offer = fields.Boolean('Let me skip the offer data and add it later', default=False)
 
     # SKU & Quantity
-    amazon_price = fields.Float('Your Price')
-    amazon_qty = fields.Float('Quantity')
+    amazon_price = fields.Float('Amazon Price', help="Price imported from Amazon. Odoo remains the master after setup.")
+    amazon_qty = fields.Float('Amazon Quantity', help="Quantity imported from Amazon for reference/reconciliation only.")
     sale_price = fields.Float('Sale Price')
     sale_start_date = fields.Date('Sale Start Date')
     sale_end_date = fields.Date('Sale End Date')
@@ -414,7 +417,11 @@ class AmazonProduct(models.Model):
     # Odoo Mapping & Sync
     # ══════════════════════════════════════════════════
     instance_id = fields.Many2one('amazon.instance', string='Amazon Instance', required=True, ondelete='cascade')
-    odoo_product_id = fields.Many2one('product.product', string='Odoo Product')
+    odoo_product_id = fields.Many2one(
+        'product.product',
+        string='Odoo Product',
+        help="ERP product linked to this Amazon marketplace record. Amazon SKU should match the product Internal Reference.",
+    )
     last_sync_date = fields.Datetime('Last Synced')
     status = fields.Selection([
         ('Active', 'Active'),
@@ -442,7 +449,7 @@ class AmazonProduct(models.Model):
         self.ensure_one()
         instance = self.instance_id
         mp = instance.marketplace_id
-        currency = instance.default_currency_id.name if instance.default_currency_id else "INR"
+        currency = instance._get_currency_code()
 
         # Use Amazon fields primarily, Odoo as fallback
         odoo = self.odoo_product_id
@@ -841,39 +848,220 @@ class AmazonProduct(models.Model):
     # Actions
     # ══════════════════════════════════════════════════
 
-    def action_map_to_odoo_product(self):
-        """Create or link an Odoo product."""
+    def _find_odoo_products_by_sku(self):
+        """Return all Odoo products whose Internal Reference matches Amazon SKU."""
         self.ensure_one()
-        if self.odoo_product_id:
-            raise UserError("Already mapped to: %s" % self.odoo_product_id.display_name)
+        sku = (self.sku or '').strip()
+        if not sku:
+            return self.env['product.product']
+        return self.env['product.product'].with_context(active_test=False).search([
+            ('default_code', '=', sku),
+        ])
 
-        product = self.env['product.product'].search([
-            '|', ('default_code', '=', self.sku), ('barcode', '=', self.barcode or self.asin)
-        ], limit=1)
-        if not product:
-            vals = {
-                'name': self.name,
-                'default_code': self.sku,
-                'list_price': self.amazon_price or 0.0,
-                'type': 'consu',
-            }
-            if self.description:
-                vals['description_sale'] = self.description
-            if self.barcode:
-                vals['barcode'] = self.barcode
-            product = self.env['product.product'].create(vals)
+    def _get_product_company(self):
+        self.ensure_one()
+        return self.instance_id.company_id or self.env.company
 
-        self.odoo_product_id = product.id
+    def _prepare_odoo_template_vals(self):
+        self.ensure_one()
+        ProductTemplate = self.env['product.template']
+        sku = (self.sku or '').strip()
+        vals = {'name': (self.name or sku).strip()}
+        if 'sale_ok' in ProductTemplate._fields:
+            vals['sale_ok'] = True
+        if 'purchase_ok' in ProductTemplate._fields:
+            vals['purchase_ok'] = True
+        if 'default_code' in ProductTemplate._fields:
+            vals['default_code'] = sku
+        if 'list_price' in ProductTemplate._fields:
+            vals['list_price'] = self.amazon_price or 0.0
+        if 'description_sale' in ProductTemplate._fields and self.description:
+            vals['description_sale'] = self.description
+        if 'company_id' in ProductTemplate._fields:
+            vals['company_id'] = self._get_product_company().id
+        if 'detailed_type' in ProductTemplate._fields:
+            vals['detailed_type'] = 'product'
+        elif 'type' in ProductTemplate._fields:
+            vals['type'] = 'product'
+        return vals
+
+    def _create_odoo_product_from_amazon(self):
+        """Create a stockable Odoo product from this Amazon marketplace record."""
+        self.ensure_one()
+        template = self.env['product.template'].create(self._prepare_odoo_template_vals())
+        product = template.product_variant_id
+        sku = (self.sku or '').strip()
+        if sku and 'default_code' in product._fields and product.default_code != sku:
+            product.default_code = sku
+        return product
+
+    def _update_odoo_price_from_amazon(self, product):
+        self.ensure_one()
+        price = self.amazon_price or 0.0
+        template = product.product_tmpl_id
+        if 'list_price' in template._fields:
+            template.list_price = price
+        elif 'list_price' in product._fields:
+            product.list_price = price
+
+    @staticmethod
+    def _product_setup_message(stats):
+        return (
+            "%(processed)d processed, %(linked)d linked, %(created)d created, "
+            "%(price_updated)d price updated, %(skipped)d skipped."
+        ) % stats
+
+    def _log_product_setup(self, operation, stats_by_instance):
+        for data in stats_by_instance.values():
+            errors = data['errors']
+            summary = self._product_setup_message(data)
+            log = self.env['amazon.sync.log'].log_start(
+                data['instance'], operation,
+                request_data={'record_ids': data['record_ids'][:100]},
+            )
+            if errors:
+                log.log_partial(
+                    summary=summary,
+                    records_processed=data['processed'],
+                    records_created=data['created'],
+                    records_updated=data['linked'] + data['price_updated'],
+                    records_failed=data['skipped'],
+                    error_message="\n".join(errors[:50]),
+                )
+            else:
+                log.log_success(
+                    summary=summary,
+                    records_processed=data['processed'],
+                    records_created=data['created'],
+                    records_updated=data['linked'] + data['price_updated'],
+                    response_data={
+                        'linked': data['linked'],
+                        'created': data['created'],
+                        'price_updated': data['price_updated'],
+                        'skipped': data['skipped'],
+                    },
+                )
+
+    def _setup_odoo_products(self, create_missing=False, update_prices_from_amazon=False):
+        """Link by SKU, and optionally create missing Odoo products.
+
+        Manual setup uses this helper; initial product sync can also create
+        missing Odoo products when Amazon is the starting catalog.
+        """
+        stats = {
+            'processed': 0,
+            'linked': 0,
+            'created': 0,
+            'price_updated': 0,
+            'skipped': 0,
+            'errors': [],
+        }
+        stats_by_instance = {}
+
+        def _instance_stats(product):
+            instance = product.instance_id
+            data = stats_by_instance.setdefault(instance.id, {
+                'instance': instance,
+                'record_ids': [],
+                'processed': 0,
+                'linked': 0,
+                'created': 0,
+                'price_updated': 0,
+                'skipped': 0,
+                'errors': [],
+            })
+            data['record_ids'].append(product.id)
+            return data
+
+        for rec in self:
+            stats['processed'] += 1
+            inst_stats = _instance_stats(rec)
+            inst_stats['processed'] += 1
+
+            if rec.odoo_product_id:
+                if update_prices_from_amazon:
+                    rec._update_odoo_price_from_amazon(rec.odoo_product_id)
+                    stats['price_updated'] += 1
+                    inst_stats['price_updated'] += 1
+                else:
+                    stats['skipped'] += 1
+                    inst_stats['skipped'] += 1
+                continue
+
+            sku = (rec.sku or '').strip()
+            if not sku:
+                msg = "%s has no Amazon SKU. Cannot map or create an Odoo product." % (rec.display_name or rec.name)
+                stats['errors'].append(msg)
+                inst_stats['errors'].append(msg)
+                stats['skipped'] += 1
+                inst_stats['skipped'] += 1
+                continue
+
+            matches = rec._find_odoo_products_by_sku()
+            if len(matches) > 1:
+                msg = "SKU %s matches multiple Odoo products. Fix duplicate Internal References before mapping." % sku
+                stats['errors'].append(msg)
+                inst_stats['errors'].append(msg)
+                stats['skipped'] += 1
+                inst_stats['skipped'] += 1
+                continue
+
+            if len(matches) == 1:
+                rec.odoo_product_id = matches.id
+                stats['linked'] += 1
+                inst_stats['linked'] += 1
+                if update_prices_from_amazon:
+                    rec._update_odoo_price_from_amazon(matches)
+                    stats['price_updated'] += 1
+                    inst_stats['price_updated'] += 1
+                continue
+
+            if not create_missing:
+                stats['skipped'] += 1
+                inst_stats['skipped'] += 1
+                continue
+
+            product = rec._create_odoo_product_from_amazon()
+            rec.odoo_product_id = product.id
+            stats['created'] += 1
+            inst_stats['created'] += 1
+
+        operation = 'product_create' if create_missing else 'product_mapping'
+        if stats_by_instance:
+            self._log_product_setup(operation, stats_by_instance)
+
+        message = self._product_setup_message(stats)
+        if stats['errors']:
+            message += " %s" % " ".join(stats['errors'][:5])
+
+        if stats['errors'] and not (stats['linked'] or stats['created'] or stats['price_updated']):
+            raise UserError(message)
+
+        has_warning = bool(stats['errors']) or (
+            stats['skipped'] and not (stats['linked'] or stats['created'] or stats['price_updated'])
+        )
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
             "params": {
-                "title": "Product Mapped",
-                "message": "Mapped to: %s" % product.display_name,
-                "type": "success",
-                "sticky": False,
+                "title": "Odoo Product Setup",
+                "message": message,
+                "type": "warning" if has_warning else "success",
+                "sticky": bool(stats['errors']),
             },
         }
+
+    def action_link_to_odoo_by_sku(self):
+        """Link selected Amazon products to existing Odoo products by SKU/default_code."""
+        return self._setup_odoo_products(create_missing=False)
+
+    def action_create_odoo_product(self):
+        """Create missing Odoo products for selected Amazon products."""
+        return self._setup_odoo_products(create_missing=True)
+
+    def action_map_to_odoo_product(self):
+        """Backward-compatible form button: link existing products by SKU only."""
+        return self.action_link_to_odoo_by_sku()
 
     # ══════════════════════════════════════════════════
     # AI Auto-Fill
@@ -950,7 +1138,7 @@ class AmazonProduct(models.Model):
 
     def _get_currency_name(self):
         inst = self.instance_id
-        return inst.default_currency_id.name if inst and inst.default_currency_id else 'INR'
+        return inst._get_currency_code() if inst else self.env.company.currency_id.name
 
     # ══════════════════════════════════════════════════
     # 1. AI Product Listing Generator
@@ -1745,8 +1933,9 @@ Rules:
             resp_text = ''
             status_code = '?'
             if exc.response is not None:
-                resp_text = exc.response.text[:1500]
+                resp_text = exc.response.text
                 status_code = exc.response.status_code
+            diagnostic = getattr(exc, 'amazon_diagnostic', None) or AmazonAPI.format_exception(exc)
 
             # AI Error Fixer: analyze and suggest fix
             ai_fix = self._ai_analyze_error(
@@ -1760,10 +1949,10 @@ Rules:
                     fix_msg += "\nAuto-applied fixes: %s" % ", ".join(ai_fix['applied_fixes'])
                 fix_msg += "\nSuggested fix: %s" % ai_fix.get('fix_description', '')
 
-            log.log_fail("HTTP %s: %s" % (status_code, resp_text[:500]))
+            log.log_fail(diagnostic)
             raise UserError(
-                "Amazon rejected the request (HTTP %s):\n\n%s%s" %
-                (status_code, resp_text, fix_msg)
+                "Amazon rejected the request:\n\n%s%s" %
+                (diagnostic, fix_msg)
             ) from exc
         except Exception as exc:
             log.log_fail(str(exc))
@@ -1872,15 +2061,24 @@ Rules:
             log.log_fail(str(exc))
             raise UserError("Failed to update listing: %s" % exc) from exc
 
-        # Also push stock for FBM
-        if self.fulfillment_channel != 'AFN' and self.odoo_product_id:
+        # Also push stock for FBM. Never send FBA/AFN stock as MFN inventory.
+        if self.fulfillment_channel == 'MFN' and self.odoo_product_id:
             try:
-                from .amazon_api import FEED_POST_INVENTORY
-                qty = max(0, int(self.odoo_product_id.qty_available))
-                xml = api.build_inventory_feed_xml([{'sku': self.sku, 'quantity': qty}])
-                api.submit_feed(self.instance_id, access_token, FEED_POST_INVENTORY, xml)
+                from .amazon_api import FEED_JSON_LISTINGS
+                qty = self.instance_id._get_stock_qty_for_amazon_export(self.odoo_product_id)
+                content = api.build_inventory_json_feed(self.instance_id, [{
+                    'sku': self.sku,
+                    'quantity': qty,
+                    'product_type': self.product_type or 'PRODUCT',
+                }])
+                api.submit_feed(
+                    self.instance_id, access_token, FEED_JSON_LISTINGS, content,
+                    content_type='application/json; charset=UTF-8',
+                )
             except Exception as exc:
                 _logger.warning("Stock update failed for %s: %s", self.sku, exc)
+        elif self.fulfillment_channel == 'AFN':
+            _logger.info("Skipping MFN stock feed for FBA/AFN product %s.", self.sku)
 
         self.last_sync_date = fields.Datetime.now()
 

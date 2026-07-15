@@ -20,6 +20,7 @@ access_amazon_vcs_tax_report_line,amazon.vcs.tax.report.line,model_amazon_vcs_ta
 access_amazon_outbound_order,amazon.outbound.order,model_amazon_outbound_order,,1,1,1,1
 access_amazon_outbound_order_line,amazon.outbound.order.line,model_amazon_outbound_order_line,,1,1,1,1
 access_amazon_product_import_wizard,amazon.product.import.wizard,model_amazon_product_import_wizard,,1,1,1,1
+access_amazon_product_setup_wizard,amazon.product.setup.wizard,model_amazon_product_setup_wizard,,1,1,1,1
 access_amazon_product_bullet_point,amazon.product.bullet.point,model_amazon_product_bullet_point,,1,1,1,1
 access_amazon_product_image,amazon.product.image,model_amazon_product_image,,1,1,1,1
 access_amazon_sync_log,amazon.sync.log,model_amazon_sync_log,,1,1,1,1

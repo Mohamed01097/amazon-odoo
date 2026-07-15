@@ -6,7 +6,7 @@ import io
 import json
 import logging
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import requests
 from requests.exceptions import ConnectionError as ReqConnectionError, Timeout
@@ -17,6 +17,12 @@ _logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 1.5  # seconds — 1.5, 3, 6
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+REDACTED = '***REDACTED***'
+SENSITIVE_KEYS = {
+    'access_token', 'authorization', 'client_secret', 'lwa_access_token',
+    'password', 'refresh_token', 'secret', 'signature', 'token',
+    'x-amz-access-token', 'x-amz-security-token',
+}
 
 REGION_ENDPOINTS = {
     'na': 'https://sellingpartnerapi-na.amazon.com',
@@ -52,6 +58,175 @@ class AmazonAPI():
     # ══════════════════════════════════════════════════
     # SP-API requests
     # ══════════════════════════════════════════════════
+
+    @classmethod
+    def _is_sensitive_key(cls, key):
+        key = str(key or '').lower()
+        return any(part in key for part in SENSITIVE_KEYS)
+
+    @classmethod
+    def _sanitize_for_log(cls, value):
+        if isinstance(value, dict):
+            clean = {}
+            for key, val in value.items():
+                clean[key] = REDACTED if cls._is_sensitive_key(key) else cls._sanitize_for_log(val)
+            return clean
+        if isinstance(value, (list, tuple)):
+            return [cls._sanitize_for_log(item) for item in value]
+        if isinstance(value, (bytes, bytearray)):
+            if len(value) > 2048:
+                return '<%d bytes>' % len(value)
+            try:
+                return value.decode('utf-8')
+            except UnicodeDecodeError:
+                return '<%d bytes>' % len(value)
+        return value
+
+    @staticmethod
+    def _headers_to_dict(headers):
+        return dict(headers or {})
+
+    @classmethod
+    def _sanitize_headers(cls, headers):
+        return cls._sanitize_for_log(cls._headers_to_dict(headers))
+
+    @staticmethod
+    def _safe_response_json(response):
+        try:
+            return response.json()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _amazon_request_id(response):
+        if response is None:
+            return ''
+        return (
+            response.headers.get('x-amzn-RequestId')
+            or response.headers.get('x-amzn-requestid')
+            or response.headers.get('x-amz-request-id')
+            or response.headers.get('x-amz-id-2')
+            or ''
+        )
+
+    @staticmethod
+    def _extract_amazon_error(response_json):
+        error = {}
+        if isinstance(response_json, dict):
+            errors = response_json.get('errors')
+            if isinstance(errors, list) and errors:
+                error = errors[0] if isinstance(errors[0], dict) else {'message': errors[0]}
+            elif isinstance(response_json.get('error'), dict):
+                error = response_json.get('error') or {}
+            else:
+                error = response_json
+        return {
+            'code': error.get('code') or error.get('error') or '',
+            'message': error.get('message') or error.get('error_description') or '',
+            'details': error.get('details') or error.get('detail') or '',
+        }
+
+    @staticmethod
+    def _safe_url_for_log(url):
+        parts = urlsplit(url or '')
+        if not parts.query:
+            return url or ''
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, '<redacted>', parts.fragment))
+
+    def _log_amazon_request(self, instance, method, url, request_headers=None,
+                            params=None, payload=None, response=None, elapsed=0.0,
+                            error=None, response_body=None):
+        """Write a raw Amazon HTTP exchange to Sync Logs without failing the call."""
+        if not instance or not getattr(instance, 'env', False):
+            return
+        try:
+            response_json = self._safe_response_json(response) if response is not None else None
+            if response_json is not None:
+                response_json = self._sanitize_for_log(response_json)
+            if response is not None and response_body is None:
+                response_body = (
+                    json.dumps(response_json, default=str, indent=2)
+                    if response_json is not None else response.text
+                )
+            request_data = {
+                'endpoint': url,
+                'method': method,
+                'params': self._sanitize_for_log(params or {}),
+                'payload': self._sanitize_for_log(payload),
+                'headers': self._sanitize_headers(request_headers),
+                'execution_time_seconds': round(elapsed or 0.0, 6),
+            }
+            response_data = {
+                'status_code': response.status_code if response is not None else None,
+                'amazon_request_id': self._amazon_request_id(response),
+                'headers': self._sanitize_headers(response.headers if response is not None else {}),
+                'response_body': response_body or '',
+                'response_json': response_json,
+            }
+            instance.env['amazon.sync.log'].sudo().log_api_request(
+                instance,
+                request_data=request_data,
+                response_data=response_data,
+                error_message=str(error) if error else '',
+                duration_seconds=elapsed or 0.0,
+            )
+        except Exception as log_exc:
+            _logger.warning("Could not write Amazon API sync log: %s", log_exc)
+
+    @classmethod
+    def format_response_diagnostic(cls, response, method=None, url=None, request_headers=None,
+                                   payload=None, elapsed=None):
+        response_json = cls._safe_response_json(response)
+        error = cls._extract_amazon_error(response_json)
+        req = getattr(response, 'request', None)
+        req_headers = request_headers or (req.headers if req is not None else {})
+        req_method = method or (req.method if req is not None else '')
+        req_url = url or getattr(response, 'url', '') or (req.url if req is not None else '')
+        details = error.get('details')
+        if isinstance(details, (dict, list)):
+            details = json.dumps(details, default=str, indent=2)
+        response_json_text = (
+            json.dumps(response_json, default=str, indent=2)
+            if response_json is not None else 'No JSON response. Raw response text is shown in Response Body.'
+        )
+        lines = [
+            'HTTP Status: %s' % response.status_code,
+            'Amazon Error Code: %s' % (error.get('code') or 'N/A'),
+            'Amazon Error Message: %s' % (error.get('message') or 'N/A'),
+            'Amazon Details: %s' % (details or 'N/A'),
+            'Amazon Request ID: %s' % (cls._amazon_request_id(response) or 'N/A'),
+            'Request URL: %s' % req_url,
+            'Request Method: %s' % req_method,
+            'Request Headers: %s' % json.dumps(cls._sanitize_headers(req_headers), default=str, indent=2),
+            'Request Payload: %s' % json.dumps(cls._sanitize_for_log(payload), default=str, indent=2),
+            'Response Headers: %s' % json.dumps(cls._sanitize_headers(response.headers), default=str, indent=2),
+            'Response Body: %s' % (response.text or ''),
+            'Response JSON: %s' % response_json_text,
+        ]
+        if elapsed is not None:
+            lines.append('Execution Time: %.3fs' % elapsed)
+        return '\n'.join(lines)
+
+    @classmethod
+    def format_exception(cls, exc):
+        response = getattr(exc, 'response', None)
+        if response is not None:
+            return cls.format_response_diagnostic(response)
+        return str(exc)
+
+    def _raise_amazon_http_error(self, response, method, url, request_headers=None,
+                                 payload=None, elapsed=None):
+        diagnostic = self.format_response_diagnostic(
+            response,
+            method=method,
+            url=url,
+            request_headers=request_headers,
+            payload=payload,
+            elapsed=elapsed,
+        )
+        error = requests.exceptions.HTTPError(diagnostic, response=response)
+        error.amazon_diagnostic = diagnostic
+        raise error
 
     def _amazon_request(self, instance, access_token, method, path, params=None,
                         data=None, json_data=None, headers=None, body=None,
@@ -90,6 +265,7 @@ class AmazonAPI():
         response = None
         for attempt in range(MAX_RETRIES + 1):
             try:
+                payload_for_log = json_data if json_data is not None else data
                 kwargs = {
                     'headers': request_headers,
                     'params': params,
@@ -100,19 +276,14 @@ class AmazonAPI():
                         kwargs['json'] = json_data
                     elif data is not None:
                         kwargs['data'] = data
+                start = time.monotonic()
                 response = requests.request(method, url, **kwargs)
-
-                # 400 = validation error with useful JSON — return as-is
-                if response.status_code == 400:
-                    _logger.warning("Amazon %s %s returned 400: %s", method, url, response.text[:500])
-                    return response
-
-                # 403 = authorization failure. Amazon returns the real reason
-                # (missing role, marketplace not authorized, expired consent) in
-                # the JSON body. Log it so the cause is visible — otherwise the
-                # caller only sees a bare "403 Client Error".
-                if response.status_code == 403:
-                    _logger.warning("Amazon %s %s returned 403: %s", method, url, response.text[:500])
+                elapsed = time.monotonic() - start
+                self._log_amazon_request(
+                    instance, method, url, request_headers=request_headers,
+                    params=params, payload=payload_for_log, response=response,
+                    elapsed=elapsed,
+                )
 
                 # Retryable server errors (429, 5xx)
                 if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
@@ -131,11 +302,21 @@ class AmazonAPI():
                     time.sleep(wait)
                     continue
 
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    self._raise_amazon_http_error(
+                        response, method, url, request_headers=request_headers,
+                        payload=payload_for_log, elapsed=elapsed,
+                    )
                 return response
 
             except (ReqConnectionError, Timeout) as exc:
                 last_exc = exc
+                elapsed = time.monotonic() - start if 'start' in locals() else 0.0
+                self._log_amazon_request(
+                    instance, method, url, request_headers=request_headers,
+                    params=params, payload=payload_for_log if 'payload_for_log' in locals() else None,
+                    response=None, elapsed=elapsed, error=exc,
+                )
                 if attempt < MAX_RETRIES:
                     wait = RETRY_BACKOFF_BASE * (2 ** attempt)
                     _logger.warning(
@@ -148,7 +329,10 @@ class AmazonAPI():
 
         # If we exhausted retries on a retryable status code, raise
         if response is not None:
-            response.raise_for_status()
+            self._raise_amazon_http_error(
+                response, method, url, request_headers=request_headers,
+                payload=payload_for_log if 'payload_for_log' in locals() else None,
+            )
         if last_exc:
             raise last_exc
         return response
@@ -183,27 +367,46 @@ class AmazonAPI():
             "client_id": instance.client_id,
             "client_secret": instance.client_secret,
         }
-        response = requests.post(url, data=payload, timeout=30)
+        headers = {'content-type': 'application/x-www-form-urlencoded', 'accept': 'application/json'}
+        start = time.monotonic()
+        response = requests.post(url, data=payload, headers=headers, timeout=30)
+        elapsed = time.monotonic() - start
+        self._log_amazon_request(
+            instance, 'POST', url, request_headers=headers, payload=payload,
+            response=response, elapsed=elapsed,
+        )
         try:
             data = response.json()
         except ValueError as exc:
-            response.raise_for_status()
+            if not response.ok:
+                self._raise_amazon_http_error(
+                    response, 'POST', url, request_headers=headers,
+                    payload=payload, elapsed=elapsed,
+                )
             raise requests.exceptions.RequestException(
-                "Amazon OAuth endpoint returned a non-JSON response."
+                "Amazon OAuth endpoint returned a non-JSON response:\n%s"
+                % self.format_response_diagnostic(
+                    response, method='POST', url=url,
+                    request_headers=headers, payload=payload, elapsed=elapsed,
+                )
             ) from exc
         if not response.ok:
-            error = data.get("error") or "oauth_error"
-            description = data.get("error_description") or data.get("message") or response.text
-            raise requests.exceptions.HTTPError(
-                "Amazon OAuth error %s: %s" % (error, description),
-                response=response,
+            self._raise_amazon_http_error(
+                response, 'POST', url, request_headers=headers,
+                payload=payload, elapsed=elapsed,
             )
-        response.raise_for_status()
         if not data.get("access_token"):
             error = data.get("error") or "missing_access_token"
             description = data.get("error_description") or data.get("message") or "No access token returned."
             raise requests.exceptions.RequestException(
-                "Amazon OAuth error %s: %s" % (error, description)
+                "Amazon OAuth error %s: %s\n%s" % (
+                    error,
+                    description,
+                    self.format_response_diagnostic(
+                        response, method='POST', url=url,
+                        request_headers=headers, payload=payload, elapsed=elapsed,
+                    ),
+                )
             )
         return data.get("access_token")
 
@@ -237,7 +440,7 @@ class AmazonAPI():
         resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
-    def download_report_document(self, document_url, compression=None, encryption=None):
+    def download_report_document(self, document_url, compression=None, encryption=None, instance=None):
         """Download a report from a pre-signed S3 URL and return decoded text.
 
         Amazon's report-document metadata (returned by ``get_report_document``)
@@ -256,8 +459,16 @@ class AmazonAPI():
         :param encryption: ``encryptionDetails`` dict or None
         :return: decoded UTF-8 text of the report
         """
+        safe_url = self._safe_url_for_log(document_url)
+        start = time.monotonic()
         response = requests.get(document_url, timeout=120)
-        response.raise_for_status()
+        elapsed = time.monotonic() - start
+        self._log_amazon_request(
+            instance, 'GET', safe_url, response=response, elapsed=elapsed,
+            response_body='<%d bytes>' % len(response.content or b''),
+        )
+        if response.status_code >= 400:
+            self._raise_amazon_http_error(response, 'GET', safe_url, elapsed=elapsed)
         data = response.content  # bytes — never use .text here, payload may be binary
 
         if encryption:
@@ -333,15 +544,19 @@ class AmazonAPI():
             download_url,
             compression=doc_data.get('compressionAlgorithm'),
             encryption=doc_data.get('encryptionDetails'),
+            instance=instance,
         )
-        # Amazon TSV reports often contain unquoted fields (product titles,
-        # descriptions) with embedded newlines, quote characters, and \r\n
-        # line endings, which csv.DictReader cannot parse with default
-        # settings on Python 3.12+ ("new-line character seen in unquoted
-        # field"). Strip BOM, normalise line endings, and disable quote
-        # interpretation since Amazon reports don't use CSV-style quoting.
-        raw_text = raw_text.lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n')
-        reader = csv.DictReader(io.StringIO(raw_text), delimiter=delimiter, quoting=csv.QUOTE_NONE)
+        # Amazon TSV reports use CRLF row endings, but text fields can contain
+        # stray carriage returns. Keep real CRLF row breaks and turn lone CRs
+        # into spaces so DictReader does not produce malformed continuation rows.
+        raw_text = raw_text.lstrip('\ufeff').replace('\r\n', '\n').replace('\r', ' ')
+        reader = csv.DictReader(
+            io.StringIO(raw_text),
+            delimiter=delimiter,
+            quoting=csv.QUOTE_NONE,
+            restkey='_extra_fields',
+            restval='',
+        )
         return list(reader)
 
     def fetch_merchant_listings_report(self, instance, access_token):
@@ -464,11 +679,25 @@ class AmazonAPI():
         resp = self._amazon_request(instance, access_token, 'POST', url, body=body)
         return resp.json()
 
-    def upload_feed_document(self, upload_url, content, content_type='text/xml; charset=UTF-8'):
+    def upload_feed_document(self, upload_url, content, content_type='text/xml; charset=UTF-8', instance=None):
         """Upload feed content to pre-signed S3 URL."""
         headers = {'Content-Type': content_type}
-        response = requests.put(upload_url, data=content.encode('utf-8'), headers=headers, timeout=60)
-        response.raise_for_status()
+        body = content if isinstance(content, (bytes, bytearray)) else content.encode('utf-8')
+        safe_url = self._safe_url_for_log(upload_url)
+        start = time.monotonic()
+        response = requests.put(upload_url, data=body, headers=headers, timeout=60)
+        elapsed = time.monotonic() - start
+        self._log_amazon_request(
+            instance, 'PUT', safe_url, request_headers=headers,
+            payload={'content_type': content_type, 'bytes': len(body)},
+            response=response, elapsed=elapsed,
+        )
+        if response.status_code >= 400:
+            self._raise_amazon_http_error(
+                response, 'PUT', safe_url, request_headers=headers,
+                payload={'content_type': content_type, 'bytes': len(body)},
+                elapsed=elapsed,
+            )
 
     def create_feed(self, instance, access_token, feed_type, document_id):
         endpoint = self._get_endpoint(instance)
@@ -498,13 +727,31 @@ class AmazonAPI():
         doc = self.create_feed_document(instance, access_token, content_type=content_type)
         doc_id = doc['feedDocumentId']
         upload_url = doc['url']
-        self.upload_feed_document(upload_url, content, content_type=content_type)
+        self.upload_feed_document(upload_url, content, content_type=content_type, instance=instance)
         feed = self.create_feed(instance, access_token, feed_type, doc_id)
         return feed
 
     # ── Feed XML builders ──
 
-    def build_price_feed_xml(self, items):
+    def _get_feed_currency(self, item, instance=None):
+        currency = item.get('currency')
+        if currency:
+            return currency
+        if instance:
+            if hasattr(instance, '_get_currency_code'):
+                currency = instance._get_currency_code()
+                if currency:
+                    return currency
+            default_currency = getattr(instance, 'default_currency_id', False)
+            company = getattr(instance, 'company_id', False)
+            company_currency = company.currency_id if company else False
+            env_currency = instance.env.company.currency_id if getattr(instance, 'env', False) else False
+            currency_rec = default_currency or company_currency or env_currency
+            if currency_rec:
+                return currency_rec.name
+        raise ValueError("Currency is required for Amazon price feeds.")
+
+    def build_price_feed_xml(self, items, instance=None):
         """Build XML for POST_PRODUCT_PRICING_DATA feed.
         items: list of dicts with 'sku' and 'price' keys.
         """
@@ -515,7 +762,7 @@ class AmazonAPI():
         for i, item in enumerate(items, 1):
             lines.append('<Message><MessageID>%d</MessageID><Price>' % i)
             lines.append('<SKU>%s</SKU>' % item['sku'])
-            lines.append('<StandardPrice currency="%s">%s</StandardPrice>' % (item.get('currency', 'USD'), item['price']))
+            lines.append('<StandardPrice currency="%s">%s</StandardPrice>' % (self._get_feed_currency(item, instance), item['price']))
             lines.append('</Price></Message>')
         lines.append('</AmazonEnvelope>')
         return '\n'.join(lines)
@@ -575,7 +822,7 @@ class AmazonAPI():
                         "path": "/attributes/purchasable_offer",
                         "value": [{
                             "marketplace_id": instance.marketplace_id,
-                            "currency": item.get('currency', 'USD'),
+                            "currency": self._get_feed_currency(item, instance),
                             "audience": "ALL",
                             "our_price": [{
                                 "schedule": [{
@@ -709,20 +956,7 @@ class AmazonAPI():
         _logger.info("Amazon %s listing %s — body keys: %s", method, sku,
                       list(body.keys()) if body else 'none')
 
-        # Make the token-authenticated request but handle HTTP errors ourselves.
-        try:
-            resp = self._amazon_request(instance, access_token, method, url, params=params, body=body)
-        except requests.exceptions.HTTPError as exc:
-            # Try to extract JSON error from response body
-            if exc.response is not None:
-                try:
-                    data = exc.response.json()
-                    _logger.error("Amazon %s listing %s HTTP %s response: %s",
-                                  method, sku, exc.response.status_code, data)
-                    return data
-                except Exception:
-                    pass
-            raise
+        resp = self._amazon_request(instance, access_token, method, url, params=params, body=body)
 
         try:
             data = resp.json()

@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from odoo import models, fields, api
 
@@ -20,6 +20,7 @@ class AmazonSyncLog(models.Model):
         ('product_export', 'Product Export'),
         ('product_create', 'Product Create'),
         ('product_update', 'Product Update'),
+        ('product_mapping', 'Product Mapping'),
         ('product_pull', 'Product Pull'),
         # Orders
         ('order_import', 'Order Import'),
@@ -51,6 +52,8 @@ class AmazonSyncLog(models.Model):
         ('ai_inventory', 'AI Inventory Prediction'),
         ('ai_reply', 'AI Customer Reply'),
         ('ai_error_fix', 'AI Error Fix'),
+        # Raw Amazon API exchange
+        ('api_request', 'Amazon API Request'),
         # Full Sync
         ('full_sync', 'Full Sync'),
     ], required=True, index=True)
@@ -106,6 +109,16 @@ class AmazonSyncLog(models.Model):
     # ──────────────────────────────────────────────
 
     @api.model
+    def _serialize_payload(self, payload, limit=None):
+        if payload in (None, False):
+            return False
+        if isinstance(payload, (dict, list)):
+            value = json.dumps(payload, default=str, indent=2)
+        else:
+            value = str(payload)
+        return value[:limit] if limit else value
+
+    @api.model
     def log_start(self, instance, operation, request_data=None, res_model=None, res_id=None):
         """Create a log entry when an operation starts."""
         vals = {
@@ -121,6 +134,36 @@ class AmazonSyncLog(models.Model):
         if res_id:
             vals['res_id'] = res_id
         return self.create(vals)
+
+    @api.model
+    def log_api_request(self, instance, request_data=None, response_data=None,
+                        error_message='', duration_seconds=0.0):
+        """Persist one raw Amazon HTTP exchange without sending UI popups."""
+        request_data = request_data or {}
+        response_data = response_data or {}
+        status_code = response_data.get('status_code')
+        failed = bool(error_message) or (status_code and int(status_code) >= 400)
+        finished_at = fields.Datetime.now()
+        started_at = finished_at - timedelta(seconds=duration_seconds or 0.0)
+        method = request_data.get('method') or ''
+        endpoint = request_data.get('endpoint') or ''
+        summary = "%s %s -> %s in %.3fs" % (
+            method,
+            endpoint,
+            "HTTP %s" % status_code if status_code else "no response",
+            duration_seconds or 0.0,
+        )
+        return self.create({
+            'instance_id': instance.id if hasattr(instance, 'id') else instance,
+            'operation': 'api_request',
+            'state': 'failed' if failed else 'success',
+            'started_at': started_at,
+            'finished_at': finished_at,
+            'summary': summary,
+            'request_data': self._serialize_payload(request_data),
+            'response_data': self._serialize_payload(response_data),
+            'error_message': str(error_message) if error_message else False,
+        })
 
     def _send_bus_notification(self, title, message, msg_type='success'):
         """Send a real-time bus notification to all users viewing Amazon module."""

@@ -139,7 +139,7 @@ class AmazonAIPricingWizard(models.TransientModel):
         provider = instance.ai_provider or 'groq'
         api_key = instance.ai_api_key
         model = instance.ai_model
-        currency = instance.default_currency_id.name if instance.default_currency_id else 'INR'
+        currency = instance._get_currency_code()
 
         created = []
         for product in products:

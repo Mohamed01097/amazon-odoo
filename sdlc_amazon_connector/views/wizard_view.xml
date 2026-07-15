@@ -26,4 +26,35 @@
             </form>
         </field>
     </record>
+
+    <record id="amazon_product_setup_wizard_action" model="ir.actions.act_window">
+        <field name="name">Initial Product Setup</field>
+        <field name="res_model">amazon.product.setup.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <record id="amazon_product_setup_wizard_form" model="ir.ui.view">
+        <field name="name">amazon.product.setup.wizard.form</field>
+        <field name="model">amazon.product.setup.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Initial Product Setup">
+                <div class="alert alert-info" role="alert">
+                    Link by matching Amazon SKU to Odoo Internal Reference. Create missing Odoo products only after reviewing the Amazon product records.
+                </div>
+                <group>
+                    <field name="instance_id"/>
+                    <field name="operation" widget="radio"/>
+                    <field name="update_odoo_prices_from_amazon"/>
+                </group>
+                <div class="alert alert-warning" role="alert" invisible="not update_odoo_prices_from_amazon">
+                    This is a one-time Amazon → Odoo price update for initial setup or intentional reconciliation. Normal product sync does not update Odoo prices.
+                </div>
+                <footer>
+                    <button name="action_apply" type="object" string="Apply" class="btn-primary"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
 </odoo>

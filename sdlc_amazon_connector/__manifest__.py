@@ -101,8 +101,6 @@
             'sdlc_amazon_connector/static/src/xml/amazon_dashboard.xml',
         ],
     },
-    'price': 19.99,
-    'currency': 'USD',
     'installable': True,
     'application': True,
     'auto_install': False,

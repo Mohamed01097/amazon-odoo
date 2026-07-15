@@ -30,11 +30,14 @@
                     <button name="action_test_connection" type="object" string="Test Connection" class="btn-primary"/>
                     <button name="action_full_sync" type="object" string="Full Sync" class="btn-warning" icon="fa-refresh"/>
                     <button name="action_sync_products" type="object" string="Sync Products"/>
+                    <button name="action_open_product_setup_wizard" type="object" string="Product Setup" class="btn-secondary"/>
+                    <button name="action_link_products_by_sku" type="object" string="Link Existing Products by SKU"/>
+                    <button name="action_create_missing_odoo_products" type="object" string="Create Missing Odoo Products"/>
                     <button name="action_import_orders" type="object" string="Import Orders"/>
                     <button name="action_export_stock" type="object" string="Export Stock"/>
-                    <button name="action_pull_stock" type="object" string="Pull Stock"/>
+                    <button name="action_pull_stock" type="object" string="Pull Stock (Amazon→Odoo)"/>
                     <button name="action_update_prices" type="object" string="Push Prices"/>
-                    <button name="action_pull_prices" type="object" string="Pull Prices"/>
+                    <button name="action_pull_prices" type="object" string="Pull Prices (Amazon→Odoo)"/>
                     <button name="action_export_all_products" type="object" string="Export Products"/>
                     <button name="action_import_settlement_reports" type="object" string="Import Settlements"/>
                     <button name="action_check_canceled_orders" type="object" string="Check Cancellations"/>
@@ -68,6 +71,7 @@
                             <field name="aws_secret_key" password="True"/>
                         </group>
                         <group string="Configuration">
+                            <field name="company_id"/>
                             <field name="fulfillment_program"/>
                             <field name="fba_warehouse_id"/>
                             <field name="fbm_warehouse_id"/>
@@ -75,6 +79,9 @@
                             <field name="active"/>
                         </group>
                     </group>
+                    <div class="alert alert-info" role="alert">
+                        Amazon SKU should match the Odoo product Internal Reference. Sync Products creates Amazon marketplace records only; use Product Setup to link or create Odoo products. After setup, Odoo is master for stock and prices.
+                    </div>
                     <group>
                         <group string="AI Configuration">
                             <field name="ai_provider"/>
@@ -93,16 +100,16 @@
                     <separator string="Auto Sync Scheduler"/>
                     <div class="alert alert-info" role="alert">
                         <field name="auto_sync_enabled" class="oe_inline"/>
-                        <label for="auto_sync_enabled" string=" Enable Auto Sync — Automatically sync orders, products, stock, and prices on a schedule."/>
+                        <label for="auto_sync_enabled" string=" Enable Auto Sync — scheduled sync never runs Amazon → Odoo stock or price pulls."/>
                     </div>
                     <group invisible="not auto_sync_enabled">
                         <group string="Amazon Sync Intervals">
                             <field name="order_sync_interval"/>
                             <field name="product_sync_interval"/>
                             <field name="stock_push_interval"/>
-                            <field name="stock_pull_interval"/>
+                            <field name="stock_pull_interval" readonly="1"/>
                             <field name="price_push_interval"/>
-                            <field name="price_pull_interval"/>
+                            <field name="price_pull_interval" readonly="1"/>
                             <field name="settlement_sync_interval"/>
                             <field name="alert_scan_interval"/>
                         </group>
@@ -114,6 +121,9 @@
                             <field name="ai_health_interval"/>
                         </group>
                     </group>
+                    <div class="alert alert-warning" role="alert" invisible="not auto_sync_enabled">
+                        Pull Stock and Pull Prices are manual Amazon → Odoo reconciliation actions. Do not use them when Odoo is master unless you intentionally want to reconcile from Amazon.
+                    </div>
                     <group invisible="not auto_sync_enabled">
                         <button name="action_apply_sync_schedule" type="object" string="Apply Schedule" class="btn-primary" icon="fa-clock-o"/>
                     </group>

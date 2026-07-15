@@ -5,15 +5,37 @@
         <field name="view_mode">list,form</field>
     </record>
 
+    <record id="amazon_product_action_link_existing_by_sku" model="ir.actions.server">
+        <field name="name">Link Existing Products by SKU</field>
+        <field name="model_id" ref="model_amazon_product"/>
+        <field name="binding_model_id" ref="model_amazon_product"/>
+        <field name="binding_view_types">list,form</field>
+        <field name="state">code</field>
+        <field name="code">action = records.action_link_to_odoo_by_sku()</field>
+    </record>
+
+    <record id="amazon_product_action_create_missing_odoo_products" model="ir.actions.server">
+        <field name="name">Create Missing Odoo Products</field>
+        <field name="model_id" ref="model_amazon_product"/>
+        <field name="binding_model_id" ref="model_amazon_product"/>
+        <field name="binding_view_types">list,form</field>
+        <field name="state">code</field>
+        <field name="code">action = records.action_create_odoo_product()</field>
+    </record>
+
     <record id="amazon_product_list" model="ir.ui.view">
         <field name="name">amazon.product.list</field>
         <field name="model">amazon.product</field>
         <field name="arch" type="xml">
             <list string="Amazon Products" decoration-success="status=='Active'" decoration-muted="status=='Inactive'">
+                <header>
+                    <button name="action_link_to_odoo_by_sku" type="object" string="Link Existing Products by SKU"/>
+                    <button name="action_create_odoo_product" type="object" string="Create Missing Odoo Products"/>
+                </header>
                 <field name="product_image" widget="image" options="{'size': [40, 40]}" string=" "/>
                 <field name="name"/>
                 <field name="asin"/>
-                <field name="sku"/>
+                <field name="sku" string="Amazon SKU"/>
                 <field name="brand"/>
                 <field name="amazon_price"/>
                 <field name="amazon_qty"/>
@@ -41,7 +63,8 @@
                     <button name="action_create_in_amazon" type="object" string="Create in Amazon" class="btn-primary" invisible="asin"/>
                     <button name="action_update_in_amazon" type="object" string="Update in Amazon" class="btn-primary" invisible="not asin"/>
                     <button name="action_pull_from_amazon" type="object" string="Pull from Amazon" class="btn-primary" invisible="not sku"/>
-                    <button name="action_map_to_odoo_product" type="object" string="Map to Odoo Product" invisible="odoo_product_id"/>
+                    <button name="action_map_to_odoo_product" type="object" string="Link Existing by SKU" invisible="odoo_product_id"/>
+                    <button name="action_create_odoo_product" type="object" string="Create Odoo Product" invisible="odoo_product_id"/>
                     <button name="action_download_image" type="object" string="Download Image" invisible="not image_url or product_image"/>
                     <field name="status" widget="statusbar" statusbar_visible="Active,Inactive,Incomplete"/>
                 </header>
@@ -66,6 +89,9 @@
                             <field name="last_sync_date" readonly="1"/>
                         </group>
                     </group>
+                    <div class="alert alert-info" role="alert">
+                        Amazon Product is the marketplace layer. Odoo Product is the ERP product. Match Amazon SKU to Odoo Internal Reference for safe linking. After initial setup, Odoo is the master for stock and prices.
+                    </div>
 
                     <!-- ═══ Tabbed Sections (like Amazon Seller Central) ═══ -->
                     <notebook>
@@ -415,6 +441,9 @@
 
                                 <!-- Pricing -->
                                 <separator string="Pricing"/>
+                                <div class="alert alert-warning" role="alert">
+                                    Amazon price and quantity are imported reference values. Push Prices and Export Stock use Odoo values. Pull Prices and Pull Stock are Amazon → Odoo reconciliation actions.
+                                </div>
                                 <group>
                                     <group>
                                         <field name="amazon_price" string="Your Price"/>

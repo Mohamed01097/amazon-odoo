@@ -61,6 +61,12 @@ class AmazonInstance(models.Model):
         ('fe', 'Far East'),
     ], default='eu')
     active = fields.Boolean(default=True)
+    company_id = fields.Many2one(
+        'res.company',
+        string='Company',
+        default=lambda self: self.env.company,
+        help="Company used for currency fallback and products created from Amazon listings.",
+    )
 
     # Fulfillment program
     fulfillment_program = fields.Selection([
@@ -124,9 +130,9 @@ class AmazonInstance(models.Model):
     order_sync_interval = fields.Selection(INTERVAL_SELECTION, string='Order Sync', default='30min')
     product_sync_interval = fields.Selection(INTERVAL_SELECTION, string='Product Sync', default='daily')
     stock_push_interval = fields.Selection(INTERVAL_SELECTION, string='Stock Push (Odoo→Amazon)', default='2hours')
-    stock_pull_interval = fields.Selection(INTERVAL_SELECTION, string='Stock Pull (Amazon→Odoo)', default='4hours')
+    stock_pull_interval = fields.Selection(INTERVAL_SELECTION, string='Stock Pull (Amazon→Odoo)', default='disabled')
     price_push_interval = fields.Selection(INTERVAL_SELECTION, string='Price Push', default='4hours')
-    price_pull_interval = fields.Selection(INTERVAL_SELECTION, string='Price Pull', default='6hours')
+    price_pull_interval = fields.Selection(INTERVAL_SELECTION, string='Price Pull', default='disabled')
     settlement_sync_interval = fields.Selection(INTERVAL_SELECTION, string='Settlement Reports', default='daily')
     alert_scan_interval = fields.Selection(INTERVAL_SELECTION, string='Smart Alert Scan', default='4hours')
 
@@ -207,16 +213,9 @@ class AmazonInstance(models.Model):
         except requests.exceptions.Timeout as exc:
             raise UserError("Amazon OAuth request timed out.") from exc
         except requests.exceptions.HTTPError as exc:
-            if exc.response is not None:
-                try:
-                    data = exc.response.json()
-                    error = data.get('error') or data.get('code') or 'Amazon error'
-                    description = data.get('error_description') or data.get('message') or data.get('details') or exc.response.text
-                    body = "%s: %s" % (error, description)
-                except ValueError:
-                    body = (exc.response.text or str(exc)).strip()
-                raise UserError("Amazon HTTP %s: %s" % (exc.response.status_code, body[:1200])) from exc
-            raise UserError("Amazon HTTP error: %s" % exc) from exc
+            raise UserError("Amazon authentication failed:\n\n%s" % AmazonAPI.format_exception(exc)) from exc
+        except requests.exceptions.RequestException as exc:
+            raise UserError("Amazon authentication failed:\n\n%s" % AmazonAPI.format_exception(exc)) from exc
         except Exception as exc:
             raise UserError("Connection failed: %s" % exc) from exc
         if not access_token:
@@ -227,9 +226,14 @@ class AmazonInstance(models.Model):
         """Wrap an API call with standard error handling."""
         try:
             return func(*args, **kwargs)
+        except requests.exceptions.HTTPError as exc:
+            diagnostic = getattr(exc, 'amazon_diagnostic', None) or AmazonAPI.format_exception(exc)
+            _logger.warning("%s:\n%s", error_msg, diagnostic)
+            raise UserError("%s:\n\n%s" % (error_msg, diagnostic)) from exc
         except requests.exceptions.RequestException as exc:
-            _logger.warning("%s: %s", error_msg, exc)
-            raise UserError("%s: %s" % (error_msg, exc)) from exc
+            diagnostic = AmazonAPI.format_exception(exc)
+            _logger.warning("%s:\n%s", error_msg, diagnostic)
+            raise UserError("%s:\n\n%s" % (error_msg, diagnostic)) from exc
 
     def _notify(self, title, message, msg_type='success', sticky=False):
         return {
@@ -237,6 +241,15 @@ class AmazonInstance(models.Model):
             "tag": "display_notification",
             "params": {"title": title, "message": message, "type": msg_type, "sticky": sticky},
         }
+
+    def _get_currency(self):
+        self.ensure_one()
+        return self.default_currency_id or self.company_id.currency_id or self.env.company.currency_id
+
+    def _get_currency_code(self):
+        self.ensure_one()
+        currency = self._get_currency()
+        return currency.name if currency else ''
 
     # ══════════════════════════════════════════════════
     # Test Connection
@@ -300,6 +313,45 @@ class AmazonInstance(models.Model):
     # Product Sync
     # ══════════════════════════════════════════════════
 
+    @staticmethod
+    def _clean_report_value(value):
+        if value in (None, False):
+            return ''
+        if isinstance(value, (list, tuple)):
+            value = ' '.join(str(v) for v in value if v not in (None, False))
+        return str(value).replace('\r', ' ').replace('\n', ' ').strip()
+
+    def _get_report_value(self, row, *keys):
+        for key in keys:
+            if key in row and row.get(key) not in (None, False, ''):
+                return self._clean_report_value(row.get(key))
+        return ''
+
+    def _float_from_report(self, value, default=0.0):
+        cleaned = self._clean_report_value(value)
+        if not cleaned:
+            return default
+        try:
+            return float(cleaned.replace(',', ''))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _amazon_fulfillment_to_channel(value):
+        fulfillment = (value or '').strip().upper()
+        return 'AFN' if fulfillment in (
+            'AMAZON_NA', 'AMAZON_EU', 'AMAZON_FE', 'AMAZON_IN', 'AMAZON', 'AFN',
+        ) else 'MFN'
+
+    @staticmethod
+    def _amazon_status_from_report(value):
+        status_raw = (value or '').strip().lower()
+        if status_raw in ('inactive', 'closed'):
+            return 'Inactive'
+        if status_raw == 'incomplete':
+            return 'Incomplete'
+        return 'Active'
+
     def action_sync_products(self):
         """Import products from Amazon using Merchant Listings Report."""
         self.ensure_one()
@@ -318,37 +370,39 @@ class AmazonInstance(models.Model):
             log.log_fail(str(exc))
             raise
 
-        created = updated = 0
-        for row in rows:
-            sku = (row.get('seller-sku') or '').strip()
+        created = updated = mapped = odoo_created = skipped = 0
+        debug_rows = []
+        Product = self.env['product.product'].with_context(active_test=False)
+        for index, row in enumerate(rows, 1):
+            if not isinstance(row, dict):
+                skipped += 1
+                debug_rows.append({'row': index, 'reason': 'malformed-row'})
+                continue
+            if row.get('_extra_fields') and len(debug_rows) < 20:
+                debug_rows.append({
+                    'row': index,
+                    'reason': 'extra-fields-in-report-row',
+                    'extra_fields': row.get('_extra_fields'),
+                })
+
+            sku = self._get_report_value(row, 'seller-sku', 'sku', 'SKU')
             if not sku:
+                skipped += 1
+                debug_rows.append({'row': index, 'reason': 'missing-sku'})
                 continue
 
-            asin = (row.get('asin1') or '').strip()
-            product_name = (row.get('item-name') or sku).strip()
-            price_str = (row.get('price') or '0').strip()
-            qty_str = (row.get('quantity') or '0').strip()
-            description = (row.get('item-description') or '').strip()
-            image_url = (row.get('image-url') or '').strip()
-            fulfillment = (row.get('fulfillment-channel') or '').strip()
-            status_raw = (row.get('status') or row.get('item-is-marketplace') or '').strip()
-
-            try:
-                price = float(price_str)
-            except ValueError:
-                price = 0.0
-            try:
-                qty = float(qty_str)
-            except ValueError:
-                qty = 0.0
+            asin = self._get_report_value(row, 'asin1', 'asin')
+            product_name = self._get_report_value(row, 'item-name', 'name', 'product-name') or sku
+            price = self._float_from_report(self._get_report_value(row, 'price', 'item-price'))
+            qty = self._float_from_report(self._get_report_value(row, 'quantity', 'qty'))
+            description = self._get_report_value(row, 'item-description', 'description')
+            image_url = self._get_report_value(row, 'image-url', 'image_url')
+            fulfillment = self._get_report_value(row, 'fulfillment-channel', 'fulfillment_channel')
+            status_raw = self._get_report_value(row, 'status', 'item-is-marketplace')
 
             # Merchant Listings reports use DEFAULT for merchant-fulfilled listings.
-            fc = 'AFN' if fulfillment.upper() in ('AMAZON_NA', 'AMAZON_EU', 'AMAZON_FE', 'AMAZON', 'AFN') else 'MFN'
-            status = 'Active'
-            if status_raw.lower() in ('inactive', 'closed'):
-                status = 'Inactive'
-            elif status_raw.lower() == 'incomplete':
-                status = 'Incomplete'
+            fc = self._amazon_fulfillment_to_channel(fulfillment)
+            status = self._amazon_status_from_report(status_raw)
 
             existing = self.env['amazon.product'].search([('sku', '=', sku), ('instance_id', '=', self.id)], limit=1)
             vals = {
@@ -361,22 +415,91 @@ class AmazonInstance(models.Model):
             if existing:
                 existing.write(vals)
                 updated += 1
+                row_action = 'updated'
             else:
                 existing = self.env['amazon.product'].create(vals)
                 created += 1
+                row_action = 'created'
 
             if not existing.odoo_product_id:
-                odoo_prod = self.env['product.product'].search([('default_code', '=', sku)], limit=1)
-                if odoo_prod:
-                    existing.odoo_product_id = odoo_prod.id
+                odoo_products = Product.search([('default_code', '=', sku)])
+                if len(odoo_products) == 1:
+                    existing.odoo_product_id = odoo_products.id
+                    mapped += 1
+                    odoo_action = 'linked-existing'
+                elif len(odoo_products) > 1:
+                    skipped += 1
+                    odoo_action = 'skipped-duplicate-default-code'
+                    debug_rows.append({
+                        'row': index,
+                        'sku': sku,
+                        'reason': 'multiple-odoo-products-with-same-internal-reference',
+                    })
+                else:
+                    try:
+                        with self.env.cr.savepoint():
+                            odoo_product = existing._create_odoo_product_from_amazon()
+                            existing.odoo_product_id = odoo_product.id
+                        odoo_created += 1
+                        odoo_action = 'created-missing'
+                    except Exception as exc:
+                        skipped += 1
+                        odoo_action = 'odoo-create-failed'
+                        debug_rows.append({
+                            'row': index,
+                            'sku': sku,
+                            'reason': 'odoo-product-create-failed',
+                            'error': str(exc),
+                        })
+            else:
+                odoo_action = 'already-linked'
+
+            if len(debug_rows) < 20:
+                debug_rows.append({
+                    'row': index,
+                    'sku': sku,
+                    'action': row_action,
+                    'mapped': bool(existing.odoo_product_id),
+                    'odoo_action': odoo_action,
+                    'fulfillment_channel': fc,
+                })
 
         self.last_product_sync = fields.Datetime.now()
         total = created + updated
-        log.log_success(
-            summary="%d product(s) synced (%d created, %d updated)." % (total, created, updated),
-            records_processed=total, records_created=created, records_updated=updated,
+        summary = (
+            "%d row(s) read; %d Amazon product(s) synced (%d created, %d updated), "
+            "%d linked to existing Odoo products, %d Odoo product(s) created, %d skipped."
+            % (len(rows), total, created, updated, mapped, odoo_created, skipped)
         )
-        return self._notify("Product Sync", "%d product(s) synced from Amazon." % total)
+        response_data = {
+            'rows_read': len(rows),
+            'created': created,
+            'updated': updated,
+            'mapped': mapped,
+            'odoo_created': odoo_created,
+            'skipped': skipped,
+            'debug_rows': debug_rows[:20],
+        }
+        if skipped:
+            log.log_partial(
+                summary=summary,
+                records_processed=len(rows),
+                records_created=created,
+                records_updated=updated,
+                records_failed=skipped,
+                error_message=str(debug_rows[:20]),
+            )
+            log.response_data = str(response_data)[:5000]
+        else:
+            log.log_success(
+                summary=summary,
+                records_processed=len(rows),
+                records_created=created,
+                records_updated=updated,
+                response_data=response_data,
+            )
+        _logger.info("[Amazon Product Sync] %s", summary)
+        return self._notify("Product Sync", summary, 'warning' if skipped else 'success', bool(skipped))
 
     def _export_product_to_amazon(self, amazon_product):
         """Export product using the product's full _build_amazon_attributes()."""
@@ -443,6 +566,37 @@ class AmazonInstance(models.Model):
             msg += " Errors: " + "; ".join(errors[:5])
         return self._notify("Bulk Export", msg, 'warning' if errors else 'success', bool(errors))
 
+    def action_open_product_setup_wizard(self):
+        self.ensure_one()
+        return {
+            'type': 'ir.actions.act_window',
+            'name': 'Amazon Product Initial Setup',
+            'res_model': 'amazon.product.setup.wizard',
+            'view_mode': 'form',
+            'target': 'new',
+            'context': {'default_instance_id': self.id},
+        }
+
+    def action_link_products_by_sku(self):
+        self.ensure_one()
+        products = self.env['amazon.product'].search([
+            ('instance_id', '=', self.id),
+            ('odoo_product_id', '=', False),
+        ])
+        if not products:
+            return self._notify("Product Mapping", "No unmapped Amazon products found for this instance.", 'warning')
+        return products._setup_odoo_products(create_missing=False)
+
+    def action_create_missing_odoo_products(self):
+        self.ensure_one()
+        products = self.env['amazon.product'].search([
+            ('instance_id', '=', self.id),
+            ('odoo_product_id', '=', False),
+        ])
+        if not products:
+            return self._notify("Create Odoo Products", "No unmapped Amazon products found for this instance.", 'warning')
+        return products._setup_odoo_products(create_missing=True)
+
     # ══════════════════════════════════════════════════
     # Price Update (Odoo → Amazon)
     # ══════════════════════════════════════════════════
@@ -460,7 +614,16 @@ class AmazonInstance(models.Model):
         if not products:
             return self._notify("Push Prices", "No mapped products to update prices for. Go to Catalog > Import / Map Products first.", 'warning')
 
-        items = [{'sku': p.sku, 'price': p.odoo_product_id.list_price, 'currency': 'USD'} for p in products if p.odoo_product_id.list_price]
+        currency = self._get_currency_code()
+        items = [
+            {
+                'sku': p.sku,
+                'price': p.odoo_product_id.list_price,
+                'currency': currency,
+                'product_type': p.product_type or 'PRODUCT',
+            }
+            for p in products if p.odoo_product_id.list_price
+        ]
         if not items:
             return self._notify("Push Prices", "Mapped products have no prices set in Odoo.", 'warning')
 
@@ -477,6 +640,15 @@ class AmazonInstance(models.Model):
     # Stock Sync (Odoo → Amazon)
     # ══════════════════════════════════════════════════
 
+    def _get_stock_qty_for_amazon_export(self, product):
+        self.ensure_one()
+        if self.fbm_warehouse_id and self.fbm_warehouse_id.lot_stock_id:
+            product = product.with_context(
+                warehouse=self.fbm_warehouse_id.id,
+                location=self.fbm_warehouse_id.lot_stock_id.id,
+            )
+        return max(0, int(product.qty_available))
+
     def action_export_stock(self):
         """Push stock levels from Odoo to Amazon via Feeds API."""
         self.ensure_one()
@@ -486,28 +658,31 @@ class AmazonInstance(models.Model):
 
         products = self.env['amazon.product'].search([
             ('instance_id', '=', self.id), ('odoo_product_id', '!=', False),
-            ('sku', '!=', False), ('fulfillment_channel', 'in', ['MFN', False]),
+            ('sku', '!=', False), ('fulfillment_channel', '=', 'MFN'),
+        ])
+        afn_mapped = self.env['amazon.product'].search_count([
+            ('instance_id', '=', self.id), ('odoo_product_id', '!=', False),
+            ('sku', '!=', False), ('fulfillment_channel', '=', 'AFN'),
         ])
         if not products:
-            # Check if there are mapped products that are AFN (FBA) — common misconfiguration
-            afn_mapped = self.env['amazon.product'].search_count([
-                ('instance_id', '=', self.id), ('odoo_product_id', '!=', False),
-                ('sku', '!=', False), ('fulfillment_channel', '=', 'AFN'),
-            ])
             if afn_mapped:
                 return self._notify(
                     "Export Stock",
                     "All %d mapped product(s) are set to Fulfilled by Amazon (FBA/AFN). "
                     "Export Stock only applies to Merchant Fulfilled (MFN) products. "
-                    "Change the Fulfillment Channel to MFN on your products, or use Pull Stock for FBA inventory." % afn_mapped,
+                    "No MFN inventory feed was sent." % afn_mapped,
                     'warning',
                 )
             return self._notify("Export Stock", "No mapped MFN products found. Map your Odoo products first via Catalog > Import / Map Products.", 'warning')
 
         items = []
         for p in products:
-            qty = p.odoo_product_id.qty_available
-            items.append({'sku': p.sku, 'quantity': max(0, int(qty))})
+            qty = self._get_stock_qty_for_amazon_export(p.odoo_product_id)
+            items.append({
+                'sku': p.sku,
+                'quantity': qty,
+                'product_type': p.product_type or 'PRODUCT',
+            })
 
         content = api.build_inventory_json_feed(self, items)
         result = self._api_call_safe(
@@ -517,14 +692,17 @@ class AmazonInstance(models.Model):
         )
         feed_id = result.get('feedId', 'N/A')
         self.last_stock_sync = fields.Datetime.now()
-        return self._notify("Stock Export", "Inventory feed submitted (Feed ID: %s). %d product(s)." % (feed_id, len(items)))
+        msg = "Inventory feed submitted (Feed ID: %s). %d MFN product(s)." % (feed_id, len(items))
+        if afn_mapped:
+            msg += " Skipped %d FBA/AFN product(s)." % afn_mapped
+        return self._notify("Stock Export", msg, 'warning' if afn_mapped else 'success', bool(afn_mapped))
 
     # ══════════════════════════════════════════════════
     # Stock Pull (Amazon → Odoo)
     # ══════════════════════════════════════════════════
 
     def action_pull_stock(self):
-        """Pull stock levels from Amazon into amazon.product records and update Odoo quants."""
+        """Manual Amazon → Odoo stock reconciliation."""
         self.ensure_one()
         self._check_required_fields()
         access_token = self._get_access_token_or_raise()
@@ -565,14 +743,20 @@ class AmazonInstance(models.Model):
                 updated += 1
 
         self.last_stock_sync = fields.Datetime.now()
-        return self._notify("Stock Pull", "%d product stock level(s) updated from Amazon." % updated)
+        return self._notify(
+            "Stock Pull",
+            "%d product stock level(s) pulled from Amazon. This is Amazon → Odoo reconciliation; "
+            "do not use it when Odoo is stock master unless you intentionally want to reconcile." % updated,
+            'warning',
+            True,
+        )
 
     # ══════════════════════════════════════════════════
     # Price Pull (Amazon → Odoo)
     # ══════════════════════════════════════════════════
 
     def action_pull_prices(self):
-        """Pull prices from Amazon listings and update Odoo product prices."""
+        """Manual Amazon → Odoo price reconciliation."""
         self.ensure_one()
         self._check_required_fields()
         access_token = self._get_access_token_or_raise()
@@ -605,7 +789,13 @@ class AmazonInstance(models.Model):
             except Exception as exc:
                 _logger.warning("Failed to pull price for %s: %s", prod.sku, exc)
 
-        return self._notify("Price Pull", "%d product price(s) pulled from Amazon." % updated)
+        return self._notify(
+            "Price Pull",
+            "%d product price(s) pulled from Amazon. This is Amazon → Odoo reconciliation; "
+            "do not use it when Odoo is price master unless you intentionally want to reconcile." % updated,
+            'warning',
+            True,
+        )
 
     # ══════════════════════════════════════════════════
     # Full Bidirectional Sync (All at once)
@@ -616,15 +806,56 @@ class AmazonInstance(models.Model):
         self.ensure_one()
         self._auto_fix_region()
         self._check_required_fields()
+        existing_unmapped = self.env['amazon.product'].search_count([
+            ('instance_id', '=', self.id),
+            ('sku', '!=', False),
+            ('odoo_product_id', '=', False),
+        ])
+        if existing_unmapped:
+            raise UserError(
+                "Full Sync blocked: %d Amazon product(s) are not linked to Odoo products. "
+                "Skipped order import, stock export, price update, and cancellation checks. "
+                "Run Link Existing Products by SKU or Create Missing Odoo Products first."
+                % existing_unmapped
+            )
+
         log = self._log_start('full_sync')
         results = []
 
         # 1. Pull products from Amazon
+        product_sync_failed = False
         try:
             self.action_sync_products()
             results.append("Products synced")
         except Exception as exc:
+            product_sync_failed = True
             results.append("Product sync failed: %s" % exc)
+        if product_sync_failed:
+            results.extend([
+                "Order import skipped: product sync failed",
+                "Stock export skipped: product sync failed",
+                "Price update skipped: product sync failed",
+                "Cancellation check skipped: product sync failed",
+            ])
+            summary = " | ".join(results)
+            log.log_partial(summary=summary, records_failed=1)
+            return self._notify("Full Sync Protected", summary, 'warning', True)
+
+        unmapped_after_product_sync = self.env['amazon.product'].search_count([
+            ('instance_id', '=', self.id),
+            ('sku', '!=', False),
+            ('odoo_product_id', '=', False),
+        ])
+        if unmapped_after_product_sync:
+            results.extend([
+                "Order import skipped: %d unmapped product(s)" % unmapped_after_product_sync,
+                "Stock export skipped: %d unmapped product(s)" % unmapped_after_product_sync,
+                "Price update skipped: %d unmapped product(s)" % unmapped_after_product_sync,
+                "Cancellation check skipped: %d unmapped product(s)" % unmapped_after_product_sync,
+            ])
+            summary = " | ".join(results)
+            log.log_partial(summary=summary, records_failed=unmapped_after_product_sync)
+            return self._notify("Full Sync Protected", summary, 'warning', True)
 
         # 2. Pull orders
         try:
@@ -1001,10 +1232,8 @@ class AmazonInstance(models.Model):
             if not doc_id or not upload_url:
                 raise UserError("Amazon did not return a feed document upload URL.")
 
-            # Upload the PDF to Amazon's pre-signed S3 URL
-            import requests as req
-            upload_resp = req.put(upload_url, data=pdf_content, headers={'Content-Type': 'application/pdf'}, timeout=60)
-            upload_resp.raise_for_status()
+            # Upload the PDF to Amazon's pre-signed S3 URL.
+            api.upload_feed_document(upload_url, pdf_content, content_type='application/pdf', instance=self)
 
             # Submit the feed referencing the document.
             feed_result = api.create_feed(self, access_token, FEED_INVOICE_UPLOAD, doc_id)
@@ -1128,6 +1357,7 @@ class AmazonInstance(models.Model):
             download_url,
             compression=doc_data.get('compressionAlgorithm'),
             encryption=doc_data.get('encryptionDetails'),
+            instance=self,
         )
         # Same defensive parsing as fetch_report_rows in amazon_api.py: strip
         # BOM, normalise line endings, and disable CSV quoting. Without this a
@@ -1654,11 +1884,10 @@ class AmazonInstance(models.Model):
 
             # Stock pull (Amazon → Odoo)
             if inst._should_run('stock_pull_interval', 'last_stock_sync'):
-                try:
-                    inst.action_pull_stock()
-                    _logger.info("[AutoSync] Stock pulled for %s", inst.name)
-                except Exception as exc:
-                    _logger.error("[AutoSync] Stock pull failed for %s: %s", inst.name, exc)
+                _logger.warning(
+                    "[AutoSync] Stock pull skipped for %s. Amazon → Odoo stock reconciliation is manual only.",
+                    inst.name,
+                )
 
             # Price push
             if inst._should_run('price_push_interval', 'last_stock_sync'):
@@ -1670,11 +1899,10 @@ class AmazonInstance(models.Model):
 
             # Price pull
             if inst._should_run('price_pull_interval', 'last_stock_sync'):
-                try:
-                    inst.action_pull_prices()
-                    _logger.info("[AutoSync] Prices pulled for %s", inst.name)
-                except Exception as exc:
-                    _logger.error("[AutoSync] Price pull failed for %s: %s", inst.name, exc)
+                _logger.warning(
+                    "[AutoSync] Price pull skipped for %s. Amazon → Odoo price reconciliation is manual only.",
+                    inst.name,
+                )
 
             # Settlement reports
             if inst._should_run('settlement_sync_interval', 'last_order_sync'):
@@ -1764,7 +1992,7 @@ class AmazonInstance(models.Model):
                     self.ai_provider or 'groq', self.ai_api_key, self.ai_model,
                     product_name=product.name, category=product.product_type or '',
                     current_price=product.amazon_price, cost_price=cost,
-                    currency=self.default_currency_id.name if self.default_currency_id else 'INR',
+                    currency=self._get_currency_code(),
                 )
                 self.env['amazon.ai.pricing'].create({
                     'product_id': product.id, 'current_price': product.amazon_price,
@@ -1903,17 +2131,17 @@ class AmazonInstance(models.Model):
 
     def cron_pull_stock(self):
         for inst in self.env['amazon.instance'].search([]):
-            try:
-                inst.action_pull_stock()
-            except Exception as exc:
-                _logger.error("Cron stock pull failed for %s: %s", inst.display_name, exc)
+            _logger.warning(
+                "Cron stock pull skipped for %s. Amazon → Odoo stock reconciliation is manual only.",
+                inst.display_name,
+            )
 
     def cron_pull_prices(self):
         for inst in self.env['amazon.instance'].search([]):
-            try:
-                inst.action_pull_prices()
-            except Exception as exc:
-                _logger.error("Cron price pull failed for %s: %s", inst.display_name, exc)
+            _logger.warning(
+                "Cron price pull skipped for %s. Amazon → Odoo price reconciliation is manual only.",
+                inst.display_name,
+            )
 
     def cron_full_sync(self):
         for inst in self.env['amazon.instance'].search([]):

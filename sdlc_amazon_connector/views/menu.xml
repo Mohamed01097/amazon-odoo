@@ -15,7 +15,8 @@
     <!-- Products -->
     <menuitem id="amazon_catalog_menu" parent="amazon_root" name="Catalog" sequence="10"/>
     <menuitem id="amazon_product_menu" parent="amazon_catalog_menu" name="Products" action="amazon_product_action" sequence="10"/>
-    <menuitem id="amazon_product_import_menu" parent="amazon_catalog_menu" name="Import / Map Products" action="amazon_product_import_wizard_action" sequence="20"/>
+    <menuitem id="amazon_product_setup_menu" parent="amazon_catalog_menu" name="Initial Product Setup" action="amazon_product_setup_wizard_action" sequence="20"/>
+    <menuitem id="amazon_product_import_menu" parent="amazon_catalog_menu" name="Import / Map Products" action="amazon_product_import_wizard_action" sequence="30"/>
 
     <!-- Orders -->
     <menuitem id="amazon_orders_menu" parent="amazon_root" name="Orders" sequence="20"/>

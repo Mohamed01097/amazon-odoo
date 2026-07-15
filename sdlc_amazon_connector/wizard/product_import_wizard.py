@@ -212,3 +212,49 @@ class AmazonProductImportWizard(models.TransientModel):
                 "sticky": has_errors,
             },
         }
+
+
+class AmazonProductSetupWizard(models.TransientModel):
+    _name = 'amazon.product.setup.wizard'
+    _description = 'Amazon Product Initial Setup Wizard'
+
+    instance_id = fields.Many2one('amazon.instance', string='Amazon Instance', required=True)
+    operation = fields.Selection([
+        ('link_existing', 'Link only existing Odoo products by SKU'),
+        ('create_missing', 'Create missing Odoo products'),
+    ], string='Operation', default='link_existing', required=True)
+    update_odoo_prices_from_amazon = fields.Boolean(
+        string='Update Odoo prices from Amazon once',
+        help="Use only during initial setup or intentional reconciliation. Normal product sync does not update Odoo prices.",
+    )
+
+    def action_apply(self):
+        self.ensure_one()
+        domain = [('instance_id', '=', self.instance_id.id)]
+        if not self.update_odoo_prices_from_amazon:
+            domain.append(('odoo_product_id', '=', False))
+        products = self.env['amazon.product'].search(domain)
+        if not products:
+            return self._notify("No Amazon products found for the selected operation.", True)
+
+        if self.operation == 'link_existing':
+            return products._setup_odoo_products(
+                create_missing=False,
+                update_prices_from_amazon=self.update_odoo_prices_from_amazon,
+            )
+        return products._setup_odoo_products(
+            create_missing=True,
+            update_prices_from_amazon=self.update_odoo_prices_from_amazon,
+        )
+
+    def _notify(self, message, has_errors=False):
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": "Product Initial Setup",
+                "message": message,
+                "type": "warning" if has_errors else "success",
+                "sticky": has_errors,
+            },
+        }
