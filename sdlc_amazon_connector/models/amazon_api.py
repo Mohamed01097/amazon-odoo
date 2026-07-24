@@ -5,7 +5,9 @@ import gzip
 import io
 import json
 import logging
+import random
 import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import requests
@@ -16,6 +18,8 @@ _logger = logging.getLogger(__name__)
 # Retry config
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 1.5  # seconds — 1.5, 3, 6
+MAX_RETRY_SLEEP = 20.0
+AMAZON_SAFE_BEFORE_DELAY = timedelta(minutes=3)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 REDACTED = '***REDACTED***'
 SENSITIVE_KEYS = {
@@ -29,6 +33,35 @@ REGION_ENDPOINTS = {
     'eu': 'https://sellingpartnerapi-eu.amazon.com',
     'fe': 'https://sellingpartnerapi-fe.amazon.com',
 }
+
+
+def amazon_to_utc_naive(value):
+    """Normalize Odoo/Amazon datetime values to UTC-naive datetimes."""
+    if not value:
+        return False
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized.endswith('Z'):
+            normalized = normalized[:-1] + '+00:00'
+        value = datetime.fromisoformat(normalized)
+    if value.tzinfo:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.replace(microsecond=0)
+
+
+def amazon_safe_before_dt(requested_before=None):
+    """Return a safe Amazon Orders API upper bound with a 3-minute UTC delay."""
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+    safe_before = now_utc - AMAZON_SAFE_BEFORE_DELAY
+    requested_before = amazon_to_utc_naive(requested_before)
+    if not requested_before:
+        return safe_before
+    return min(requested_before, safe_before)
+
+
+def amazon_safe_before_iso(requested_before=None):
+    """Return a safe Amazon Orders API upper bound formatted as UTC ISO-8601."""
+    return amazon_safe_before_dt(requested_before).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 # ── Report types ──
 REPORT_MERCHANT_LISTINGS = 'GET_MERCHANT_LISTINGS_ALL_DATA'
@@ -290,11 +323,25 @@ class AmazonAPI():
                     wait = RETRY_BACKOFF_BASE * (2 ** attempt)
                     # Respect Retry-After header if present
                     retry_after = response.headers.get('Retry-After')
+                    retry_after_seconds = None
                     if retry_after:
                         try:
-                            wait = max(wait, float(retry_after))
+                            retry_after_seconds = float(retry_after)
+                            wait = max(wait, retry_after_seconds)
                         except (ValueError, TypeError):
                             pass
+                    if response.status_code == 429 and retry_after_seconds and retry_after_seconds > MAX_RETRY_SLEEP:
+                        _logger.warning(
+                            "Amazon %s %s returned 429 with Retry-After %.1fs; "
+                            "raising for caller-level deferred retry.",
+                            method, url, retry_after_seconds,
+                        )
+                        self._raise_amazon_http_error(
+                            response, method, url, request_headers=request_headers,
+                            payload=payload_for_log, elapsed=elapsed,
+                        )
+                    wait += random.uniform(0.0, min(wait * 0.25, 2.0))
+                    wait = min(wait, MAX_RETRY_SLEEP)
                     _logger.warning(
                         "Amazon %s %s returned %s — retrying in %.1fs (attempt %d/%d)",
                         method, url, response.status_code, wait, attempt + 1, MAX_RETRIES,
@@ -319,6 +366,7 @@ class AmazonAPI():
                 )
                 if attempt < MAX_RETRIES:
                     wait = RETRY_BACKOFF_BASE * (2 ** attempt)
+                    wait += random.uniform(0.0, min(wait * 0.25, 2.0))
                     _logger.warning(
                         "Amazon %s %s network error: %s — retrying in %.1fs (attempt %d/%d)",
                         method, url, exc, wait, attempt + 1, MAX_RETRIES,
@@ -635,18 +683,29 @@ class AmazonAPI():
     # Orders API
     # ══════════════════════════════════════════════════
 
-    def get_orders(self, instance, access_token, created_after=None, order_statuses=None, fulfillment_channels=None, next_token=None):
+    def get_orders(self, instance, access_token, created_after=None, created_before=None,
+                   last_updated_after=None, last_updated_before=None, order_statuses=None,
+                   fulfillment_channels=None, next_token=None, max_results_per_page=None):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/orders/v0/orders"
-        params = {"MarketplaceIds": instance.marketplace_id}
-        if created_after:
-            params["CreatedAfter"] = created_after
-        if order_statuses:
-            params["OrderStatuses"] = order_statuses
-        if fulfillment_channels:
-            params["FulfillmentChannels"] = fulfillment_channels
         if next_token:
-            params["NextToken"] = next_token
+            params = {"NextToken": next_token}
+        else:
+            params = {"MarketplaceIds": instance.marketplace_id}
+            if created_after:
+                params["CreatedAfter"] = created_after
+            if created_before:
+                params["CreatedBefore"] = amazon_safe_before_iso(created_before)
+            if last_updated_after:
+                params["LastUpdatedAfter"] = last_updated_after
+            if last_updated_before:
+                params["LastUpdatedBefore"] = amazon_safe_before_iso(last_updated_before)
+            if order_statuses:
+                params["OrderStatuses"] = order_statuses
+            if fulfillment_channels:
+                params["FulfillmentChannels"] = fulfillment_channels
+            if max_results_per_page:
+                params["MaxResultsPerPage"] = max_results_per_page
         resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return resp.json()
 

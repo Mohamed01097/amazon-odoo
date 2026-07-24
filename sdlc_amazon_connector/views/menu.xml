@@ -23,6 +23,7 @@
     <menuitem id="amazon_all_orders_menu" parent="amazon_orders_menu" name="All Orders" action="amazon_sale_order_action" sequence="10"/>
     <menuitem id="amazon_fbm_orders_menu" parent="amazon_orders_menu" name="FBM Orders" action="amazon_sale_order_action_fbm" sequence="20"/>
     <menuitem id="amazon_fba_orders_menu" parent="amazon_orders_menu" name="FBA Orders" action="amazon_sale_order_action_fba" sequence="30"/>
+    <menuitem id="amazon_order_import_job_menu" parent="amazon_orders_menu" name="Import Jobs" action="amazon_order_import_job_action" sequence="40"/>
 
     <!-- ═══ Delivery (NEW dropdown) ═══ -->
     <menuitem id="amazon_delivery_menu" parent="amazon_root" name="Delivery" sequence="25"/>

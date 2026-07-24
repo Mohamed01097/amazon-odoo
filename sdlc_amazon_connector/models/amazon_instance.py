@@ -13,6 +13,34 @@ from .amazon_api import (
 
 _logger = logging.getLogger(__name__)
 
+
+def _amazon_datetime_to_odoo(value):
+    """Convert Amazon SP-API ISO datetimes to Odoo naive UTC datetimes."""
+    if not value:
+        return False
+
+    if isinstance(value, datetime):
+        date_value = value
+    elif isinstance(value, str):
+        normalized_value = value.strip()
+        if not normalized_value:
+            return False
+        if normalized_value.endswith('Z'):
+            normalized_value = normalized_value[:-1] + '+00:00'
+        try:
+            date_value = datetime.fromisoformat(normalized_value)
+        except ValueError:
+            _logger.warning("Invalid Amazon datetime value: %s", value)
+            return False
+    else:
+        _logger.warning("Unsupported Amazon datetime value %r of type %s", value, type(value).__name__)
+        return False
+
+    if date_value.tzinfo:
+        date_value = date_value.astimezone(timezone.utc).replace(tzinfo=None)
+    return date_value
+
+
 # Amazon Marketplace ID → SP-API region
 MARKETPLACE_REGION = {
     # North America
@@ -109,6 +137,35 @@ class AmazonInstance(models.Model):
     last_order_sync = fields.Datetime('Last Order Sync')
     last_stock_sync = fields.Datetime('Last Stock Sync')
     last_product_sync = fields.Datetime('Last Product Sync')
+
+    # Order import controls
+    initial_order_import_from = fields.Datetime(
+        'Initial Order Import From',
+        help="Optional start datetime for the next order import job. Leave empty for normal incremental sync.",
+    )
+    initial_order_import_to = fields.Datetime(
+        'Initial Order Import To',
+        help="Optional end datetime for the next order import job. Use this for safe initial one-day imports.",
+    )
+    order_import_batch_size = fields.Integer(
+        'Import Batch Size',
+        default=10,
+        help="Maximum Amazon orders processed by one background cron transaction.",
+    )
+    order_import_overlap_minutes = fields.Integer(
+        'Order Import Overlap Minutes',
+        default=10,
+        help="Normal incremental sync starts this many minutes before Last Order Sync. Idempotency prevents duplicates.",
+    )
+
+    _order_import_batch_size_range = models.Constraint(
+        'CHECK (order_import_batch_size IS NULL OR (order_import_batch_size >= 1 AND order_import_batch_size <= 100))',
+        'Order import batch size must be between 1 and 100.',
+    )
+    _order_import_overlap_non_negative = models.Constraint(
+        'CHECK (order_import_overlap_minutes IS NULL OR order_import_overlap_minutes >= 0)',
+        'Order import overlap minutes cannot be negative.',
+    )
 
     # ── Auto Sync Scheduler ──
     auto_sync_enabled = fields.Boolean('Enable Auto Sync', default=False)
@@ -860,7 +917,7 @@ class AmazonInstance(models.Model):
         # 2. Pull orders
         try:
             self.action_import_orders()
-            results.append("Orders imported")
+            results.append("Order import job queued")
         except Exception as exc:
             results.append("Order import failed: %s" % exc)
 
@@ -896,211 +953,143 @@ class AmazonInstance(models.Model):
     # Order Import (Amazon → Odoo)
     # ══════════════════════════════════════════════════
 
-    def action_import_orders(self):
-        """Import FBM + FBA orders from Amazon."""
+    def _get_order_import_window(self):
+        """Return a bounded order import window for a new async job."""
+        self.ensure_one()
+        now = fields.Datetime.now()
+        if self.initial_order_import_from:
+            date_from = self.initial_order_import_from
+        elif self.last_order_sync:
+            overlap = self.order_import_overlap_minutes if self.order_import_overlap_minutes is not None else 10
+            date_from = self.last_order_sync - timedelta(minutes=overlap)
+        else:
+            date_from = now - timedelta(days=30)
+
+        date_to = self.initial_order_import_to or now
+        if date_from and date_to and date_from >= date_to:
+            raise UserError("Initial Order Import From must be earlier than Initial Order Import To.")
+        return date_from, date_to
+
+    def _queue_order_import_job(self, fulfillment_channel=False):
+        """Create or reuse a resumable background order import job."""
         self.ensure_one()
         self._auto_fix_region()
         self._check_required_fields()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
 
-        log = self._log_start('order_import')
+        active_job = self.env['amazon.order.import.job'].search([
+            ('instance_id', '=', self.id),
+            ('state', 'in', ('draft', 'running')),
+        ], limit=1)
+        if active_job:
+            return active_job, False, False
 
-        created_after = self.last_order_sync or (datetime.now(timezone.utc) - timedelta(days=30))
-        if isinstance(created_after, datetime):
-            created_after = created_after.strftime('%Y-%m-%dT%H:%M:%SZ')
+        date_from, date_to = self._get_order_import_window()
+        batch_size = self.order_import_batch_size or 10
+        job_model = self.env['amazon.order.import.job']
+        effective_date_to = job_model._get_amazon_safe_before_dt(date_to)
+        amazon_request_before = job_model._get_amazon_safe_before(date_to)
 
-        imported = 0
-        next_token = None
-        while True:
-            data = self._api_call_safe(
-                api.get_orders, self, access_token,
-                created_after=created_after, next_token=next_token,
-                error_msg="Failed to fetch orders"
-            )
-            orders = data.get('payload', {}).get('Orders', [])
-            for order_data in orders:
-                amazon_order_id = order_data.get('AmazonOrderId')
-                if not amazon_order_id:
-                    continue
+        unmapped_count = self.env['amazon.product'].search_count([
+            ('instance_id', '=', self.id),
+            ('sku', '!=', False),
+            ('odoo_product_id', '=', False),
+        ])
+        mapping_warning = bool(unmapped_count)
 
-                existing = self.env['amazon.sale.order'].search([
-                    ('amazon_order_ref', '=', amazon_order_id),
-                    ('instance_id', '=', self.id),
-                ], limit=1)
-
-                amount = order_data.get('OrderTotal', {})
-                vals = {
-                    'amazon_order_ref': amazon_order_id,
-                    'instance_id': self.id,
-                    'order_status': order_data.get('OrderStatus', 'Pending'),
-                    'fulfillment_channel': order_data.get('FulfillmentChannel', 'MFN'),
-                    'order_type': order_data.get('OrderType', 'StandardOrder'),
-                    'purchase_date': order_data.get('PurchaseDate'),
-                    'last_update_date': order_data.get('LastUpdateDate'),
-                    'sales_channel': order_data.get('SalesChannel', ''),
-                    'is_prime': order_data.get('IsPrime', False),
-                    'is_business_order': order_data.get('IsBusinessOrder', False),
-                    'order_total': float(amount.get('Amount', 0)) if amount else 0,
-                    'ship_service_level': order_data.get('ShipServiceLevel', ''),
-                }
-
-                # Currency
-                currency_code = amount.get('CurrencyCode') if amount else None
-                if currency_code:
-                    currency = self.env['res.currency'].search([('name', '=', currency_code)], limit=1)
-                    if currency:
-                        vals['currency_id'] = currency.id
-
-                # Shipping address
-                ship_addr = order_data.get('ShippingAddress', {})
-                if ship_addr:
-                    vals.update({
-                        'shipping_address_name': ship_addr.get('Name', ''),
-                        'shipping_address_line1': ship_addr.get('AddressLine1', ''),
-                        'shipping_address_line2': ship_addr.get('AddressLine2', ''),
-                        'shipping_city': ship_addr.get('City', ''),
-                        'shipping_state': ship_addr.get('StateOrRegion', ''),
-                        'shipping_postal_code': ship_addr.get('PostalCode', ''),
-                        'shipping_country_code': ship_addr.get('CountryCode', ''),
-                    })
-
-                if existing:
-                    existing.write(vals)
-                    order_rec = existing
-                else:
-                    order_rec = self.env['amazon.sale.order'].create(vals)
-                    imported += 1
-
-                # Fetch order items
-                try:
-                    items_data = api.get_order_items(self, access_token, amazon_order_id)
-                    order_items = items_data.get('payload', {}).get('OrderItems', [])
-                    for item in order_items:
-                        item_id = item.get('OrderItemId')
-                        existing_line = self.env['amazon.sale.order.line'].search([
-                            ('order_id', '=', order_rec.id),
-                            ('amazon_order_item_id', '=', item_id),
-                        ], limit=1)
-                        price_info = item.get('ItemPrice', {})
-                        tax_info = item.get('ItemTax', {})
-                        shipping_info = item.get('ShippingPrice', {})
-                        promo_info = item.get('PromotionDiscount', {})
-
-                        line_vals = {
-                            'order_id': order_rec.id,
-                            'amazon_order_item_id': item_id,
-                            'sku': item.get('SellerSKU', ''),
-                            'asin': item.get('ASIN', ''),
-                            'title': item.get('Title', ''),
-                            'quantity': item.get('QuantityOrdered', 1),
-                            'item_price': float(price_info.get('Amount', 0)) if price_info else 0,
-                            'item_tax': float(tax_info.get('Amount', 0)) if tax_info else 0,
-                            'shipping_price': float(shipping_info.get('Amount', 0)) if shipping_info else 0,
-                            'promotion_discount': float(promo_info.get('Amount', 0)) if promo_info else 0,
-                        }
-
-                        # Auto-map product
-                        if line_vals['sku']:
-                            amz_prod = self.env['amazon.product'].search([
-                                ('sku', '=', line_vals['sku']), ('instance_id', '=', self.id)
-                            ], limit=1)
-                            if amz_prod:
-                                line_vals['amazon_product_id'] = amz_prod.id
-                                if amz_prod.odoo_product_id:
-                                    line_vals['odoo_product_id'] = amz_prod.odoo_product_id.id
-
-                        if existing_line:
-                            existing_line.write(line_vals)
-                        else:
-                            self.env['amazon.sale.order.line'].create(line_vals)
-                except Exception as exc:
-                    _logger.warning("Failed to fetch items for order %s: %s", amazon_order_id, exc)
-
-                # Auto-create Odoo sale.order if not exists
-                if not order_rec.sale_order_id and order_rec.order_line_ids:
-                    try:
-                        order_rec.action_create_sale_order()
-                        _logger.info("Auto-created Odoo SO for Amazon order %s", amazon_order_id)
-                    except Exception as exc:
-                        _logger.warning("Failed to auto-create SO for %s: %s", amazon_order_id, exc)
-
-            next_token = data.get('payload', {}).get('NextToken')
-            if not next_token:
-                break
-
-        self.last_order_sync = fields.Datetime.now()
-        log.log_success(
-            summary="%d new order(s) imported." % imported,
-            records_processed=imported, records_created=imported,
+        job = self.env['amazon.order.import.job'].create({
+            'instance_id': self.id,
+            'date_from': date_from,
+            'date_to': date_to,
+            'effective_date_to': effective_date_to,
+            'amazon_request_before': amazon_request_before,
+            'upper_bound_adjusted': bool(date_to and date_to > effective_date_to),
+            'batch_size': batch_size,
+            'fulfillment_channel': fulfillment_channel or False,
+            'error_message': (
+                "%d existing Amazon product(s) are not linked to Odoo products. "
+                "Affected Sale Orders will be skipped until products are mapped."
+            ) % unmapped_count if unmapped_count else False,
+        })
+        log = self._log_start(
+            'order_import',
+            request_data={
+                'job_id': job.id,
+                'date_from': date_from,
+                'date_to': date_to,
+                'effective_date_to': effective_date_to,
+                'amazon_request_before': amazon_request_before,
+                'batch_size': batch_size,
+                'fulfillment_channel': fulfillment_channel or 'all',
+            },
+            res_model='amazon.order.import.job',
+            res_id=job.id,
         )
-        return self._notify("Order Import", "%d new order(s) imported from Amazon." % imported)
+        job.sync_log_id = log.id
+
+        cron = self.env.ref('sdlc_amazon_connector.cron_amazon_process_order_import_jobs', raise_if_not_found=False)
+        if cron and not cron.active:
+            cron.active = True
+        return job, True, mapping_warning
+
+    def action_import_orders(self):
+        """Start a resumable background import job for FBM + FBA orders."""
+        job, created, mapping_warning = self._queue_order_import_job()
+        if not created:
+            return self._notify(
+                "Order import already running",
+                "Job #%s is already queued/running for this instance." % job.id,
+                'warning',
+                True,
+            )
+        message = "Order import started. Job #%s will process up to %d order(s) per cron run." % (
+            job.id, job.batch_size,
+        )
+        if mapping_warning:
+            message += " Some existing Amazon products are not mapped; affected Sale Orders will be skipped and logged."
+        return self._notify("Order Import", message, 'warning' if mapping_warning else 'success', mapping_warning)
 
     def action_import_fbm_orders(self):
-        """Import only FBM (Merchant Fulfilled) orders."""
-        self.ensure_one()
-        self._auto_fix_region()
-        self._check_required_fields()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        created_after = self.last_order_sync or (datetime.now(timezone.utc) - timedelta(days=30))
-        if isinstance(created_after, datetime):
-            created_after = created_after.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-        data = self._api_call_safe(
-            api.get_orders, self, access_token,
-            created_after=created_after, fulfillment_channels='MFN',
-            error_msg="Failed to fetch FBM orders"
+        """Start a resumable background import job for FBM orders."""
+        job, created, mapping_warning = self._queue_order_import_job('MFN')
+        if not created:
+            return self._notify(
+                "FBM order import already running",
+                "Job #%s is already queued/running for this instance." % job.id,
+                'warning',
+                True,
+            )
+        message = "FBM order import started. Job #%s will process up to %d order(s) per cron run." % (
+            job.id, job.batch_size,
         )
-        return self._process_order_import(data, access_token, api, 'FBM')
+        if mapping_warning:
+            message += " Some existing Amazon products are not mapped; affected Sale Orders will be skipped and logged."
+        return self._notify("FBM Order Import", message, 'warning' if mapping_warning else 'success', mapping_warning)
 
     def action_import_fba_orders(self):
-        """Import only FBA (Amazon Fulfilled) orders."""
-        self.ensure_one()
-        self._auto_fix_region()
-        self._check_required_fields()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        created_after = self.last_order_sync or (datetime.now(timezone.utc) - timedelta(days=30))
-        if isinstance(created_after, datetime):
-            created_after = created_after.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-        data = self._api_call_safe(
-            api.get_orders, self, access_token,
-            created_after=created_after, fulfillment_channels='AFN',
-            error_msg="Failed to fetch FBA orders"
+        """Start a resumable background import job for FBA orders."""
+        job, created, mapping_warning = self._queue_order_import_job('AFN')
+        if not created:
+            return self._notify(
+                "FBA order import already running",
+                "Job #%s is already queued/running for this instance." % job.id,
+                'warning',
+                True,
+            )
+        message = "FBA order import started. Job #%s will process up to %d order(s) per cron run." % (
+            job.id, job.batch_size,
         )
-        return self._process_order_import(data, access_token, api, 'FBA')
+        if mapping_warning:
+            message += " Some existing Amazon products are not mapped; affected Sale Orders will be skipped and logged."
+        return self._notify("FBA Order Import", message, 'warning' if mapping_warning else 'success', mapping_warning)
 
     def _process_order_import(self, data, access_token, api, label):
-        """Helper to process order import response."""
-        orders = data.get('payload', {}).get('Orders', [])
-        imported = 0
-        for order_data in orders:
-            amazon_order_id = order_data.get('AmazonOrderId')
-            if not amazon_order_id:
-                continue
-            existing = self.env['amazon.sale.order'].search([
-                ('amazon_order_ref', '=', amazon_order_id), ('instance_id', '=', self.id)
-            ], limit=1)
-            if existing:
-                continue
-            amount = order_data.get('OrderTotal', {})
-            vals = {
-                'amazon_order_ref': amazon_order_id,
-                'instance_id': self.id,
-                'order_status': order_data.get('OrderStatus', 'Pending'),
-                'fulfillment_channel': order_data.get('FulfillmentChannel', 'MFN'),
-                'purchase_date': order_data.get('PurchaseDate'),
-                'order_total': float(amount.get('Amount', 0)) if amount else 0,
-                'sales_channel': order_data.get('SalesChannel', ''),
-            }
-            self.env['amazon.sale.order'].create(vals)
-            imported += 1
-        self.last_order_sync = fields.Datetime.now()
-        return self._notify("%s Order Import" % label, "%d new %s order(s) imported." % (imported, label))
+        """Deprecated compatibility wrapper; order imports are asynchronous now."""
+        _logger.warning("Deprecated synchronous order import helper called; queuing %s import job instead.", label)
+        if label == 'FBM':
+            return self.action_import_fbm_orders()
+        if label == 'FBA':
+            return self.action_import_fba_orders()
+        return self.action_import_orders()
 
     # ══════════════════════════════════════════════════
     # Order Status & Cancellation Check
@@ -1862,7 +1851,7 @@ class AmazonInstance(models.Model):
             if inst._should_run('order_sync_interval', 'last_order_sync'):
                 try:
                     inst.action_import_orders()
-                    _logger.info("[AutoSync] Orders synced for %s", inst.name)
+                    _logger.info("[AutoSync] Order import job queued for %s", inst.name)
                 except Exception as exc:
                     _logger.error("[AutoSync] Order sync failed for %s: %s", inst.name, exc)
 
@@ -2070,6 +2059,7 @@ class AmazonInstance(models.Model):
         for inst in self.env['amazon.instance'].search([]):
             try:
                 inst.action_import_orders()
+                _logger.info("Cron queued order import job for %s", inst.display_name)
             except Exception as exc:
                 _logger.error("Cron order import failed for %s: %s", inst.display_name, exc)
 
@@ -2077,6 +2067,7 @@ class AmazonInstance(models.Model):
         for inst in self.env['amazon.instance'].search([]):
             try:
                 inst.action_import_fbm_orders()
+                _logger.info("Cron queued FBM order import job for %s", inst.display_name)
             except Exception as exc:
                 _logger.error("Cron FBM order import failed for %s: %s", inst.display_name, exc)
 

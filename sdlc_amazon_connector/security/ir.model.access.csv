@@ -3,6 +3,7 @@ access_amazon_instance,amazon.instance,model_amazon_instance,,1,1,1,1
 access_amazon_product,amazon.product,model_amazon_product,,1,1,1,1
 access_amazon_sale_order,amazon.sale.order,model_amazon_sale_order,,1,1,1,1
 access_amazon_sale_order_line,amazon.sale.order.line,model_amazon_sale_order_line,,1,1,1,1
+access_amazon_order_import_job,amazon.order.import.job,model_amazon_order_import_job,,1,1,1,1
 access_amazon_settlement_report,amazon.settlement.report,model_amazon_settlement_report,,1,1,1,1
 access_amazon_settlement_report_line,amazon.settlement.report.line,model_amazon_settlement_report_line,,1,1,1,1
 access_amazon_return_report,amazon.return.report,model_amazon_return_report,,1,1,1,1

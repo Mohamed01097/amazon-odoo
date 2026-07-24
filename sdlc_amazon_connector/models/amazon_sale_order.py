@@ -100,9 +100,10 @@ class AmazonSaleOrder(models.Model):
     order_line_ids = fields.One2many('amazon.sale.order.line', 'order_id', string='Order Lines')
     line_count = fields.Integer(compute='_compute_line_count')
 
-    _sql_constraints = [
-        ('unique_order_instance', 'unique(amazon_order_ref, instance_id)', 'Amazon Order ID must be unique per instance.'),
-    ]
+    _unique_order_instance = models.Constraint(
+        'UNIQUE(amazon_order_ref, instance_id)',
+        'Amazon Order ID must be unique per instance.',
+    )
 
     def _compute_line_count(self):
         for rec in self:
@@ -299,7 +300,48 @@ Return ONLY valid JSON:
         """Create an Odoo sale.order from this Amazon order."""
         self.ensure_one()
         if self.sale_order_id:
-            raise UserError("Odoo sale order already exists: %s" % self.sale_order_id.name)
+            return {
+                'type': 'ir.actions.act_window',
+                'res_model': 'sale.order',
+                'res_id': self.sale_order_id.id,
+                'view_mode': 'form',
+            }
+
+        existing_sale_order = self.env['sale.order'].search([
+            ('amazon_order_id', '=', self.id),
+        ], limit=1)
+        if not existing_sale_order and self.amazon_order_ref and self.instance_id:
+            existing_sale_order = self.env['sale.order'].search([
+                ('client_order_ref', '=', self.amazon_order_ref),
+                ('amazon_instance_id', '=', self.instance_id.id),
+            ], limit=1)
+        if existing_sale_order:
+            self.sale_order_id = existing_sale_order.id
+            if existing_sale_order.partner_id:
+                self.partner_id = existing_sale_order.partner_id.id
+            return {
+                'type': 'ir.actions.act_window',
+                'res_model': 'sale.order',
+                'res_id': existing_sale_order.id,
+                'view_mode': 'form',
+            }
+
+        if not self.order_line_ids:
+            raise UserError("Cannot create an Odoo sale order without imported Amazon order lines.")
+
+        missing_product_lines = self.order_line_ids.filtered(lambda line: not line.odoo_product_id)
+        if missing_product_lines:
+            missing_refs = []
+            for line in missing_product_lines[:10]:
+                missing_refs.append(line.sku or line.asin or line.title or line.amazon_order_item_id or 'Unknown item')
+            extra = len(missing_product_lines) - len(missing_refs)
+            if extra > 0:
+                missing_refs.append("+%d more" % extra)
+            raise UserError(
+                "Cannot create Odoo sale order for Amazon order %s. "
+                "Missing Odoo product mapping for: %s"
+                % (self.amazon_order_ref, ", ".join(missing_refs))
+            )
 
         partner = self._get_or_create_partner()
         order_vals = {
@@ -313,14 +355,19 @@ Return ONLY valid JSON:
             'amazon_instance_id': self.instance_id.id,
             'amazon_fulfillment_channel': self.fulfillment_channel,
         }
+        if self.instance_id.company_id:
+            order_vals['company_id'] = self.instance_id.company_id.id
+        warehouse = self.instance_id.fba_warehouse_id if self.fulfillment_channel == 'AFN' else self.instance_id.fbm_warehouse_id
+        if warehouse and 'warehouse_id' in self.env['sale.order']._fields:
+            order_vals['warehouse_id'] = warehouse.id
         if self.currency_id:
             order_vals['currency_id'] = self.currency_id.id
 
         lines = []
         for line in self.order_line_ids:
-            product = line.odoo_product_id or self.env.ref('product.product_product_1', raise_if_not_found=False)
+            product = line.odoo_product_id
             lines.append((0, 0, {
-                'product_id': product.id if product else False,
+                'product_id': product.id,
                 'name': line.title or line.sku or 'Amazon Product',
                 'product_uom_qty': line.quantity,
                 'price_unit': line.item_price / line.quantity if line.quantity else line.item_price,

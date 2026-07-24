@@ -3,6 +3,7 @@ from . import amazon_sync_log
 from . import amazon_instance
 from . import amazon_product
 from . import amazon_sale_order
+from . import amazon_order_import_job
 from . import amazon_settlement
 from . import amazon_return
 from . import amazon_removal_order

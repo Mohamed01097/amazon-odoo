@@ -76,6 +76,10 @@
                             <field name="fba_warehouse_id"/>
                             <field name="fbm_warehouse_id"/>
                             <field name="default_currency_id"/>
+                            <field name="initial_order_import_from"/>
+                            <field name="initial_order_import_to"/>
+                            <field name="order_import_batch_size"/>
+                            <field name="order_import_overlap_minutes"/>
                             <field name="active"/>
                         </group>
                     </group>
