@@ -34,6 +34,7 @@
                     <button name="action_link_products_by_sku" type="object" string="Link Existing Products by SKU"/>
                     <button name="action_create_missing_odoo_products" type="object" string="Create Missing Odoo Products"/>
                     <button name="action_import_orders" type="object" string="Import Orders"/>
+                    <button name="action_sync_order_statuses" type="object" string="Sync Order Statuses"/>
                     <button name="action_export_stock" type="object" string="Export Stock"/>
                     <button name="action_pull_stock" type="object" string="Pull Stock (Amazon→Odoo)"/>
                     <button name="action_update_prices" type="object" string="Push Prices"/>
@@ -131,6 +132,30 @@
                     <group invisible="not auto_sync_enabled">
                         <button name="action_apply_sync_schedule" type="object" string="Apply Schedule" class="btn-primary" icon="fa-clock-o"/>
                     </group>
+
+                    <separator string="Order Status Synchronization"/>
+                    <group>
+                        <group string="Status Sync Scheduler">
+                            <field name="order_status_sync_enabled"/>
+                            <field name="order_status_sync_interval"/>
+                            <field name="last_status_sync_at"/>
+                            <field name="status_sync_lookback_minutes"/>
+                            <field name="status_sync_batch_size"/>
+                        </group>
+                        <group string="Safe Workflow Automation">
+                            <field name="auto_confirm_sale_order_on_unshipped"/>
+                            <field name="auto_confirm_sale_order_on_shipped"/>
+                            <field name="auto_cancel_draft_sale_order_on_amazon_cancellation"/>
+                            <field name="auto_cancel_confirmed_sale_order_when_safe"/>
+                            <field name="auto_validate_delivery_on_shipped"/>
+                            <field name="auto_create_invoice_on_shipped"/>
+                            <field name="auto_post_invoice"/>
+                            <field name="create_activity_on_status_conflict"/>
+                        </group>
+                    </group>
+                    <div class="alert alert-info" role="alert">
+                        Amazon Status is synchronized Amazon → Odoo and kept separate from the Odoo Sale Order state. Delivery validation, invoice creation/posting, and confirmed-order cancellation are disabled by default.
+                    </div>
                 </sheet>
             </form>
         </field>

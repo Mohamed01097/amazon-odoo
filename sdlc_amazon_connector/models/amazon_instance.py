@@ -158,6 +158,63 @@ class AmazonInstance(models.Model):
         help="Normal incremental sync starts this many minutes before Last Order Sync. Idempotency prevents duplicates.",
     )
 
+    # Order status sync controls
+    order_status_sync_enabled = fields.Boolean(
+        'Enable Automatic Status Sync',
+        default=True,
+        help="When enabled, the status-sync cron creates resumable jobs for this instance.",
+    )
+    order_status_sync_interval = fields.Integer(
+        'Status Sync Interval',
+        default=15,
+        help="Minimum minutes between automatic Amazon order status synchronization jobs.",
+    )
+    last_status_sync_at = fields.Datetime('Last Status Sync At', readonly=True)
+    status_sync_lookback_minutes = fields.Integer(
+        'Status Sync Lookback Minutes',
+        default=10,
+        help="Overlap applied to Last Status Sync At so Amazon updates are not missed.",
+    )
+    status_sync_batch_size = fields.Integer(
+        'Status Sync Batch Size',
+        default=10,
+        help="Maximum Amazon orders processed by one status-sync cron transaction.",
+    )
+    auto_confirm_sale_order_on_unshipped = fields.Boolean(
+        'Auto Confirm Sale Order on Unshipped',
+        default=False,
+    )
+    auto_confirm_sale_order_on_shipped = fields.Boolean(
+        'Auto Confirm Sale Order on Shipped',
+        default=False,
+    )
+    auto_cancel_draft_sale_order_on_amazon_cancellation = fields.Boolean(
+        'Auto Cancel Draft Sale Order on Amazon Cancellation',
+        default=False,
+    )
+    auto_cancel_confirmed_sale_order_when_safe = fields.Boolean(
+        'Auto Cancel Confirmed Sale Order When Safe',
+        default=False,
+        help="Only applies when no completed delivery, posted invoice, or paid invoice exists.",
+    )
+    auto_validate_delivery_on_shipped = fields.Boolean(
+        'Auto Validate Delivery on Shipped',
+        default=False,
+        help="Disabled by default. Current implementation never validates without exact shipped quantity verification.",
+    )
+    auto_create_invoice_on_shipped = fields.Boolean(
+        'Auto Create Invoice on Shipped',
+        default=False,
+    )
+    auto_post_invoice = fields.Boolean(
+        'Auto Post Invoice',
+        default=False,
+    )
+    create_activity_on_status_conflict = fields.Boolean(
+        'Create Activity on Status Conflict',
+        default=True,
+    )
+
     _order_import_batch_size_range = models.Constraint(
         'CHECK (order_import_batch_size IS NULL OR (order_import_batch_size >= 1 AND order_import_batch_size <= 100))',
         'Order import batch size must be between 1 and 100.',
@@ -165,6 +222,18 @@ class AmazonInstance(models.Model):
     _order_import_overlap_non_negative = models.Constraint(
         'CHECK (order_import_overlap_minutes IS NULL OR order_import_overlap_minutes >= 0)',
         'Order import overlap minutes cannot be negative.',
+    )
+    _status_sync_batch_size_range = models.Constraint(
+        'CHECK (status_sync_batch_size IS NULL OR (status_sync_batch_size >= 1 AND status_sync_batch_size <= 100))',
+        'Status sync batch size must be between 1 and 100.',
+    )
+    _status_sync_interval_positive = models.Constraint(
+        'CHECK (order_status_sync_interval IS NULL OR order_status_sync_interval >= 1)',
+        'Status sync interval must be at least 1 minute.',
+    )
+    _status_sync_lookback_non_negative = models.Constraint(
+        'CHECK (status_sync_lookback_minutes IS NULL OR status_sync_lookback_minutes >= 0)',
+        'Status sync lookback minutes cannot be negative.',
     )
 
     # ── Auto Sync Scheduler ──
@@ -1095,57 +1164,66 @@ class AmazonInstance(models.Model):
     # Order Status & Cancellation Check
     # ══════════════════════════════════════════════════
 
-    def action_check_canceled_orders(self):
-        """Check for canceled orders on Amazon and update status in Odoo."""
+    def _queue_order_status_sync_job(self, fulfillment_channel=False):
+        """Create or reuse a resumable Amazon → Odoo order status sync job."""
         self.ensure_one()
+        self._auto_fix_region()
         self._check_required_fields()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        orders = self.env['amazon.sale.order'].search([
+        job_model = self.env['amazon.order.status.sync.job']
+        active_job = job_model.search([
             ('instance_id', '=', self.id),
-            ('order_status', 'not in', ['Canceled', 'Shipped']),
-        ])
-        canceled = 0
-        for order in orders:
-            try:
-                data = api.get_order(self, access_token, order.amazon_order_ref)
-                status = data.get('payload', {}).get('OrderStatus')
-                if status and order.order_status != status:
-                    order.order_status = status
-                    if status == 'Canceled':
-                        canceled += 1
-                        if order.sale_order_id and order.sale_order_id.state not in ('cancel', 'done'):
-                            order.sale_order_id.action_cancel()
-            except Exception as exc:
-                _logger.warning("Failed to check order %s: %s", order.amazon_order_ref, exc)
+            ('state', 'in', ('draft', 'pending', 'running')),
+            ('fulfillment_channel', '=', fulfillment_channel or False),
+        ], limit=1)
+        if active_job:
+            return active_job, False
 
-        return self._notify("Order Status Check", "%d order(s) found canceled." % canceled)
+        job = job_model._create_for_instance(self, fulfillment_channel=fulfillment_channel or False)
+        cron = self.env.ref('sdlc_amazon_connector.cron_amazon_sync_order_statuses', raise_if_not_found=False)
+        if cron and not cron.active:
+            cron.active = True
+        return job, True
+
+    def action_sync_order_statuses(self):
+        """Queue a background Amazon → Odoo order status sync job."""
+        job, created = self._queue_order_status_sync_job()
+        if not created:
+            return self._notify(
+                "Order status sync already running",
+                "Job #%s is already queued/running for this instance." % job.id,
+                'warning',
+                True,
+            )
+        return self._notify(
+            "Order Status Sync",
+            "Order status sync started. Job #%s will process up to %d order(s) per cron run." % (
+                job.id, job.batch_size,
+            ),
+            'success',
+        )
+
+    def action_check_canceled_orders(self):
+        """Compatibility action: queue the safe status-sync job instead of canceling inline."""
+        return self.action_sync_order_statuses()
 
     def action_update_fbm_order_status(self):
-        """Update status for all pending FBM orders."""
+        """Queue a safe FBM-only Amazon → Odoo status sync job."""
         self.ensure_one()
-        self._check_required_fields()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        orders = self.env['amazon.sale.order'].search([
-            ('instance_id', '=', self.id),
-            ('fulfillment_channel', '=', 'MFN'),
-            ('order_status', 'in', ['Pending', 'Unshipped', 'PartiallyShipped']),
-        ])
-        updated = 0
-        for order in orders:
-            try:
-                data = api.get_order(self, access_token, order.amazon_order_ref)
-                new_status = data.get('payload', {}).get('OrderStatus')
-                if new_status and new_status != order.order_status:
-                    order.order_status = new_status
-                    updated += 1
-            except Exception as exc:
-                _logger.warning("Failed to update order %s: %s", order.amazon_order_ref, exc)
-
-        return self._notify("FBM Status Update", "%d order(s) updated." % updated)
+        job, created = self._queue_order_status_sync_job('MFN')
+        if not created:
+            return self._notify(
+                "FBM status sync already running",
+                "Job #%s is already queued/running for this instance." % job.id,
+                'warning',
+                True,
+            )
+        return self._notify(
+            "FBM Status Sync",
+            "FBM status sync started. Job #%s will process up to %d order(s) per cron run." % (
+                job.id, job.batch_size,
+            ),
+            'success',
+        )
 
     # ══════════════════════════════════════════════════
     # Shipment Confirmation (Odoo → Amazon)
@@ -1173,13 +1251,23 @@ class AmazonInstance(models.Model):
         self._api_call_safe(api.submit_feed, self, access_token, FEED_ORDER_FULFILLMENT, xml,
                             error_msg="Failed to submit shipment confirmation")
         amazon_order.order_status = 'Shipped'
+        amazon_order.amazon_status = 'Shipped'
+        amazon_order.status_last_synced_at = fields.Datetime.now()
         amazon_order.ship_date = fields.Datetime.now()
 
     def _cancel_amazon_order(self, amazon_order):
-        """Mark order as canceled (Amazon doesn't have a cancel API for sellers - cancellation is tracked)."""
-        amazon_order.order_status = 'Canceled'
-        if amazon_order.sale_order_id and amazon_order.sale_order_id.state not in ('cancel', 'done'):
-            amazon_order.sale_order_id.action_cancel()
+        """Mark local Amazon order as canceled using safe configured Odoo workflow rules."""
+        amazon_order._sync_amazon_status_from_payload(
+            {
+                'AmazonOrderId': amazon_order.amazon_order_ref,
+                'OrderStatus': 'Canceled',
+                'LastUpdateDate': fields.Datetime.now(),
+                'FulfillmentChannel': amazon_order.fulfillment_channel,
+            },
+            source='manual_local_cancel',
+            create_chatter=True,
+            apply_workflow=True,
+        )
 
     # ══════════════════════════════════════════════════
     # Invoice Upload (Odoo → Amazon)

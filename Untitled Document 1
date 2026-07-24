@@ -1,0 +1,5 @@
+odoo amazon sync steps 
+1- create the instance (client_id, client_secret, refresh_token, seller_id, market_place_id)
+2- sync products 
+3- create missing odoo products
+4- import orders

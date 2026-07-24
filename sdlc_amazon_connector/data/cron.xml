@@ -22,6 +22,17 @@
         <field name="priority">5</field>
     </record>
 
+    <record id="cron_amazon_sync_order_statuses" model="ir.cron">
+        <field name="name">Amazon: Sync Order Statuses</field>
+        <field name="model_id" ref="model_amazon_order_status_sync_job"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_sync_order_statuses()</field>
+        <field name="interval_number">15</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+        <field name="priority">6</field>
+    </record>
+
     <record id="cron_amazon_sync_products" model="ir.cron">
         <field name="name">Amazon: Sync Products</field>
         <field name="model_id" ref="model_amazon_instance"/>

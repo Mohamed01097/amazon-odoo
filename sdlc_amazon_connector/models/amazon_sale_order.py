@@ -2,9 +2,21 @@ import logging
 from odoo import models, fields, api
 from odoo.exceptions import UserError
 
+from .amazon_api import AmazonAPI, amazon_to_utc_naive
 from ..services.ai_service import AmazonAIService
 
 _logger = logging.getLogger(__name__)
+
+KNOWN_AMAZON_ORDER_STATUSES = {
+    'PendingAvailability',
+    'Pending',
+    'Unshipped',
+    'PartiallyShipped',
+    'Shipped',
+    'InvoiceUnconfirmed',
+    'Canceled',
+    'Unfulfillable',
+}
 
 
 class AmazonSaleOrder(models.Model):
@@ -20,13 +32,28 @@ class AmazonSaleOrder(models.Model):
 
     # Order info
     order_status = fields.Selection([
+        ('PendingAvailability', 'Pending Availability'),
         ('Pending', 'Pending'),
         ('Unshipped', 'Unshipped'),
         ('PartiallyShipped', 'Partially Shipped'),
         ('Shipped', 'Shipped'),
+        ('InvoiceUnconfirmed', 'Invoice Unconfirmed'),
         ('Canceled', 'Canceled'),
         ('Unfulfillable', 'Unfulfillable'),
-    ], string='Order Status', default='Pending')
+    ], string='Order Status', default='Pending', help="Known Amazon status mirror for legacy filters and views.")
+    amazon_status = fields.Char(
+        'Amazon Status',
+        index=True,
+        help="Raw Amazon Orders API status. This field is authoritative and can store future Amazon statuses safely.",
+    )
+    previous_amazon_status = fields.Char('Previous Amazon Status', readonly=True)
+    status_last_synced_at = fields.Datetime('Status Last Synced At', readonly=True)
+    amazon_last_update_date = fields.Datetime('Amazon Last Update Date', readonly=True)
+    status_sync_error = fields.Text('Status Sync Error', readonly=True)
+    status_sync_retry_count = fields.Integer('Status Sync Retry Count', default=0)
+    requires_status_review = fields.Boolean('Requires Status Review', default=False)
+    status_review_reason = fields.Text('Status Review Reason')
+    amazon_cancellation_reason = fields.Text('Amazon Cancellation Reason')
     fulfillment_channel = fields.Selection([
         ('MFN', 'Fulfilled by Merchant (FBM)'),
         ('AFN', 'Fulfilled by Amazon (FBA)'),
@@ -84,6 +111,13 @@ class AmazonSaleOrder(models.Model):
     full_shipping_address = fields.Text('Full Address', compute='_compute_full_address')
 
     # Delivery picking link
+    linked_sale_order_id = fields.Many2one(
+        'sale.order',
+        string='Linked Sale Order',
+        related='sale_order_id',
+        store=True,
+        readonly=True,
+    )
     picking_ids = fields.One2many(
         'stock.picking', compute='_compute_picking_ids', string='Deliveries',
     )
@@ -109,25 +143,27 @@ class AmazonSaleOrder(models.Model):
         for rec in self:
             rec.line_count = len(rec.order_line_ids)
 
-    @api.depends('order_status', 'tracking_number', 'ship_date', 'actual_delivery_date')
+    @api.depends('order_status', 'amazon_status', 'tracking_number', 'ship_date', 'actual_delivery_date')
     def _compute_delivery_status(self):
         status_map = {
+            'PendingAvailability': 'pending',
             'Pending': 'pending',
             'Unshipped': 'processing',
             'PartiallyShipped': 'shipped',
             'Shipped': 'shipped',
+            'InvoiceUnconfirmed': 'shipped',
             'Canceled': 'pending',
             'Unfulfillable': 'failed',
         }
         for rec in self:
             if rec.actual_delivery_date:
                 rec.delivery_status = 'delivered'
-            elif rec.order_status == 'Canceled':
+            elif (rec.amazon_status or rec.order_status) == 'Canceled':
                 rec.delivery_status = 'pending'
             elif rec.tracking_number and rec.ship_date:
                 rec.delivery_status = 'in_transit'
             else:
-                rec.delivery_status = status_map.get(rec.order_status, 'pending')
+                rec.delivery_status = status_map.get(rec.amazon_status or rec.order_status, 'pending')
 
     @api.depends('partner_id', 'partner_id.name', 'partner_id.email', 'partner_id.phone', 'shipping_address_name')
     def _compute_customer_info(self):
@@ -296,6 +332,397 @@ Return ONLY valid JSON:
             },
         }
 
+    # ══════════════════════════════════════════════════
+    # Amazon → Odoo status synchronization
+    # ══════════════════════════════════════════════════
+
+    @api.model
+    def _amazon_status_to_order_status(self, amazon_status):
+        """Return a safe legacy Selection value, or False for future/unknown statuses."""
+        if not amazon_status:
+            return False
+        if amazon_status in dict(self._fields['order_status'].selection):
+            return amazon_status
+        _logger.warning("Unknown Amazon order status received: %s", amazon_status)
+        return False
+
+    @api.model
+    def _map_amazon_status_to_odoo(self, amazon_status):
+        """Central safe Amazon status policy.
+
+        This mapping never replaces Odoo's native sale.order state with the Amazon
+        status. It only describes which optional, instance-controlled workflow
+        action may be considered.
+        """
+        policies = {
+            'PendingAvailability': {
+                'workflow': 'none',
+                'review': False,
+                'note': 'Pre-order/payment not authorized. Keep Odoo quotation untouched.',
+            },
+            'Pending': {
+                'workflow': 'none',
+                'review': False,
+                'note': 'Payment not authorized. Keep Odoo quotation untouched.',
+            },
+            'Unshipped': {
+                'workflow': 'confirm_if_enabled_unshipped',
+                'review': False,
+                'note': 'Ready for shipment. Confirmation is controlled by instance settings.',
+            },
+            'PartiallyShipped': {
+                'workflow': 'confirm_if_enabled_shipped',
+                'review': True,
+                'note': 'Partial shipment detected. Exact line-level shipment synchronization is required before delivery completion.',
+            },
+            'Shipped': {
+                'workflow': 'shipped_if_enabled',
+                'review': False,
+                'note': 'Amazon says shipped. Delivery/invoice automation remains disabled unless explicitly configured.',
+            },
+            'InvoiceUnconfirmed': {
+                'workflow': 'accounting_review',
+                'review': True,
+                'note': 'Amazon invoice is unconfirmed. Accounting review is required.',
+            },
+            'Canceled': {
+                'workflow': 'cancel_if_safe',
+                'review': False,
+                'note': 'Amazon canceled the order. Cancellation is applied only when safe and configured.',
+            },
+            'Unfulfillable': {
+                'workflow': 'review',
+                'review': True,
+                'note': 'Amazon marked the order unfulfillable. Manual review required.',
+            },
+        }
+        return policies.get(amazon_status, {
+            'workflow': 'unknown',
+            'review': True,
+            'note': 'Unknown Amazon order status. Raw status was stored and no Odoo workflow action was applied.',
+        })
+
+    def _sync_amazon_status_from_payload(self, order_data, source='manual', create_chatter=True, apply_workflow=True):
+        """Persist Amazon status data and apply safe configured workflow rules.
+
+        Called by manual single-order refresh, bulk status-sync jobs, and order
+        import refreshes. The method is idempotent: unchanged statuses update sync
+        timestamps but do not post duplicate chatter messages.
+        """
+        self.ensure_one()
+        order_data = order_data or {}
+        amazon_order_id = order_data.get('AmazonOrderId') or self.amazon_order_ref
+        if amazon_order_id and self.amazon_order_ref and amazon_order_id != self.amazon_order_ref:
+            raise UserError(
+                "Amazon response order ID %s does not match local order %s."
+                % (amazon_order_id, self.amazon_order_ref)
+            )
+
+        new_status = order_data.get('OrderStatus') or self.amazon_status or self.order_status
+        if not new_status:
+            raise UserError("Amazon response does not contain an OrderStatus for %s." % self.amazon_order_ref)
+
+        old_status = self.amazon_status or self.order_status or False
+        changed = bool(old_status != new_status)
+        synced_at = fields.Datetime.now()
+        amazon_last_update = amazon_to_utc_naive(order_data.get('LastUpdateDate')) or self.amazon_last_update_date or self.last_update_date
+        fulfillment_channel = order_data.get('FulfillmentChannel') or self.fulfillment_channel
+
+        vals = {
+            'amazon_status': new_status,
+            'status_last_synced_at': synced_at,
+            'status_sync_error': False,
+            'status_sync_retry_count': 0,
+        }
+        if changed:
+            vals['previous_amazon_status'] = old_status or False
+            vals['requires_status_review'] = False
+            vals['status_review_reason'] = False
+        if amazon_last_update:
+            vals['amazon_last_update_date'] = amazon_last_update
+            vals['last_update_date'] = amazon_last_update
+        if fulfillment_channel in ('MFN', 'AFN'):
+            vals['fulfillment_channel'] = fulfillment_channel
+
+        known_selection = self._amazon_status_to_order_status(new_status)
+        if known_selection:
+            vals['order_status'] = known_selection
+        elif not self.order_status:
+            vals['order_status'] = False
+
+        self.write(vals)
+        sale_order = self.sale_order_id
+        if sale_order:
+            self._write_sale_order_amazon_status(
+                sale_order,
+                new_status,
+                old_status if changed else sale_order.previous_amazon_status,
+                synced_at,
+                amazon_last_update,
+                fulfillment_channel,
+            )
+            if changed and create_chatter:
+                self._post_status_change_message(sale_order, old_status, new_status, synced_at, source)
+
+        action_taken = 'stored'
+        workflow_note = ''
+        if changed and apply_workflow:
+            workflow = self._apply_amazon_status_workflow(old_status, new_status)
+            action_taken = workflow.get('action') or action_taken
+            workflow_note = workflow.get('note') or ''
+        elif not changed:
+            workflow_note = 'Amazon status unchanged.'
+
+        return {
+            'amazon_order_id': self.amazon_order_ref,
+            'old_status': old_status,
+            'new_status': new_status,
+            'changed': changed,
+            'action': action_taken,
+            'note': workflow_note,
+        }
+
+    def _write_sale_order_amazon_status(self, sale_order, new_status, previous_status, synced_at, amazon_last_update, fulfillment_channel):
+        vals = {
+            'amazon_status': new_status,
+            'amazon_status_last_synced_at': synced_at,
+            'amazon_status_sync_error': False,
+        }
+        if previous_status:
+            vals['previous_amazon_status'] = previous_status
+        if amazon_last_update:
+            vals['amazon_last_update_date'] = amazon_last_update
+        if fulfillment_channel in ('MFN', 'AFN'):
+            vals['amazon_fulfillment_channel'] = fulfillment_channel
+        sale_order.write(vals)
+
+    def _post_status_change_message(self, sale_order, old_status, new_status, synced_at, source):
+        old_label = old_status or 'N/A'
+        body = (
+            "Amazon order status changed:<br/>"
+            "%s → %s<br/>"
+            "Amazon Order ID: %s<br/>"
+            "Synced at: %s<br/>"
+            "Source: %s"
+        ) % (old_label, new_status, self.amazon_order_ref, synced_at, source)
+        sale_order.message_post(body=body, subtype_xmlid='mail.mt_note')
+
+    def _apply_amazon_status_workflow(self, old_status, new_status):
+        self.ensure_one()
+        policy = self._map_amazon_status_to_odoo(new_status)
+        workflow = policy.get('workflow')
+        note = policy.get('note') or ''
+        sale_order = self.sale_order_id
+
+        if policy.get('review') and workflow not in ('cancel_if_safe',):
+            self._create_status_review_activity(
+                "Amazon status requires review: %s" % new_status,
+                note,
+            )
+
+        if not sale_order:
+            return {'action': 'no_sale_order', 'note': 'No linked Odoo Sale Order. %s' % note}
+
+        if workflow in ('none',):
+            return {'action': 'skipped', 'note': note}
+        if workflow == 'confirm_if_enabled_unshipped':
+            return self._confirm_sale_order_if_configured(
+                'auto_confirm_sale_order_on_unshipped',
+                "Amazon status is Unshipped.",
+            )
+        if workflow == 'confirm_if_enabled_shipped':
+            result = self._confirm_sale_order_if_configured(
+                'auto_confirm_sale_order_on_shipped',
+                "Amazon status is PartiallyShipped.",
+            )
+            self._create_status_review_activity(
+                "Amazon partial shipment review required",
+                note,
+            )
+            return result
+        if workflow == 'shipped_if_enabled':
+            result = self._confirm_sale_order_if_configured(
+                'auto_confirm_sale_order_on_shipped',
+                "Amazon status is Shipped.",
+            )
+            delivery_note = self._apply_amazon_shipped_delivery_invoice_rules()
+            if delivery_note:
+                result['note'] = "%s %s" % (result.get('note') or '', delivery_note)
+            return result
+        if workflow == 'cancel_if_safe':
+            return self._apply_amazon_cancellation()
+        if workflow == 'accounting_review':
+            self._create_status_review_activity(
+                "Amazon invoice status requires review",
+                note,
+            )
+            return {'action': 'review_activity', 'note': note}
+        if workflow == 'review':
+            self._create_status_review_activity(
+                "Amazon order requires review: %s" % new_status,
+                note,
+            )
+            return {'action': 'review_activity', 'note': note}
+
+        self._create_status_review_activity(
+            "Unknown Amazon status: %s" % new_status,
+            note,
+        )
+        return {'action': 'unknown_status_stored', 'note': note}
+
+    def _confirm_sale_order_if_configured(self, config_field, reason):
+        self.ensure_one()
+        sale_order = self.sale_order_id
+        enabled = bool(getattr(self.instance_id, config_field, False))
+        if not enabled:
+            return {'action': 'skipped', 'note': "%s Auto confirmation is disabled." % reason}
+        if not sale_order:
+            return {'action': 'skipped', 'note': "No linked Sale Order."}
+        if sale_order.state in ('draft', 'sent'):
+            sale_order.action_confirm()
+            return {'action': 'sale_order_confirmed', 'note': "%s Sale Order confirmed by configuration." % reason}
+        return {'action': 'skipped', 'note': "%s Sale Order state is %s." % (reason, sale_order.state)}
+
+    def _apply_amazon_shipped_delivery_invoice_rules(self):
+        self.ensure_one()
+        sale_order = self.sale_order_id
+        if not sale_order:
+            return ''
+
+        notes = []
+        instance = self.instance_id
+        if instance.auto_validate_delivery_on_shipped:
+            notes.append(
+                "Delivery validation was skipped because exact Amazon shipped quantities are not synchronized yet."
+            )
+            self._create_status_review_activity(
+                "Amazon Shipped delivery validation review",
+                notes[-1],
+            )
+
+        if instance.auto_create_invoice_on_shipped:
+            if sale_order.state in ('draft', 'sent'):
+                notes.append("Invoice creation skipped because the Sale Order is not confirmed.")
+            elif sale_order.invoice_ids:
+                notes.append("Invoice creation skipped because an invoice already exists.")
+            else:
+                invoices = sale_order._create_invoices()
+                if invoices:
+                    self.invoice_id = invoices[0].id
+                    notes.append("Invoice created by explicit Amazon status configuration.")
+                    if instance.auto_post_invoice:
+                        invoices.action_post()
+                        notes.append("Invoice posted by explicit Amazon status configuration.")
+        return " ".join(notes)
+
+    def _apply_amazon_cancellation(self):
+        self.ensure_one()
+        sale_order = self.sale_order_id
+        if not sale_order:
+            self._create_status_review_activity(
+                "Amazon cancellation without linked Sale Order",
+                "Amazon order %s is canceled but no Odoo Sale Order is linked." % self.amazon_order_ref,
+            )
+            return {'action': 'review_activity', 'note': 'No linked Sale Order.'}
+
+        completed_pickings = sale_order.picking_ids.filtered(lambda picking: picking.state == 'done')
+        invoices = sale_order.invoice_ids
+        posted_invoices = invoices.filtered(lambda move: move.state == 'posted')
+        paid_invoices = invoices.filtered(lambda move: move.payment_state in ('paid', 'in_payment', 'partial'))
+        unsafe_reason = False
+        if completed_pickings:
+            unsafe_reason = "completed delivery exists"
+        elif posted_invoices:
+            unsafe_reason = "posted invoice exists"
+        elif paid_invoices:
+            unsafe_reason = "paid/in-payment invoice exists"
+
+        if sale_order.state in ('draft', 'sent'):
+            if self.instance_id.auto_cancel_draft_sale_order_on_amazon_cancellation:
+                sale_order.action_cancel()
+                return {'action': 'draft_sale_order_canceled', 'note': 'Draft quotation canceled by configuration.'}
+            note = "Amazon canceled the order, but draft quotation auto-cancel is disabled."
+            self._create_status_review_activity("Amazon cancellation review", note)
+            return {'action': 'review_activity', 'note': note}
+
+        if sale_order.state in ('sale', 'done'):
+            if unsafe_reason:
+                note = "Amazon canceled the order, but automatic cancellation is unsafe: %s." % unsafe_reason
+                self._create_status_review_activity("Amazon cancellation conflict", note)
+                return {'action': 'review_activity', 'note': note}
+            if self.instance_id.auto_cancel_confirmed_sale_order_when_safe:
+                sale_order.action_cancel()
+                return {'action': 'confirmed_sale_order_canceled', 'note': 'Confirmed Sale Order canceled safely by configuration.'}
+            note = "Amazon canceled the order; confirmed Sale Order auto-cancel is disabled."
+            self._create_status_review_activity("Amazon cancellation review", note)
+            return {'action': 'review_activity', 'note': note}
+
+        if sale_order.state == 'cancel':
+            return {'action': 'skipped', 'note': 'Sale Order was already canceled.'}
+
+        note = "Amazon cancellation requires review for Sale Order state %s." % sale_order.state
+        self._create_status_review_activity("Amazon cancellation review", note)
+        return {'action': 'review_activity', 'note': note}
+
+    def _create_status_review_activity(self, summary, note):
+        self.ensure_one()
+        self.write({
+            'requires_status_review': True,
+            'status_review_reason': note,
+        })
+        sale_order = self.sale_order_id
+        if not sale_order:
+            return
+        if not self.instance_id.create_activity_on_status_conflict:
+            sale_order.message_post(body="%s<br/>%s" % (summary, note), subtype_xmlid='mail.mt_note')
+            return
+        try:
+            activity_type = self.env.ref('mail.mail_activity_data_todo', raise_if_not_found=False)
+            sale_order.activity_schedule(
+                activity_type_id=activity_type.id if activity_type else False,
+                summary=summary,
+                note=note,
+                user_id=self.env.user.id,
+            )
+        except Exception as exc:
+            _logger.warning("Could not create Amazon status review activity for %s: %s", self.amazon_order_ref, exc)
+            sale_order.message_post(body="%s<br/>%s" % (summary, note), subtype_xmlid='mail.mt_note')
+
+    def action_refresh_status_from_amazon(self):
+        """Fetch and apply this order's current Amazon status."""
+        self.ensure_one()
+        if not self.instance_id:
+            raise UserError("Amazon instance is required.")
+        if not self.amazon_order_ref:
+            raise UserError("Amazon Order ID is required.")
+        self.instance_id._auto_fix_region()
+        self.instance_id._check_required_fields()
+        access_token = self.instance_id._get_access_token_or_raise()
+        data = AmazonAPI().get_order(self.instance_id, access_token, self.amazon_order_ref)
+        result = self._sync_amazon_status_from_payload(
+            data.get('payload', {}) or {},
+            source='manual',
+            create_chatter=True,
+            apply_workflow=True,
+        )
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": "Amazon Status Refreshed",
+                "message": "%s: %s → %s" % (
+                    self.amazon_order_ref,
+                    result.get('old_status') or 'N/A',
+                    result.get('new_status') or 'N/A',
+                ) if result.get('changed') else "%s unchanged: %s" % (
+                    self.amazon_order_ref,
+                    result.get('new_status') or 'N/A',
+                ),
+                "type": "success",
+                "sticky": False,
+            },
+        }
+
     def action_create_sale_order(self):
         """Create an Odoo sale.order from this Amazon order."""
         self.ensure_one()
@@ -354,6 +781,10 @@ Return ONLY valid JSON:
             'is_amazon_order': True,
             'amazon_instance_id': self.instance_id.id,
             'amazon_fulfillment_channel': self.fulfillment_channel,
+            'amazon_status': self.amazon_status or self.order_status,
+            'previous_amazon_status': self.previous_amazon_status,
+            'amazon_status_last_synced_at': self.status_last_synced_at,
+            'amazon_last_update_date': self.amazon_last_update_date or self.last_update_date,
         }
         if self.instance_id.company_id:
             order_vals['company_id'] = self.instance_id.company_id.id

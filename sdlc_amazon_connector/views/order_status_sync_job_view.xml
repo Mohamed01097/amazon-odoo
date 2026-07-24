@@ -1,0 +1,110 @@
+<odoo>
+    <record id="amazon_order_status_sync_job_action" model="ir.actions.act_window">
+        <field name="name">Order Status Sync Jobs</field>
+        <field name="res_model">amazon.order.status.sync.job</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_order_status_sync_job_search" model="ir.ui.view">
+        <field name="name">amazon.order.status.sync.job.search</field>
+        <field name="model">amazon.order.status.sync.job</field>
+        <field name="arch" type="xml">
+            <search string="Order Status Sync Jobs">
+                <field name="instance_id"/>
+                <field name="last_processed_amazon_order_id"/>
+                <filter string="Queued / Running" name="active_jobs" domain="[('state','in',('draft','pending','running'))]"/>
+                <filter string="Done" name="done" domain="[('state','=','done')]"/>
+                <filter string="Partial" name="partial" domain="[('state','=','partial')]"/>
+                <filter string="Failed" name="failed" domain="[('state','=','failed')]"/>
+                <group>
+                    <filter string="State" name="group_state" context="{'group_by': 'state'}"/>
+                    <filter string="Instance" name="group_instance" context="{'group_by': 'instance_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="amazon_order_status_sync_job_list" model="ir.ui.view">
+        <field name="name">amazon.order.status.sync.job.list</field>
+        <field name="model">amazon.order.status.sync.job</field>
+        <field name="arch" type="xml">
+            <list string="Amazon Order Status Sync Jobs"
+                  decoration-success="state == 'done'"
+                  decoration-warning="state in ('draft', 'pending', 'running', 'partial')"
+                  decoration-danger="state == 'failed'">
+                <field name="id"/>
+                <field name="instance_id"/>
+                <field name="state"/>
+                <field name="fulfillment_channel"/>
+                <field name="date_from"/>
+                <field name="date_to"/>
+                <field name="effective_date_to"/>
+                <field name="amazon_request_before"/>
+                <field name="upper_bound_adjusted"/>
+                <field name="batch_size"/>
+                <field name="total_fetched"/>
+                <field name="total_processed"/>
+                <field name="total_changed"/>
+                <field name="total_unchanged"/>
+                <field name="total_missing"/>
+                <field name="total_failed"/>
+                <field name="total_rate_limited"/>
+                <field name="retry_count"/>
+                <field name="date_bound_retry_count"/>
+                <field name="last_processed_amazon_order_id"/>
+                <field name="next_run_at"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_order_status_sync_job_form" model="ir.ui.view">
+        <field name="name">amazon.order.status.sync.job.form</field>
+        <field name="model">amazon.order.status.sync.job</field>
+        <field name="arch" type="xml">
+            <form string="Amazon Order Status Sync Job">
+                <sheet>
+                    <group>
+                        <group string="Job">
+                            <field name="instance_id"/>
+                            <field name="state"/>
+                            <field name="fulfillment_channel"/>
+                            <field name="date_from"/>
+                            <field name="date_to"/>
+                            <field name="effective_date_to"/>
+                            <field name="amazon_request_before"/>
+                            <field name="upper_bound_adjusted"/>
+                            <field name="batch_size"/>
+                            <field name="next_run_at"/>
+                        </group>
+                        <group string="Progress">
+                            <field name="total_fetched"/>
+                            <field name="total_processed"/>
+                            <field name="total_changed"/>
+                            <field name="total_unchanged"/>
+                            <field name="total_missing"/>
+                            <field name="total_failed"/>
+                            <field name="total_rate_limited"/>
+                            <field name="retry_count"/>
+                            <field name="date_bound_retry_count"/>
+                            <field name="last_processed_amazon_order_id"/>
+                            <field name="duration_seconds"/>
+                        </group>
+                    </group>
+                    <group string="Continuation">
+                        <field name="next_token"/>
+                    </group>
+                    <group string="Timing">
+                        <field name="started_at"/>
+                        <field name="finished_at"/>
+                        <field name="sync_log_id"/>
+                    </group>
+                    <group string="Errors / Warnings">
+                        <field name="last_error_code"/>
+                        <field name="last_error_message" widget="text"/>
+                        <field name="error_message" widget="text"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+</odoo>

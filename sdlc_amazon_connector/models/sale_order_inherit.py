@@ -10,6 +10,22 @@ class SaleOrderInherit(models.Model):
     amazon_order_id = fields.Many2one('amazon.sale.order', string='Amazon Order', copy=False)
     is_amazon_order = fields.Boolean('Is Amazon Order', default=False)
     amazon_instance_id = fields.Many2one('amazon.instance', string='Amazon Instance')
+    amazon_order_ref = fields.Char(
+        'Amazon Order ID',
+        related='amazon_order_id.amazon_order_ref',
+        store=True,
+        readonly=True,
+    )
+    amazon_status = fields.Char(
+        'Amazon Status',
+        index=True,
+        copy=False,
+        help="Raw Amazon Orders API status. This is separate from Odoo's native Sale Order state.",
+    )
+    previous_amazon_status = fields.Char('Previous Amazon Status', copy=False)
+    amazon_status_last_synced_at = fields.Datetime('Amazon Status Last Synced At', copy=False)
+    amazon_last_update_date = fields.Datetime('Amazon Last Update Date', copy=False)
+    amazon_status_sync_error = fields.Text('Amazon Status Sync Error', copy=False)
     amazon_fulfillment_channel = fields.Selection([
         ('MFN', 'FBM'),
         ('AFN', 'FBA'),
@@ -41,3 +57,11 @@ class SaleOrderInherit(models.Model):
                 "Tagged picking %s as Amazon delivery for order %s",
                 picking.name, self.client_order_ref,
             )
+
+    def action_refresh_amazon_status(self):
+        """Refresh the linked Amazon status without changing Amazon itself."""
+        self.ensure_one()
+        if not self.amazon_order_id:
+            from odoo.exceptions import UserError
+            raise UserError("This Sale Order is not linked to an Amazon order.")
+        return self.amazon_order_id.action_refresh_status_from_amazon()

@@ -23,11 +23,13 @@
         <field name="name">amazon.sale.order.list</field>
         <field name="model">amazon.sale.order</field>
         <field name="arch" type="xml">
-            <list string="Amazon Orders" decoration-danger="order_status=='Canceled'" decoration-success="order_status=='Shipped'">
+            <list string="Amazon Orders" decoration-danger="amazon_status=='Canceled'" decoration-success="amazon_status=='Shipped'">
                 <field name="amazon_order_ref"/>
                 <field name="purchase_date"/>
+                <field name="amazon_status"/>
                 <field name="order_status"/>
                 <field name="fulfillment_channel"/>
+                <field name="status_last_synced_at"/>
                 <field name="order_total"/>
                 <field name="currency_id" optional="hide"/>
                 <field name="shipping_address_name"/>
@@ -50,8 +52,9 @@
                     <button name="action_create_invoice" type="object" string="Create Invoice" invisible="not sale_order_id or invoice_id"/>
                     <button name="action_upload_invoice_to_amazon" type="object" string="Upload Invoice to Amazon" invisible="not invoice_id"/>
                     <button name="action_ai_generate_reply" type="object" string="AI Reply" class="btn-warning" icon="fa-comment"/>
+                    <button name="action_refresh_status_from_amazon" type="object" string="Refresh Status from Amazon" class="btn-secondary"/>
                     <button name="action_cancel_order" type="object" string="Cancel Order" class="btn-danger" invisible="order_status == 'Canceled'"/>
-                    <field name="order_status" widget="statusbar" statusbar_visible="Pending,Unshipped,Shipped"/>
+                    <field name="order_status" widget="statusbar" statusbar_visible="PendingAvailability,Pending,Unshipped,PartiallyShipped,Shipped,InvoiceUnconfirmed,Canceled,Unfulfillable"/>
                 </header>
                 <sheet>
                     <group>
@@ -59,6 +62,10 @@
                             <field name="amazon_order_ref"/>
                             <field name="instance_id"/>
                             <field name="purchase_date"/>
+                            <field name="amazon_status"/>
+                            <field name="previous_amazon_status"/>
+                            <field name="status_last_synced_at"/>
+                            <field name="amazon_last_update_date"/>
                             <field name="fulfillment_channel"/>
                             <field name="order_type"/>
                             <field name="sales_channel"/>
@@ -86,10 +93,17 @@
                         </group>
                         <group string="Odoo Links">
                             <field name="sale_order_id"/>
+                            <field name="linked_sale_order_id"/>
                             <field name="partner_id"/>
                             <field name="invoice_id"/>
                             <field name="amazon_invoice_number"/>
                         </group>
+                    </group>
+                    <group string="Status Sync Review" invisible="not requires_status_review and not status_sync_error">
+                        <field name="requires_status_review"/>
+                        <field name="status_review_reason" widget="text"/>
+                        <field name="status_sync_error" widget="text"/>
+                        <field name="status_sync_retry_count"/>
                     </group>
                     <notebook>
                         <page string="Order Lines" name="lines">
@@ -130,21 +144,61 @@
             <search string="Amazon Orders">
                 <field name="amazon_order_ref"/>
                 <field name="shipping_address_name"/>
+                <field name="amazon_status"/>
                 <filter string="FBM" name="fbm" domain="[('fulfillment_channel','=','MFN')]"/>
                 <filter string="FBA" name="fba" domain="[('fulfillment_channel','=','AFN')]"/>
                 <separator/>
-                <filter string="Pending" name="pending" domain="[('order_status','in',['Pending','Unshipped'])]"/>
-                <filter string="Shipped" name="shipped" domain="[('order_status','=','Shipped')]"/>
-                <filter string="Canceled" name="canceled" domain="[('order_status','=','Canceled')]"/>
+                <filter string="Pending" name="pending" domain="[('amazon_status','in',['PendingAvailability','Pending','Unshipped'])]"/>
+                <filter string="Shipped" name="shipped" domain="[('amazon_status','=','Shipped')]"/>
+                <filter string="Canceled" name="canceled" domain="[('amazon_status','=','Canceled')]"/>
+                <filter string="Needs Review" name="needs_review" domain="[('requires_status_review','=',True)]"/>
                 <separator/>
                 <filter string="Prime" name="prime" domain="[('is_prime','=',True)]"/>
                 <group>
-                    <filter string="Status" name="group_status" context="{'group_by': 'order_status'}"/>
+                    <filter string="Amazon Status" name="group_status" context="{'group_by': 'amazon_status'}"/>
                     <filter string="Channel" name="group_channel" context="{'group_by': 'fulfillment_channel'}"/>
                     <filter string="Instance" name="group_instance" context="{'group_by': 'instance_id'}"/>
                     <filter string="Purchase Date" name="group_date" context="{'group_by': 'purchase_date:month'}"/>
                 </group>
             </search>
+        </field>
+    </record>
+
+    <record id="sale_order_form_amazon_status_inherit" model="ir.ui.view">
+        <field name="name">sale.order.form.amazon.status.inherit</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//header" position="inside">
+                <button name="action_refresh_amazon_status"
+                        type="object"
+                        string="Refresh Amazon Status"
+                        class="btn-secondary"
+                        invisible="not amazon_order_id"/>
+            </xpath>
+            <xpath expr="//notebook" position="inside">
+                <page string="Amazon" name="amazon_status" invisible="not is_amazon_order">
+                    <group>
+                        <group string="Amazon Order">
+                            <field name="is_amazon_order"/>
+                            <field name="amazon_instance_id"/>
+                            <field name="amazon_order_id"/>
+                            <field name="amazon_order_ref"/>
+                            <field name="amazon_fulfillment_channel"/>
+                        </group>
+                        <group string="Amazon Status">
+                            <field name="amazon_status"/>
+                            <field name="previous_amazon_status"/>
+                            <field name="amazon_status_last_synced_at"/>
+                            <field name="amazon_last_update_date"/>
+                            <field name="amazon_status_sync_error" widget="text"/>
+                        </group>
+                    </group>
+                    <div class="alert alert-info" role="alert">
+                        Amazon Status is informational and synchronized Amazon → Odoo. It is separate from the Odoo Sale Order state.
+                    </div>
+                </page>
+            </xpath>
         </field>
     </record>
 </odoo>
