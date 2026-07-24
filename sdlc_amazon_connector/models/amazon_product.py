@@ -880,9 +880,9 @@ class AmazonProduct(models.Model):
         if 'company_id' in ProductTemplate._fields:
             vals['company_id'] = self._get_product_company().id
         if 'detailed_type' in ProductTemplate._fields:
-            vals['detailed_type'] = 'product'
+            vals['detailed_type'] = 'consu'
         elif 'type' in ProductTemplate._fields:
-            vals['type'] = 'product'
+            vals['type'] = 'consu'
         return vals
 
     def _create_odoo_product_from_amazon(self):
