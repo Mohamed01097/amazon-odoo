@@ -5,6 +5,20 @@
     <!-- Dashboard -->
     <menuitem id="amazon_dashboard_menu" parent="amazon_root" name="Dashboard" action="amazon_dashboard_action" sequence="0"/>
 
+    <!-- Production Operations -->
+    <menuitem id="amazon_operations_menu" parent="amazon_root" name="Operations" sequence="2"/>
+    <menuitem id="amazon_operations_dashboard_menu" parent="amazon_operations_menu"
+              name="Control Center" action="amazon_operations_dashboard_action" sequence="10"/>
+    <menuitem id="amazon_job_monitor_menu" parent="amazon_operations_menu"
+              name="Unified Job Monitor" action="amazon_operation_job_monitor_action" sequence="20"/>
+    <menuitem id="amazon_retry_center_menu" parent="amazon_operations_menu"
+              name="Retry Center" action="amazon_retry_center_action" sequence="30"
+              groups="sdlc_amazon_connector.group_amazon_manager"/>
+    <menuitem id="amazon_operations_api_logs_menu" parent="amazon_operations_menu"
+              name="API Telemetry" action="amazon_sync_log_action" sequence="40"/>
+    <menuitem id="amazon_operations_rate_metrics_menu" parent="amazon_operations_menu"
+              name="Rate-Limit Metrics" action="amazon_api_operation_metric_action" sequence="50"/>
+
     <!-- Configuration -->
     <menuitem id="amazon_config_menu" parent="amazon_root" name="Configuration" sequence="1"/>
     <menuitem id="amazon_instance_menu" parent="amazon_config_menu" name="Instances" action="amazon_instance_action" sequence="30"/>

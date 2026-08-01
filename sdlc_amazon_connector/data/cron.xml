@@ -229,4 +229,72 @@ for inst in env['amazon.instance'].search([]):
         <field name="active">False</field>
     </record>
 
+    <!-- ═══ Phase 6.5 Operations and Observability ═══ -->
+
+    <record id="cron_amazon_connection_health" model="ir.cron">
+        <field name="name">Amazon: Check Connection Health</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_run_health_checks()</field>
+        <field name="interval_number">15</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+        <field name="priority">11</field>
+    </record>
+
+    <record id="cron_amazon_refresh_operations_dashboard" model="ir.cron">
+        <field name="name">Amazon: Refresh Operations Dashboard</field>
+        <field name="model_id" ref="model_amazon_operations_dashboard"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_refresh_operations_dashboard()</field>
+        <field name="interval_number">15</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+        <field name="priority">12</field>
+    </record>
+
+    <record id="cron_amazon_detect_stuck_jobs" model="ir.cron">
+        <field name="name">Amazon: Detect Stuck Jobs</field>
+        <field name="model_id" ref="model_amazon_operation_control"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_detect_stuck_jobs()</field>
+        <field name="interval_number">10</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+        <field name="priority">13</field>
+    </record>
+
+    <record id="cron_amazon_dispatch_operational_retries" model="ir.cron">
+        <field name="name">Amazon: Dispatch Eligible Retries</field>
+        <field name="model_id" ref="model_amazon_operation_control"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_dispatch_operational_retries()</field>
+        <field name="interval_number">5</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+        <field name="priority">14</field>
+    </record>
+
+    <record id="cron_amazon_operational_alerts" model="ir.cron">
+        <field name="name">Amazon: Evaluate Operational Alerts</field>
+        <field name="model_id" ref="model_amazon_smart_alert"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_evaluate_operational_alerts()</field>
+        <field name="interval_number">15</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+        <field name="priority">15</field>
+    </record>
+
+    <record id="cron_amazon_cleanup_operational_records" model="ir.cron">
+        <field name="name">Amazon: Clean Successful Operational Logs</field>
+        <field name="model_id" ref="model_amazon_operation_control"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_cleanup_operational_records()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="active">True</field>
+        <field name="priority">16</field>
+    </record>
+
 </odoo>

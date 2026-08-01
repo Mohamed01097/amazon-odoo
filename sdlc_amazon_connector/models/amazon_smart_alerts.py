@@ -14,6 +14,7 @@ _logger = logging.getLogger(__name__)
 
 class AmazonSmartAlert(models.Model):
     _name = 'amazon.smart.alert'
+    _inherit = ['mail.thread', 'mail.activity.mixin']
     _description = 'Amazon Smart Alert'
     _order = 'severity desc, create_date desc'
     _rec_name = 'display_name'
@@ -53,7 +54,7 @@ class AmazonSmartAlert(models.Model):
         ('acknowledged', 'Acknowledged'),
         ('resolved', 'Resolved'),
         ('dismissed', 'Dismissed'),
-    ], default='new', required=True, index=True)
+    ], default='new', required=True, index=True, tracking=True)
 
     resolved_at = fields.Datetime('Resolved At')
     resolved_by = fields.Many2one('res.users', 'Resolved By')

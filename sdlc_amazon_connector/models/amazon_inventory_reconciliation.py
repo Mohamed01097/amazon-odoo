@@ -471,7 +471,11 @@ class AmazonInventoryReconciliationRun(models.Model):
         row = self.env.cr.fetchone()
         if not row:
             return False
-        return self.browse(row[0])._process_run()
+        return self.browse(row[0]).with_context(
+            amazon_source_model=self._name,
+            amazon_source_id=row[0],
+            amazon_operation='inventory_reconciliation',
+        )._process_run()
 
     @api.model
     def cron_enqueue_inventory_audits(self):

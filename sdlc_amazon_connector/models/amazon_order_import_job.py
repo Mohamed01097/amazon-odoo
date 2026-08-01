@@ -125,7 +125,11 @@ class AmazonOrderImportJob(models.Model):
         row = self.env.cr.fetchone()
         if not row:
             return False
-        job = self.browse(row[0])
+        job = self.browse(row[0]).with_context(
+            amazon_source_model=self._name,
+            amazon_source_id=row[0],
+            amazon_operation='order_import',
+        )
         job._process_next_batch()
         return True
 
@@ -172,7 +176,11 @@ class AmazonOrderImportJob(models.Model):
         self.write(vals)
 
         log = self._ensure_log()
-        instance = self.instance_id
+        instance = self.instance_id.with_context(
+            amazon_source_model=self._name,
+            amazon_source_id=self.id,
+            amazon_operation='order_import',
+        )
         api = AmazonAPI()
 
         try:

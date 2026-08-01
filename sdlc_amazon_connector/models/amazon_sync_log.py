@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 from odoo import models, fields, api
 
@@ -78,6 +79,46 @@ class AmazonSyncLog(models.Model):
     request_data = fields.Text('Request Data')
     response_data = fields.Text('Response Data')
 
+    # Normalized operational telemetry.  The raw JSON fields above remain the
+    # audit source; these indexed columns make monitoring cheap and predictable.
+    company_id = fields.Many2one(
+        'res.company', related='instance_id.company_id', store=True,
+        readonly=True, index=True,
+    )
+    http_method = fields.Char(index=True, readonly=True)
+    endpoint = fields.Char(index=True, readonly=True)
+    operation_name = fields.Char(index=True, readonly=True)
+    http_status = fields.Integer(index=True, readonly=True)
+    amazon_request_id = fields.Char(index=True, readonly=True)
+    amazon_error_code = fields.Char(index=True, readonly=True)
+    amazon_error_message = fields.Text(readonly=True)
+    error_category = fields.Selection([
+        ('transient', 'Transient'),
+        ('configuration', 'Configuration'),
+        ('authorization', 'Authorization'),
+        ('validation', 'Validation'),
+        ('data', 'Data'),
+        ('rate_limit', 'Rate Limit'),
+        ('amazon_service', 'Amazon Service'),
+        ('unknown', 'Unknown'),
+    ], index=True, readonly=True)
+    transient_error = fields.Boolean(index=True, readonly=True)
+    retry_safe = fields.Boolean(index=True, readonly=True)
+    rate_limit = fields.Float(readonly=True)
+    retry_after_seconds = fields.Float(readonly=True)
+    is_throttled = fields.Boolean(index=True, readonly=True)
+    source_model = fields.Char(index=True, readonly=True)
+    source_id = fields.Integer(index=True, readonly=True)
+    operation_control_id = fields.Many2one(
+        'amazon.operation.control', ondelete='set null', index=True,
+        readonly=True,
+    )
+    responsible_user_id = fields.Many2one(
+        'res.users', default=lambda self: self.env.user,
+        readonly=True, index=True,
+    )
+    attempt_number = fields.Integer(default=1, readonly=True)
+
     # Timing
     started_at = fields.Datetime(default=fields.Datetime.now)
     finished_at = fields.Datetime()
@@ -113,11 +154,48 @@ class AmazonSyncLog(models.Model):
     def _serialize_payload(self, payload, limit=None):
         if payload in (None, False):
             return False
+        payload = self._sanitize_payload(payload)
         if isinstance(payload, (dict, list)):
             value = json.dumps(payload, default=str, indent=2)
         else:
             value = str(payload)
         return value[:limit] if limit else value
+
+    @api.model
+    def _sanitize_payload(self, payload):
+        """Redact credentials even when callers bypass :class:`AmazonAPI`."""
+        sensitive = {
+            'access_token', 'authorization', 'client_secret', 'lwa_access_token',
+            'password', 'refresh_token', 'secret', 'signature', 'token',
+            'x-amz-access-token', 'x-amz-security-token', 'aws_access_key',
+            'aws_secret_key',
+        }
+        if isinstance(payload, dict):
+            clean = {}
+            for key, value in payload.items():
+                normalized = str(key or '').lower()
+                is_sensitive = any(part in normalized for part in sensitive)
+                clean[key] = '***REDACTED***' if is_sensitive else self._sanitize_payload(value)
+            return clean
+        if isinstance(payload, (list, tuple)):
+            return [self._sanitize_payload(value) for value in payload]
+        return payload
+
+    @api.model
+    def _response_header(self, response_data, name):
+        headers = (response_data or {}).get('headers') or {}
+        wanted = name.lower()
+        for key, value in headers.items():
+            if str(key).lower() == wanted:
+                return value
+        return False
+
+    @api.model
+    def _float_header(self, value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
     @api.model
     def log_start(self, instance, operation, request_data=None, res_model=None, res_id=None):
@@ -129,7 +207,7 @@ class AmazonSyncLog(models.Model):
             'started_at': fields.Datetime.now(),
         }
         if request_data:
-            vals['request_data'] = json.dumps(request_data, default=str)[:5000] if isinstance(request_data, (dict, list)) else str(request_data)[:5000]
+            vals['request_data'] = self._serialize_payload(request_data, limit=5000)
         if res_model:
             vals['res_model'] = res_model
         if res_id:
@@ -143,18 +221,57 @@ class AmazonSyncLog(models.Model):
         request_data = request_data or {}
         response_data = response_data or {}
         status_code = response_data.get('status_code')
+        try:
+            status_code = int(status_code) if status_code not in (None, False, '') else 0
+        except (TypeError, ValueError):
+            status_code = 0
         failed = bool(error_message) or (status_code and int(status_code) >= 400)
         finished_at = fields.Datetime.now()
         started_at = finished_at - timedelta(seconds=duration_seconds or 0.0)
         method = request_data.get('method') or ''
         endpoint = request_data.get('endpoint') or ''
+        endpoint_path = urlsplit(endpoint).path or endpoint
+        response_json = response_data.get('response_json')
+        error = {}
+        try:
+            from .amazon_api import AmazonAPI
+            error = AmazonAPI._extract_amazon_error(response_json)
+        except Exception:
+            error = {}
+        error_code = error.get('code') or ''
+        error_text = error.get('message') or str(error_message or '')
+        classification = self.env['amazon.operation.control'].classify_error(
+            http_status=status_code,
+            error_code=error_code,
+            message=error_text,
+        )
+        source_model = self.env.context.get('amazon_source_model') or False
+        source_id = self.env.context.get('amazon_source_id') or 0
+        control = self.env['amazon.operation.control']
+        responsible_user = self.env.user
+        if source_model and source_id:
+            control = control.sudo().get_or_create_for_source(source_model, source_id)
+            source = self.env[source_model].sudo().browse(int(source_id)).exists() \
+                if source_model in self.env else self.env['res.users']
+            if source and 'responsible_user_id' in source._fields and source.responsible_user_id:
+                responsible_user = source.responsible_user_id
+            elif source and source.create_uid:
+                responsible_user = source.create_uid
+        attempt_number = (control.attempt_count + 1) if control else 1
+        retry_after = self._float_header(self._response_header(response_data, 'Retry-After'))
+        rate_limit = self._float_header(
+            self._response_header(response_data, 'x-amzn-RateLimit-Limit')
+        )
+        request_id = response_data.get('amazon_request_id') or self._response_header(
+            response_data, 'x-amzn-RequestId'
+        )
         summary = "%s %s -> %s in %.3fs" % (
             method,
             endpoint,
             "HTTP %s" % status_code if status_code else "no response",
             duration_seconds or 0.0,
         )
-        return self.create({
+        log = self.create({
             'instance_id': instance.id if hasattr(instance, 'id') else instance,
             'operation': 'api_request',
             'state': 'failed' if failed else 'success',
@@ -164,7 +281,44 @@ class AmazonSyncLog(models.Model):
             'request_data': self._serialize_payload(request_data),
             'response_data': self._serialize_payload(response_data),
             'error_message': str(error_message) if error_message else False,
+            'http_method': method.upper() or False,
+            'endpoint': endpoint_path or False,
+            'operation_name': self.env.context.get('amazon_operation') or endpoint_path.rsplit('/', 1)[-1] or False,
+            'http_status': status_code or 0,
+            'amazon_request_id': request_id or False,
+            'amazon_error_code': error_code or False,
+            'amazon_error_message': error_text or False,
+            'error_category': classification['category'],
+            'transient_error': classification['transient'],
+            'retry_safe': classification['retry_safe'],
+            'rate_limit': rate_limit,
+            'retry_after_seconds': retry_after,
+            'is_throttled': status_code == 429,
+            'source_model': source_model,
+            'source_id': source_id,
+            'operation_control_id': control.id if control else False,
+            'responsible_user_id': responsible_user.id,
+            'attempt_number': attempt_number,
         })
+        if control:
+            control.sudo().write({
+                'attempt_count': attempt_number,
+                'endpoint': endpoint_path or control.endpoint,
+                'http_method': method.upper() or control.http_method,
+                'last_amazon_request_id': request_id or control.last_amazon_request_id,
+                'last_http_status': status_code or control.last_http_status,
+                'latest_attempt_at': finished_at,
+                'sync_log_id': log.id,
+            })
+            source = control._source_record()
+            if source and 'amazon_request_id' in source._fields and request_id:
+                source.sudo().with_context(skip_amazon_operation_tracking=True).write({
+                    'amazon_request_id': request_id,
+                })
+        instance_record = instance if hasattr(instance, 'id') else self.env['amazon.instance'].browse(instance)
+        if instance_record and hasattr(instance_record, '_record_api_outcome'):
+            instance_record.sudo()._record_api_outcome(log)
+        return log
 
     def _send_bus_notification(self, title, message, msg_type='success'):
         """Send a real-time bus notification to all users viewing Amazon module."""
@@ -194,7 +348,7 @@ class AmazonSyncLog(models.Model):
             'records_updated': records_updated,
         }
         if response_data:
-            vals['response_data'] = json.dumps(response_data, default=str)[:5000] if isinstance(response_data, (dict, list)) else str(response_data)[:5000]
+            vals['response_data'] = self._serialize_payload(response_data, limit=5000)
         self.write(vals)
         # Send popup notification
         op_label = dict(self._fields['operation'].selection).get(self.operation, self.operation or '')
@@ -234,7 +388,7 @@ class AmazonSyncLog(models.Model):
             'error_message': str(error_message)[:5000],
         }
         if response_data:
-            vals['response_data'] = json.dumps(response_data, default=str)[:5000] if isinstance(response_data, (dict, list)) else str(response_data)[:5000]
+            vals['response_data'] = self._serialize_payload(response_data, limit=5000)
         self.write(vals)
         op_label = dict(self._fields['operation'].selection).get(self.operation, self.operation or '')
         self._send_bus_notification(
@@ -248,10 +402,19 @@ class AmazonSyncLog(models.Model):
     # ──────────────────────────────────────────────
 
     @api.model
-    def cleanup_old_logs(self, days=30):
+    def cleanup_old_logs(self, days=30, instance=None):
         """Remove logs older than N days."""
         cutoff = fields.Datetime.subtract(fields.Datetime.now(), days=days)
-        old = self.search([('create_date', '<', cutoff)])
+        # Keep failures, partial results, linked attempts and audit-critical logs.
+        domain = [
+            ('create_date', '<', cutoff),
+            ('state', '=', 'success'),
+            ('operation_control_id', '=', False),
+            ('operation', '=', 'api_request'),
+        ]
+        if instance:
+            domain.append(('instance_id', '=', instance.id if hasattr(instance, 'id') else instance))
+        old = self.search(domain)
         count = len(old)
         old.unlink()
         _logger.info("Cleaned up %d sync logs older than %d days.", count, days)

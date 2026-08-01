@@ -86,7 +86,11 @@ class AmazonInboundOperationJob(models.Model):
         row = self.env.cr.fetchone()
         if not row:
             return False
-        self.browse(row[0])._process_operation()
+        self.browse(row[0]).with_context(
+            amazon_source_model=self._name,
+            amazon_source_id=row[0],
+            amazon_operation='inbound_operation',
+        )._process_operation()
         return True
 
     def _next_delay_minutes(self, retry_count):

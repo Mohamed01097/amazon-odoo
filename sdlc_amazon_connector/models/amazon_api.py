@@ -473,6 +473,13 @@ class AmazonAPI():
             )
         return data.get("access_token")
 
+    def get_marketplace_participations(self, instance, access_token):
+        """Lightweight read-only Sellers API v1 authorization check."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/sellers/v1/marketplaceParticipations"
+        response = self._amazon_request(instance, access_token, 'GET', url)
+        return self._json_response_with_request_id(response)
+
     # ══════════════════════════════════════════════════
     # Reports API
     # ══════════════════════════════════════════════════

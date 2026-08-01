@@ -1,0 +1,722 @@
+<odoo>
+    <!-- Stored dashboard: opening this action performs no Amazon API call. -->
+    <record id="amazon_operations_dashboard_action" model="ir.actions.act_window">
+        <field name="name">Operations Control Center</field>
+        <field name="res_model">amazon.operations.dashboard</field>
+        <field name="view_mode">list,form</field>
+        <field name="context">{'create': False}</field>
+    </record>
+
+    <record id="amazon_operations_dashboard_search" model="ir.ui.view">
+        <field name="name">amazon.operations.dashboard.search</field>
+        <field name="model">amazon.operations.dashboard</field>
+        <field name="arch" type="xml">
+            <search string="Amazon Operations">
+                <field name="instance_id"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <filter string="Healthy" name="healthy" domain="[('connection_health','=','healthy')]"/>
+                <filter string="Warning" name="warning" domain="[('connection_health','=','warning')]"/>
+                <filter string="Error" name="error" domain="[('connection_health','=','error')]"/>
+                <filter string="Has Failures" name="failures" domain="[('failed_jobs','&gt;',0)]"/>
+                <filter string="Waiting Retry" name="waiting_retry" domain="[('waiting_retry','&gt;',0)]"/>
+                <group>
+                    <filter string="Company" name="group_company" context="{'group_by':'company_id'}"/>
+                    <filter string="Health" name="group_health" context="{'group_by':'connection_health'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="amazon_operations_dashboard_list" model="ir.ui.view">
+        <field name="name">amazon.operations.dashboard.list</field>
+        <field name="model">amazon.operations.dashboard</field>
+        <field name="arch" type="xml">
+            <list string="Amazon Operations" create="0" edit="0"
+                  decoration-success="connection_health == 'healthy'"
+                  decoration-warning="connection_health == 'warning'"
+                  decoration-danger="connection_health == 'error'">
+                <field name="instance_id"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="connection_health" widget="badge"/>
+                <field name="health_score" widget="progressbar"/>
+                <field name="running_jobs"/>
+                <field name="failed_jobs"/>
+                <field name="waiting_retry"/>
+                <field name="inbound_blocked"/>
+                <field name="inventory_mismatches"/>
+                <field name="api_errors_24h"/>
+                <field name="rate_limits_24h"/>
+                <field name="last_successful_sync_at"/>
+                <field name="generated_at"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_operations_dashboard_form" model="ir.ui.view">
+        <field name="name">amazon.operations.dashboard.form</field>
+        <field name="model">amazon.operations.dashboard</field>
+        <field name="arch" type="xml">
+            <form string="Amazon Operations Control Center" create="0" edit="0">
+                <header>
+                    <button name="action_refresh" type="object" string="Refresh Stored Metrics"
+                            class="btn-primary" icon="fa-refresh"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_run_health_check" type="object" string="Run Health Check"
+                            icon="fa-heartbeat"
+                            groups="sdlc_amazon_connector.group_amazon_technical_admin"/>
+                    <button name="action_open_amazon_health_dashboard" type="object"
+                            string="Official SP-API Health Dashboard" icon="fa-external-link"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_open_running_jobs" type="object" class="oe_stat_button" icon="fa-play">
+                            <field name="running_jobs" widget="statinfo" string="Running Jobs"/>
+                        </button>
+                        <button name="action_open_failed_jobs" type="object" class="oe_stat_button" icon="fa-exclamation-circle">
+                            <field name="failed_jobs" widget="statinfo" string="Failed Jobs"/>
+                        </button>
+                        <button name="action_open_waiting_retry" type="object" class="oe_stat_button" icon="fa-repeat">
+                            <field name="waiting_retry" widget="statinfo" string="Waiting Retry"/>
+                        </button>
+                        <button name="action_open_inbound_blocked" type="object" class="oe_stat_button" icon="fa-truck">
+                            <field name="inbound_blocked" widget="statinfo" string="Inbound Blocked"/>
+                        </button>
+                        <button name="action_open_inventory_differences" type="object" class="oe_stat_button" icon="fa-balance-scale">
+                            <field name="inventory_mismatches" widget="statinfo" string="Inventory Mismatches"/>
+                        </button>
+                        <button name="action_open_api_errors" type="object" class="oe_stat_button" icon="fa-bolt">
+                            <field name="api_errors_24h" widget="statinfo" string="API Errors 24h"/>
+                        </button>
+                    </div>
+                    <widget name="web_ribbon" title="HEALTHY" bg_color="text-bg-success"
+                            invisible="connection_health != 'healthy'"/>
+                    <widget name="web_ribbon" title="WARNING" bg_color="text-bg-warning"
+                            invisible="connection_health != 'warning'"/>
+                    <widget name="web_ribbon" title="ERROR" bg_color="text-bg-danger"
+                            invisible="connection_health != 'error'"/>
+                    <group>
+                        <group string="Instance Health">
+                            <field name="instance_id"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                            <field name="connection_health" widget="badge"/>
+                            <field name="health_score" widget="progressbar"/>
+                            <field name="health_summary"/>
+                            <field name="last_successful_sync_at"/>
+                            <field name="generated_at"/>
+                        </group>
+                        <group string="API and Rate Limits">
+                            <field name="api_errors_24h"/>
+                            <field name="rate_limits_1h"/>
+                            <field name="rate_limits_24h"/>
+                            <field name="average_retry_delay" string="Average Retry Delay (s)"/>
+                        </group>
+                    </group>
+                    <group string="Operational KPIs" col="4">
+                        <field name="orders_imported_today"/>
+                        <field name="inbound_in_progress"/>
+                        <field name="critical_inventory_differences"/>
+                        <field name="inventory_mismatches"/>
+                    </group>
+                    <notebook>
+                        <page string="Rate-Limit Operations">
+                            <field name="api_operation_metric_ids" readonly="1">
+                                <list create="0" edit="0" delete="0"
+                                      decoration-danger="repeated_throttling"
+                                      default_order="throttle_rate_24h desc">
+                                    <field name="operation_name"/>
+                                    <field name="request_count_24h"/>
+                                    <field name="error_count_24h"/>
+                                    <field name="throttle_count_1h"/>
+                                    <field name="throttle_count_24h"/>
+                                    <field name="throttle_rate_24h" widget="percentage"/>
+                                    <field name="average_retry_delay" string="Average Retry Delay (s)"/>
+                                    <field name="last_throttled_at"/>
+                                    <field name="repeated_throttling"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                    <div class="alert alert-info" role="alert">
+                        This page uses stored metrics and never calls Amazon while loading.
+                        When authentication remains valid but unrelated operations return repeated 5xx errors,
+                        use the official health-dashboard link above before changing connector configuration.
+                    </div>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="amazon_api_operation_metric_action" model="ir.actions.act_window">
+        <field name="name">Amazon Rate-Limit Metrics</field>
+        <field name="res_model">amazon.api.operation.metric</field>
+        <field name="view_mode">list,graph,pivot</field>
+        <field name="context">{'create': False}</field>
+    </record>
+
+    <record id="amazon_api_operation_metric_search" model="ir.ui.view">
+        <field name="name">amazon.api.operation.metric.search</field>
+        <field name="model">amazon.api.operation.metric</field>
+        <field name="arch" type="xml">
+            <search string="Amazon Rate-Limit Metrics">
+                <field name="operation_name"/>
+                <field name="instance_id"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <filter string="Repeated Throttling" name="repeated"
+                        domain="[('repeated_throttling','=',True)]"/>
+                <filter string="Throttled in 24h" name="throttled"
+                        domain="[('throttle_count_24h','&gt;',0)]"/>
+                <group>
+                    <filter string="Instance" name="group_instance" context="{'group_by':'instance_id'}"/>
+                    <filter string="Company" name="group_company" context="{'group_by':'company_id'}"/>
+                    <filter string="Operation" name="group_operation" context="{'group_by':'operation_name'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="amazon_api_operation_metric_list" model="ir.ui.view">
+        <field name="name">amazon.api.operation.metric.list</field>
+        <field name="model">amazon.api.operation.metric</field>
+        <field name="arch" type="xml">
+            <list string="Amazon Rate-Limit Metrics" create="0" edit="0" delete="0"
+                  decoration-danger="repeated_throttling"
+                  default_order="throttle_rate_24h desc">
+                <field name="operation_name"/>
+                <field name="instance_id"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="request_count_24h"/>
+                <field name="error_count_24h"/>
+                <field name="throttle_count_1h"/>
+                <field name="throttle_count_24h"/>
+                <field name="throttle_rate_24h" widget="percentage"/>
+                <field name="average_retry_delay" string="Average Retry Delay (s)"/>
+                <field name="last_throttled_at"/>
+                <field name="repeated_throttling"/>
+                <field name="generated_at"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_api_operation_metric_graph" model="ir.ui.view">
+        <field name="name">amazon.api.operation.metric.graph</field>
+        <field name="model">amazon.api.operation.metric</field>
+        <field name="arch" type="xml">
+            <graph string="Amazon Throttling by Operation" type="bar" sample="0">
+                <field name="operation_name"/>
+                <field name="throttle_count_24h" type="measure"/>
+                <field name="request_count_24h" type="measure"/>
+            </graph>
+        </field>
+    </record>
+
+    <record id="amazon_api_operation_metric_pivot" model="ir.ui.view">
+        <field name="name">amazon.api.operation.metric.pivot</field>
+        <field name="model">amazon.api.operation.metric</field>
+        <field name="arch" type="xml">
+            <pivot string="Amazon Rate-Limit Metrics" sample="0">
+                <field name="instance_id" type="row"/>
+                <field name="operation_name" type="row"/>
+                <field name="throttle_count_24h" type="measure"/>
+                <field name="request_count_24h" type="measure"/>
+                <field name="error_count_24h" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <!-- Read-only UNION view over the existing durable business job models. -->
+    <record id="amazon_operation_job_monitor_action" model="ir.actions.act_window">
+        <field name="name">Unified Job Monitor</field>
+        <field name="res_model">amazon.operation.job.monitor</field>
+        <field name="view_mode">list,pivot,graph,form</field>
+        <field name="context">{'create': False}</field>
+    </record>
+
+    <record id="amazon_retry_center_action" model="ir.actions.act_window">
+        <field name="name">Retry Center</field>
+        <field name="res_model">amazon.operation.control</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('state','in',('retry_pending','manual_review','exhausted','cancelled'))]</field>
+        <field name="context">{'create': False, 'search_default_group_category': 1}</field>
+    </record>
+
+    <record id="amazon_operation_job_monitor_search" model="ir.ui.view">
+        <field name="name">amazon.operation.job.monitor.search</field>
+        <field name="model">amazon.operation.job.monitor</field>
+        <field name="arch" type="xml">
+            <search string="Amazon Jobs">
+                <field name="source_name"/>
+                <field name="instance_id"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="job_type"/>
+                <field name="state"/>
+                <field name="severity"/>
+                <field name="error_category"/>
+                <field name="responsible_user_id"/>
+                <filter string="Running" name="running" domain="[('state','=','running')]"/>
+                <filter string="Failed" name="failed" domain="[('state','in',('failed','exhausted','manual_review'))]"/>
+                <filter string="Waiting Retry" name="waiting_retry" domain="[('state','=','retry_pending')]"/>
+                <filter string="Rate Limited" name="rate_limited" domain="[('error_category','=','rate_limit')]"/>
+                <filter string="Abandoned" name="abandoned" domain="[('waiting_reason','=','abandoned')]"/>
+                <filter string="No Activity / Unclear" name="unclear" domain="[('waiting_reason','=','unclear')]"/>
+                <filter string="Inbound" name="inbound" domain="[('source_model','=','amazon.inbound.operation.job')]"/>
+                <filter string="Inventory" name="inventory" domain="[('job_type','=','inventory_reconciliation')]"/>
+                <group>
+                    <filter string="Instance" name="group_instance" context="{'group_by':'instance_id'}"/>
+                    <filter string="Company" name="group_company" context="{'group_by':'company_id'}"/>
+                    <filter string="Job Type" name="group_job_type" context="{'group_by':'job_type'}"/>
+                    <filter string="State" name="group_state" context="{'group_by':'state'}"/>
+                    <filter string="Severity" name="group_severity" context="{'group_by':'severity'}"/>
+                    <filter string="Error Class" name="group_category" context="{'group_by':'error_category'}"/>
+                    <filter string="Started" name="group_started" context="{'group_by':'started_at:day'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="amazon_operation_job_monitor_list" model="ir.ui.view">
+        <field name="name">amazon.operation.job.monitor.list</field>
+        <field name="model">amazon.operation.job.monitor</field>
+        <field name="arch" type="xml">
+            <list string="Amazon Jobs" create="0" edit="0" multi_edit="0"
+                  decoration-success="state == 'done'"
+                  decoration-warning="state in ('pending','retry_pending','partial')"
+                  decoration-danger="state in ('failed','exhausted','manual_review')"
+                  decoration-muted="state == 'cancelled'">
+                <header>
+                    <button name="action_retry_selected" type="object" string="Retry Selected"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_cancel_pending_retry" type="object" string="Cancel Pending Retry"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_mark_manual_review" type="object" string="Mark for Manual Review"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                </header>
+                <field name="priority" widget="priority"/>
+                <field name="job_type"/>
+                <field name="source_name"/>
+                <field name="instance_id"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="state" widget="badge"/>
+                <field name="progress" widget="progressbar"/>
+                <field name="records_processed" optional="show"/>
+                <field name="records_failed" optional="show"/>
+                <field name="retry_count"/>
+                <field name="next_retry_at"/>
+                <field name="last_activity_at"/>
+                <field name="duration_seconds" string="Duration (s)" optional="show"/>
+                <field name="error_category" widget="badge"/>
+                <field name="amazon_request_id" optional="show"/>
+                <field name="responsible_user_id" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_operation_job_monitor_form" model="ir.ui.view">
+        <field name="name">amazon.operation.job.monitor.form</field>
+        <field name="model">amazon.operation.job.monitor</field>
+        <field name="arch" type="xml">
+            <form string="Amazon Job" create="0" edit="0">
+                <header>
+                    <button name="action_retry_selected" type="object" string="Retry"
+                            class="btn-primary" invisible="not retry_safe"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_cancel_pending_retry" type="object" string="Cancel Retry"
+                            invisible="state != 'retry_pending'"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_mark_manual_review" type="object" string="Manual Review"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_open_source" type="object" string="Open Source Record"/>
+                    <button name="action_open_sync_log" type="object" string="Open Sync Log"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="Source">
+                            <field name="source_name"/>
+                            <field name="source_model"/>
+                            <field name="source_id"/>
+                            <field name="job_type"/>
+                            <field name="instance_id"/>
+                            <field name="company_id"/>
+                            <field name="responsible_user_id"/>
+                        </group>
+                        <group string="Progress">
+                            <field name="priority"/>
+                            <field name="progress" widget="progressbar"/>
+                            <field name="records_processed"/>
+                            <field name="records_failed"/>
+                            <field name="retry_count"/>
+                            <field name="max_retries"/>
+                            <field name="next_retry_at"/>
+                            <field name="waiting_reason"/>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="Timing">
+                            <field name="started_at"/>
+                            <field name="last_activity_at"/>
+                            <field name="finished_at"/>
+                            <field name="duration_seconds"/>
+                        </group>
+                        <group string="Last Failure">
+                            <field name="severity"/>
+                            <field name="error_category"/>
+                            <field name="retry_safe"/>
+                            <field name="last_error_code"/>
+                            <field name="amazon_request_id"/>
+                        </group>
+                    </group>
+                    <group string="Error">
+                        <field name="last_error_message" nolabel="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="amazon_operation_job_monitor_pivot" model="ir.ui.view">
+        <field name="name">amazon.operation.job.monitor.pivot</field>
+        <field name="model">amazon.operation.job.monitor</field>
+        <field name="arch" type="xml">
+            <pivot string="Amazon Jobs" sample="0">
+                <field name="job_type" type="row"/>
+                <field name="state" type="col"/>
+                <field name="id" type="measure" string="Jobs"/>
+                <field name="duration_seconds" type="measure"/>
+                <field name="records_failed" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <record id="amazon_operation_job_monitor_graph" model="ir.ui.view">
+        <field name="name">amazon.operation.job.monitor.graph</field>
+        <field name="model">amazon.operation.job.monitor</field>
+        <field name="arch" type="xml">
+            <graph string="Amazon Jobs" type="bar" sample="0">
+                <field name="job_type"/>
+                <field name="state"/>
+                <field name="id" type="measure" string="Jobs"/>
+            </graph>
+        </field>
+    </record>
+
+    <record id="amazon_operation_control_search" model="ir.ui.view">
+        <field name="name">amazon.operation.control.search</field>
+        <field name="model">amazon.operation.control</field>
+        <field name="arch" type="xml">
+            <search string="Retry Center">
+                <field name="source_name"/>
+                <field name="instance_id"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="job_type"/>
+                <field name="state"/>
+                <field name="severity"/>
+                <field name="error_category"/>
+                <field name="last_amazon_request_id"/>
+                <filter string="Eligible" name="eligible" domain="[('state','=','retry_pending'),('retry_safe','=',True)]"/>
+                <filter string="Manual Review" name="manual" domain="[('state','=','manual_review')]"/>
+                <filter string="Exhausted" name="exhausted" domain="[('state','=','exhausted')]"/>
+                <filter string="Rate Limited" name="rate" domain="[('error_category','=','rate_limit')]"/>
+                <group>
+                    <filter string="Category" name="group_category" context="{'group_by':'error_category'}"/>
+                    <filter string="Job Type" name="group_job" context="{'group_by':'job_type'}"/>
+                    <filter string="Severity" name="group_severity" context="{'group_by':'severity'}"/>
+                    <filter string="State" name="group_state" context="{'group_by':'state'}"/>
+                    <filter string="Instance" name="group_instance" context="{'group_by':'instance_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="amazon_operation_control_list" model="ir.ui.view">
+        <field name="name">amazon.operation.control.list</field>
+        <field name="model">amazon.operation.control</field>
+        <field name="arch" type="xml">
+            <list string="Retry Center" create="0" delete="0" edit="0"
+                  decoration-danger="severity in ('error','critical')"
+                  decoration-warning="severity == 'warning'">
+                <header>
+                    <button name="action_retry" type="object" string="Retry Selected"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_retry_all_eligible" type="object" string="Retry All Eligible"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_cancel_pending_retry" type="object" string="Cancel Pending Retry"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_mark_manual_review" type="object" string="Mark for Manual Review"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                </header>
+                <field name="priority" widget="priority"/>
+                <field name="source_name"/>
+                <field name="job_type"/>
+                <field name="instance_id"/>
+                <field name="state" widget="badge"/>
+                <field name="severity" widget="badge"/>
+                <field name="error_category" widget="badge"/>
+                <field name="retry_safe"/>
+                <field name="retry_count"/>
+                <field name="max_retries"/>
+                <field name="next_retry_at"/>
+                <field name="latest_failure_at"/>
+                <field name="last_amazon_request_id"/>
+                <button name="action_open_source" type="object" string="Open Source" icon="fa-external-link"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_operation_control_form" model="ir.ui.view">
+        <field name="name">amazon.operation.control.form</field>
+        <field name="model">amazon.operation.control</field>
+        <field name="arch" type="xml">
+            <form string="Amazon Retry" create="0" delete="0">
+                <header>
+                    <button name="action_retry" type="object" string="Retry"
+                            class="btn-primary" invisible="not retry_safe"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_administrative_retry" type="object" string="Administrative Retry"
+                            confirm="Retry only after correcting the permanent failure. Continue?"
+                            groups="sdlc_amazon_connector.group_amazon_technical_admin"/>
+                    <button name="action_cancel_pending_retry" type="object" string="Cancel Pending Retry"
+                            invisible="state != 'retry_pending'"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_mark_manual_review" type="object" string="Manual Review"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_open_source" type="object" string="Open Source Record"/>
+                    <button name="action_open_sync_log" type="object" string="Open Sync Log"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="Operation">
+                            <field name="source_name"/>
+                            <field name="source_model"/>
+                            <field name="source_id"/>
+                            <field name="job_type"/>
+                            <field name="instance_id"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                            <field name="responsible_user_id"/>
+                            <field name="priority"/>
+                        </group>
+                        <group string="Retry Policy">
+                            <field name="severity"/>
+                            <field name="error_category"/>
+                            <field name="retry_safe"/>
+                            <field name="retry_count"/>
+                            <field name="attempt_count"/>
+                            <field name="max_retries"/>
+                            <field name="next_retry_at"/>
+                            <field name="waiting_reason"/>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="Failure Timeline">
+                            <field name="first_failure_at"/>
+                            <field name="latest_failure_at"/>
+                            <field name="latest_attempt_at"/>
+                            <field name="last_activity_at"/>
+                        </group>
+                        <group string="Amazon Response">
+                            <field name="endpoint"/>
+                            <field name="http_method"/>
+                            <field name="last_http_status"/>
+                            <field name="last_error_code"/>
+                            <field name="last_amazon_request_id"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Error and Action">
+                            <group string="Last Error"><field name="last_error_message" nolabel="1"/></group>
+                            <group string="Recommended Action"><field name="recommended_action" nolabel="1"/></group>
+                            <group string="Manual Review"><field name="manual_review_note" nolabel="1"/></group>
+                        </page>
+                        <page string="Attempt History" groups="sdlc_amazon_connector.group_amazon_technical_admin">
+                            <field name="attempt_log_ids" readonly="1">
+                                <list create="0" edit="0" delete="0">
+                                    <field name="attempt_number"/>
+                                    <field name="create_date"/>
+                                    <field name="http_method"/>
+                                    <field name="endpoint"/>
+                                    <field name="http_status"/>
+                                    <field name="amazon_error_code"/>
+                                    <field name="amazon_request_id"/>
+                                    <field name="state"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- Operational API telemetry reuses the existing sync-log model. -->
+    <record id="amazon_sync_log_operational_list_inherit" model="ir.ui.view">
+        <field name="name">amazon.sync.log.operational.list.inherit</field>
+        <field name="model">amazon.sync.log</field>
+        <field name="inherit_id" ref="sdlc_amazon_connector.amazon_sync_log_list"/>
+        <field name="arch" type="xml">
+            <field name="operation" position="after">
+                <field name="operation_name" optional="show"/>
+                <field name="http_status" optional="show"/>
+                <field name="error_category" optional="show"/>
+                <field name="amazon_request_id" optional="show"/>
+                <field name="responsible_user_id" optional="hide"/>
+                <field name="rate_limit" optional="hide"/>
+                <field name="retry_after_seconds" optional="hide"/>
+            </field>
+        </field>
+    </record>
+
+    <record id="amazon_sync_log_operational_form_inherit" model="ir.ui.view">
+        <field name="name">amazon.sync.log.operational.form.inherit</field>
+        <field name="model">amazon.sync.log</field>
+        <field name="inherit_id" ref="sdlc_amazon_connector.amazon_sync_log_form"/>
+        <field name="arch" type="xml">
+            <field name="operation" position="after">
+                <field name="operation_name"/>
+                <field name="source_model"/>
+                <field name="source_id"/>
+                <field name="operation_control_id"/>
+                <field name="attempt_number"/>
+            </field>
+            <field name="duration_seconds" position="after">
+                <field name="http_method"/>
+                <field name="endpoint"/>
+                <field name="http_status"/>
+                <field name="amazon_request_id"/>
+                <field name="rate_limit"/>
+                <field name="retry_after_seconds"/>
+            </field>
+            <xpath expr="//page[field[@name='request_data']]" position="attributes">
+                <attribute name="groups">sdlc_amazon_connector.group_amazon_technical_admin</attribute>
+            </xpath>
+            <xpath expr="//page[field[@name='response_data']]" position="attributes">
+                <attribute name="groups">sdlc_amazon_connector.group_amazon_technical_admin</attribute>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="amazon_sync_log_operational_search_inherit" model="ir.ui.view">
+        <field name="name">amazon.sync.log.operational.search.inherit</field>
+        <field name="model">amazon.sync.log</field>
+        <field name="inherit_id" ref="sdlc_amazon_connector.amazon_sync_log_search"/>
+        <field name="arch" type="xml">
+            <field name="state" position="after">
+                <field name="operation_name"/>
+                <field name="http_status"/>
+                <field name="amazon_request_id"/>
+                <field name="error_category"/>
+                <filter string="API Errors" name="api_errors" domain="[('operation','=','api_request'),('state','=','failed')]"/>
+                <filter string="HTTP 429" name="http_429" domain="[('is_throttled','=',True)]"/>
+                <filter string="Authorization" name="authorization" domain="[('error_category','=','authorization')]"/>
+                <group>
+                    <filter string="HTTP Status" name="group_http" context="{'group_by':'http_status'}"/>
+                    <filter string="API Operation" name="group_api_operation" context="{'group_by':'operation_name'}"/>
+                    <filter string="Error Class" name="group_error_category" context="{'group_by':'error_category'}"/>
+                </group>
+            </field>
+        </field>
+    </record>
+
+    <!-- Instance health and configuration. -->
+    <record id="amazon_instance_operations_form_inherit" model="ir.ui.view">
+        <field name="name">amazon.instance.operations.form.inherit</field>
+        <field name="model">amazon.instance</field>
+        <field name="inherit_id" ref="sdlc_amazon_connector.amazon_instance_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//header/button[1]" position="before">
+                <button name="action_open_operations_dashboard" type="object" string="Operations"
+                        icon="fa-dashboard"/>
+                <button name="action_run_health_check" type="object" string="Health Check"
+                        icon="fa-heartbeat" groups="sdlc_amazon_connector.group_amazon_technical_admin"/>
+            </xpath>
+            <xpath expr="//field[@name='refresh_token']" position="attributes">
+                <attribute name="groups">sdlc_amazon_connector.group_amazon_technical_admin</attribute>
+                <attribute name="password">True</attribute>
+            </xpath>
+            <xpath expr="//field[@name='client_id']" position="attributes">
+                <attribute name="groups">sdlc_amazon_connector.group_amazon_technical_admin</attribute>
+            </xpath>
+            <xpath expr="//field[@name='client_secret']" position="attributes">
+                <attribute name="groups">sdlc_amazon_connector.group_amazon_technical_admin</attribute>
+            </xpath>
+            <xpath expr="//field[@name='aws_access_key']" position="attributes">
+                <attribute name="groups">sdlc_amazon_connector.group_amazon_technical_admin</attribute>
+            </xpath>
+            <xpath expr="//field[@name='aws_secret_key']" position="attributes">
+                <attribute name="groups">sdlc_amazon_connector.group_amazon_technical_admin</attribute>
+            </xpath>
+            <xpath expr="//sheet" position="inside">
+                <separator string="Operational Health"/>
+                <group>
+                    <group string="Stored Health">
+                        <field name="connection_health" widget="badge"/>
+                        <field name="health_score" widget="progressbar"/>
+                        <field name="token_health" widget="badge"/>
+                        <field name="authorization_health" widget="badge"/>
+                        <field name="rate_limit_health" widget="badge"/>
+                        <field name="external_failure_kind" widget="badge"/>
+                        <field name="health_summary"/>
+                    </group>
+                    <group string="Last API Activity">
+                        <field name="last_health_check_at"/>
+                        <field name="last_successful_api_call_at"/>
+                        <field name="last_failed_api_call_at"/>
+                        <field name="consecutive_failure_count"/>
+                        <field name="last_rate_limit_at"/>
+                        <field name="last_amazon_request_id"/>
+                        <field name="last_amazon_error_code"/>
+                        <field name="last_amazon_error_message"/>
+                        <button name="action_open_amazon_health_dashboard" type="object"
+                                string="Open Official SP-API Health Dashboard" icon="fa-external-link"/>
+                    </group>
+                </group>
+                <group string="Operational Monitoring Settings"
+                       groups="sdlc_amazon_connector.group_amazon_technical_admin">
+                    <group>
+                        <field name="enable_health_monitoring"/>
+                        <field name="health_check_interval_minutes"/>
+                        <field name="enable_operational_alerts"/>
+                        <field name="consecutive_failure_alert_threshold"/>
+                        <field name="stuck_job_threshold_minutes"/>
+                        <field name="maximum_automatic_retries"/>
+                        <field name="retry_backoff_base_seconds"/>
+                    </group>
+                    <group>
+                        <field name="inventory_mismatch_alert_threshold"/>
+                        <field name="receiving_discrepancy_alert_threshold"/>
+                        <field name="job_retention_days"/>
+                        <field name="log_retention_days"/>
+                    </group>
+                </group>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="amazon_instance_operations_list_inherit" model="ir.ui.view">
+        <field name="name">amazon.instance.operations.list.inherit</field>
+        <field name="model">amazon.instance</field>
+        <field name="inherit_id" ref="sdlc_amazon_connector.amazon_instance_list"/>
+        <field name="arch" type="xml">
+            <field name="region" position="after">
+                <field name="connection_health" widget="badge"/>
+                <field name="health_score" widget="progressbar"/>
+                <field name="last_successful_api_call_at" optional="show"/>
+            </field>
+        </field>
+    </record>
+
+    <record id="amazon_smart_alert_operations_form_inherit" model="ir.ui.view">
+        <field name="name">amazon.smart.alert.operations.form.inherit</field>
+        <field name="model">amazon.smart.alert</field>
+        <field name="inherit_id" ref="sdlc_amazon_connector.amazon_alert_form"/>
+        <field name="arch" type="xml">
+            <field name="instance_id" position="after">
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="is_operational"/>
+                <field name="source_model" invisible="not is_operational"/>
+                <field name="source_id" invisible="not is_operational"/>
+                <field name="error_category" invisible="not is_operational"/>
+                <field name="amazon_request_id" invisible="not is_operational"/>
+            </field>
+        </field>
+    </record>
+</odoo>
