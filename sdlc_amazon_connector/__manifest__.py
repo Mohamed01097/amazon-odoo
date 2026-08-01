@@ -1,6 +1,6 @@
 {
     'name': 'Odoo Amazon Connector',
-    'version': '19.0.3.2.0',
+    'version': '19.0.6.0.0',
     'summary': 'Amazon SP-API Connector for Odoo with Orders, Products, FBA, Settlements, Inventory, Pricing, Returns, and AI Automation',
     'description': """
         Complete Amazon-Odoo connector with Amazon SP-API integration,
@@ -71,6 +71,7 @@
         'delivery',
     ],
     'data': [
+        'security/security.xml',
         'security/ir.model.access.csv',
         'views/dashboard_view.xml',
         'views/instance_view.xml',
@@ -82,6 +83,7 @@
         'views/return_view.xml',
         'views/removal_order_view.xml',
         'views/inbound_shipment_view.xml',
+        'views/inventory_reconciliation_view.xml',
         'views/fba_inventory_view.xml',
         'views/rating_view.xml',
         'views/vcs_view.xml',

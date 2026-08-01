@@ -1,0 +1,6 @@
+from . import test_fba_stock_structure
+from . import test_fba_inbound_plan_phase2
+from . import test_fba_packing_placement_phase3
+from . import test_fba_shipping_phase4
+from . import test_fba_receiving_phase5
+from . import test_inventory_reconciliation_phase6

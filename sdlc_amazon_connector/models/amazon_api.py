@@ -142,6 +142,21 @@ class AmazonAPI():
             or ''
         )
 
+    @classmethod
+    def _json_response_with_request_id(cls, response):
+        """Return JSON while preserving the Amazon request ID for callers."""
+        data = response.json()
+        if not isinstance(data, dict):
+            return {
+                '_amazon_response': data,
+                '_amazon_request_id': cls._amazon_request_id(response),
+            }
+        data = dict(data)
+        request_id = cls._amazon_request_id(response)
+        if request_id:
+            data['_amazon_request_id'] = request_id
+        return data
+
     @staticmethod
     def _extract_amazon_error(response_json):
         error = {}
@@ -1066,18 +1081,78 @@ class AmazonAPI():
     # FBA Inventory API
     # ══════════════════════════════════════════════════
 
-    def get_inventory_summaries(self, instance, access_token, next_token=None):
+    def get_inventory_summaries(self, instance, access_token, next_token=None,
+                                seller_skus=None, details=True):
+        """Return one official FBA Inventory API v1 summary page.
+
+        ``details=true`` is required by reconciliation because the summary-only
+        response does not include the sellable, reserved, unfulfillable, and
+        inbound quantity breakdowns.  A startDateTime is deliberately not
+        accepted here: Amazon documents that changes to the three inbound
+        quantities are not detected by that incremental filter.
+        """
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/fba/inventory/v1/summaries"
         params = {
             "granularityType": "Marketplace",
             "granularityId": instance.marketplace_id,
             "marketplaceIds": instance.marketplace_id,
+            "details": "true" if details else "false",
         }
+        if seller_skus:
+            if len(seller_skus) > 50:
+                raise ValueError("Amazon FBA Inventory accepts at most 50 sellerSkus.")
+            params["sellerSkus"] = ','.join(str(sku) for sku in seller_skus)
         if next_token:
             params["nextToken"] = next_token
         resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
-        return resp.json()
+        return self._json_response_with_request_id(resp)
+
+    def get_all_inventory_summaries(self, instance, access_token,
+                                    seller_skus=None, details=True):
+        """Consume all FBA Inventory pages immediately and retain page evidence.
+
+        Amazon inventory pagination tokens expire after 30 seconds, so callers
+        receive one complete snapshot instead of persisting tokens for a later
+        background pass.
+        """
+        summaries = []
+        pages = []
+        request_ids = []
+        next_token = None
+        seen_tokens = set()
+        for _page_number in range(1000):
+            page = self.get_inventory_summaries(
+                instance,
+                access_token,
+                next_token=next_token,
+                seller_skus=seller_skus,
+                details=details,
+            )
+            if not isinstance(page, dict):
+                raise ValueError("Amazon returned an invalid FBA inventory response.")
+            payload = page.get('payload')
+            page_summaries = payload.get('inventorySummaries') if isinstance(payload, dict) else None
+            if not isinstance(page_summaries, list):
+                raise ValueError("Amazon returned an invalid inventorySummaries list.")
+            summaries.extend(page_summaries)
+            pages.append(page)
+            if page.get('_amazon_request_id'):
+                request_ids.append(page['_amazon_request_id'])
+            pagination = page.get('pagination') or {}
+            next_token = pagination.get('nextToken') if isinstance(pagination, dict) else None
+            if not next_token:
+                break
+            if next_token in seen_tokens:
+                raise ValueError("Amazon repeated an FBA inventory pagination token.")
+            seen_tokens.add(next_token)
+        else:
+            raise ValueError("Amazon FBA inventory pagination exceeded 1000 pages.")
+        return {
+            'payload': {'inventorySummaries': summaries},
+            '_pages': pages,
+            '_amazon_request_ids': request_ids,
+        }
 
     # ══════════════════════════════════════════════════
     # Fulfillment Inbound API (v2024)
@@ -1087,25 +1162,164 @@ class AmazonAPI():
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans"
         resp = self._amazon_request(instance, access_token, 'POST', url, body=body)
-        return resp.json()
+        return self._json_response_with_request_id(resp)
+
+    def get_inbound_operation_status(self, instance, access_token, operation_id):
+        """Return the v2024-03-20 asynchronous inbound operation status."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/inbound/fba/2024-03-20/operations/{operation_id}"
+        resp = self._amazon_request(instance, access_token, 'GET', url)
+        return self._json_response_with_request_id(resp)
 
     def get_inbound_plan(self, instance, access_token, plan_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
         resp = self._amazon_request(instance, access_token, 'GET', url)
-        return resp.json()
+        return self._json_response_with_request_id(resp)
+
+    def generate_packing_options(self, instance, access_token, plan_id):
+        """Start v2024-03-20 packing-option generation."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/packingOptions"
+        resp = self._amazon_request(instance, access_token, 'POST', url)
+        return self._json_response_with_request_id(resp)
+
+    def list_packing_options(self, instance, access_token, plan_id, page_size=20,
+                             pagination_token=None):
+        """Return one official listPackingOptions page."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/packingOptions"
+        params = {'pageSize': page_size}
+        if pagination_token:
+            params['paginationToken'] = pagination_token
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
+        return self._json_response_with_request_id(resp)
+
+    def confirm_packing_option(self, instance, access_token, plan_id, packing_option_id):
+        """Start asynchronous confirmation of one packing option."""
+        endpoint = self._get_endpoint(instance)
+        url = (
+            f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
+            f"/packingOptions/{packing_option_id}/confirmation"
+        )
+        resp = self._amazon_request(instance, access_token, 'POST', url)
+        return self._json_response_with_request_id(resp)
+
+    def generate_placement_options(self, instance, access_token, plan_id, body=None):
+        """Start v2024-03-20 placement generation with its required JSON body."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/placementOptions"
+        resp = self._amazon_request(instance, access_token, 'POST', url, body=body or {})
+        return self._json_response_with_request_id(resp)
+
+    def list_placement_options(self, instance, access_token, plan_id, page_size=20,
+                               pagination_token=None):
+        """Return one official listPlacementOptions page."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/placementOptions"
+        params = {'pageSize': page_size}
+        if pagination_token:
+            params['paginationToken'] = pagination_token
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
+        return self._json_response_with_request_id(resp)
+
+    def confirm_placement_option(self, instance, access_token, plan_id, placement_option_id):
+        """Start asynchronous confirmation of one placement option."""
+        endpoint = self._get_endpoint(instance)
+        url = (
+            f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
+            f"/placementOptions/{placement_option_id}/confirmation"
+        )
+        resp = self._amazon_request(instance, access_token, 'POST', url)
+        return self._json_response_with_request_id(resp)
 
     def get_shipment(self, instance, access_token, plan_id, shipment_id):
+        """Return one official v2024-03-20 inbound shipment."""
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/shipments/{shipment_id}"
         resp = self._amazon_request(instance, access_token, 'GET', url)
-        return resp.json()
+        return self._json_response_with_request_id(resp)
+
+    def update_shipment_tracking_details(self, instance, access_token, plan_id,
+                                         shipment_id, body):
+        """Start the official asynchronous tracking-details update."""
+        endpoint = self._get_endpoint(instance)
+        url = (
+            f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
+            f"/shipments/{shipment_id}/trackingDetails"
+        )
+        resp = self._amazon_request(instance, access_token, 'PUT', url, body=body)
+        return self._json_response_with_request_id(resp)
 
     def get_shipment_items(self, instance, access_token, plan_id, shipment_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/shipments/{shipment_id}/items"
         resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
+
+    def get_inbound_shipment_items_v0(self, instance, access_token,
+                                      shipment_confirmation_id, max_pages=100):
+        """Return shipped/received quantities through Amazon's preserved v0 operation.
+
+        Fulfillment Inbound v2024-03-20 ``listShipmentItems`` does not expose
+        received quantities. Amazon's official migration guide explicitly keeps
+        ``getShipmentItemsByShipmentId`` and ``getShipmentItems`` non-deprecated
+        for this purpose and requires a v2024 ``shipmentConfirmationID`` in the
+        v0 ``shipmentId`` position.
+
+        The initial shipment-scoped operation has no NextToken request parameter.
+        Amazon returns continuation tokens through the preserved ``getShipmentItems``
+        operation, whose NEXT_TOKEN query continues the original result set.
+        """
+        confirmation_id = str(shipment_confirmation_id or '').strip()
+        if not confirmation_id:
+            raise ValueError("shipment_confirmation_id is required")
+        endpoint = self._get_endpoint(instance)
+        first_url = "%s/fba/inbound/v0/shipments/%s/items" % (
+            endpoint, quote(confirmation_id, safe=''),
+        )
+        response = self._amazon_request(
+            instance, access_token, 'GET', first_url,
+        )
+        page = self._json_response_with_request_id(response)
+        pages = [page]
+        payload = page.get('payload') or {}
+        items = list(payload.get('ItemData', []) or [])
+        next_token = payload.get('NextToken')
+        page_count = 1
+        while next_token:
+            if page_count >= max_pages:
+                raise requests.exceptions.RequestException(
+                    "Amazon inbound shipment items exceeded the %s-page safety limit."
+                    % max_pages
+                )
+            continuation_url = f"{endpoint}/fba/inbound/v0/shipmentItems"
+            response = self._amazon_request(
+                instance,
+                access_token,
+                'GET',
+                continuation_url,
+                params={
+                    'QueryType': 'NEXT_TOKEN',
+                    'NextToken': next_token,
+                    'MarketplaceId': instance.marketplace_id,
+                },
+            )
+            page = self._json_response_with_request_id(response)
+            pages.append(page)
+            payload = page.get('payload') or {}
+            items.extend(payload.get('ItemData', []) or [])
+            next_token = payload.get('NextToken')
+            page_count += 1
+        return {
+            'payload': {'ItemData': items},
+            '_amazon_request_ids': [
+                value for value in (
+                    current.get('_amazon_request_id') for current in pages
+                ) if value
+            ],
+            '_pages': pages,
+        }
 
     # ══════════════════════════════════════════════════
     # Product Pricing API

@@ -7,7 +7,7 @@
 
     <!-- Configuration -->
     <menuitem id="amazon_config_menu" parent="amazon_root" name="Configuration" sequence="1"/>
-    <menuitem id="amazon_instance_menu" parent="amazon_config_menu" name="Instances" action="amazon_instance_action" sequence="10"/>
+    <menuitem id="amazon_instance_menu" parent="amazon_config_menu" name="Instances" action="amazon_instance_action" sequence="30"/>
     <menuitem id="amazon_settings_menu" parent="amazon_config_menu" name="Settings" action="amazon_config_settings_action" sequence="20" groups="base.group_system"/>
     <menuitem id="amazon_user_guide_menu" parent="amazon_config_menu" name="User Guide" action="amazon_user_guidance_action" sequence="90"/>
     <menuitem id="amazon_ai_features_menu" parent="amazon_config_menu" name="AI Features Overview" action="amazon_ai_features_action" sequence="100"/>
@@ -38,9 +38,11 @@
     <!-- FBA Inventory -->
     <menuitem id="amazon_fba_menu" parent="amazon_root" name="FBA" sequence="30"/>
     <menuitem id="amazon_inbound_shipment_menu" parent="amazon_fba_menu" name="Inbound Shipments" action="amazon_inbound_shipment_action" sequence="10"/>
-    <menuitem id="amazon_removal_order_menu" parent="amazon_fba_menu" name="Removal Orders" action="amazon_removal_order_action" sequence="20"/>
-    <menuitem id="amazon_fba_inventory_menu" parent="amazon_fba_menu" name="Inventory Reports" action="amazon_fba_inventory_action" sequence="30"/>
-    <menuitem id="amazon_outbound_order_menu" parent="amazon_fba_menu" name="MCF Outbound Orders" action="amazon_outbound_order_action" sequence="40"/>
+    <menuitem id="amazon_inventory_health_menu" parent="amazon_fba_menu" name="Inventory Health" action="amazon_inventory_reconciliation_run_action" sequence="20"/>
+    <menuitem id="amazon_inventory_difference_menu" parent="amazon_fba_menu" name="Inventory Differences" action="amazon_inventory_reconciliation_action" sequence="21"/>
+    <menuitem id="amazon_removal_order_menu" parent="amazon_fba_menu" name="Removal Orders" action="amazon_removal_order_action" sequence="30"/>
+    <menuitem id="amazon_fba_inventory_menu" parent="amazon_fba_menu" name="Legacy Inventory Reports" action="amazon_fba_inventory_action" sequence="40"/>
+    <menuitem id="amazon_outbound_order_menu" parent="amazon_fba_menu" name="MCF Outbound Orders" action="amazon_outbound_order_action" sequence="50"/>
 
     <!-- ═══ AI Tools ═══ -->
     <menuitem id="amazon_ai_menu" parent="amazon_root" name="AI Tools" sequence="35"/>

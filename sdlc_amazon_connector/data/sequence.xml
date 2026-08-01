@@ -34,6 +34,13 @@
         <field name="padding">4</field>
     </record>
 
+    <record id="seq_amazon_inventory_reconciliation_run" model="ir.sequence">
+        <field name="name">Amazon Inventory Audit</field>
+        <field name="code">amazon.inventory.reconciliation.run</field>
+        <field name="prefix">FBAAUDIT/</field>
+        <field name="padding">5</field>
+    </record>
+
     <record id="seq_amazon_rating_report" model="ir.sequence">
         <field name="name">Amazon Rating Report</field>
         <field name="code">amazon.rating.report</field>

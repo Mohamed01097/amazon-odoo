@@ -78,31 +78,12 @@ class AmazonFBAInventoryReport(models.Model):
                 amazon_prod.amazon_qty = line.quantity
 
     def _process_adjustment(self):
-        """Create stock adjustments in Odoo warehouse."""
-        warehouse = self.env['stock.warehouse'].search([], limit=1)
-        if not warehouse:
-            raise UserError("No warehouse found in Odoo.")
-
-        location = warehouse.lot_stock_id
-        for line in self.line_ids:
-            if not line.odoo_product_id:
-                continue
-
-            # Create inventory adjustment
-            quant = self.env['stock.quant'].search([
-                ('product_id', '=', line.odoo_product_id.id),
-                ('location_id', '=', location.id),
-            ], limit=1)
-
-            current_qty = quant.quantity if quant else 0
-            diff = line.quantity - current_qty
-
-            if diff != 0:
-                self.env['stock.quant'].with_context(inventory_mode=True).create({
-                    'product_id': line.odoo_product_id.id,
-                    'location_id': location.id,
-                    'inventory_quantity': line.quantity,
-                })
+        """Block the retired direct-quant adjustment path."""
+        raise UserError(
+            "Legacy report adjustments are disabled. Run an Inventory Audit and "
+            "apply a supported stock transfer, or use Odoo's standard Inventory "
+            "Adjustment workflow after manual review."
+        )
 
     def _process_fba_shipment(self):
         """Process FBA shipment report: create orders and deliveries."""

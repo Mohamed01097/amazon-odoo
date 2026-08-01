@@ -36,7 +36,7 @@
                     <button name="action_import_orders" type="object" string="Import Orders"/>
                     <button name="action_sync_order_statuses" type="object" string="Sync Order Statuses"/>
                     <button name="action_export_stock" type="object" string="Export Stock"/>
-                    <button name="action_pull_stock" type="object" string="Pull Stock (Amazon→Odoo)"/>
+                    <button name="action_pull_stock" type="object" string="Run Inventory Audit"/>
                     <button name="action_update_prices" type="object" string="Push Prices"/>
                     <button name="action_pull_prices" type="object" string="Pull Prices (Amazon→Odoo)"/>
                     <button name="action_export_all_products" type="object" string="Export Products"/>
@@ -58,6 +58,9 @@
                         <button name="action_view_sync_logs" type="object" class="oe_stat_button" icon="fa-history">
                             <field name="sync_log_count" widget="statinfo" string="Sync Logs"/>
                         </button>
+                        <button name="action_view_inventory_audits" type="object" class="oe_stat_button" icon="fa-balance-scale">
+                            <field name="reconciliation_run_count" widget="statinfo" string="Inventory Audits"/>
+                        </button>
                     </div>
                     <group>
                         <group string="Credentials">
@@ -74,7 +77,6 @@
                         <group string="Configuration">
                             <field name="company_id"/>
                             <field name="fulfillment_program"/>
-                            <field name="fba_warehouse_id"/>
                             <field name="fbm_warehouse_id"/>
                             <field name="default_currency_id"/>
                             <field name="initial_order_import_from"/>
@@ -82,6 +84,38 @@
                             <field name="order_import_batch_size"/>
                             <field name="order_import_overlap_minutes"/>
                             <field name="active"/>
+                        </group>
+                    </group>
+                    <separator string="FBA Stock Structure"
+                               groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"/>
+                    <group groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager">
+                        <group string="FBA Locations">
+                            <field name="fba_warehouse_id"/>
+                            <field name="fba_source_location_id"/>
+                            <field name="fba_ship_from_partner_id"
+                                   context="{'default_company_id': company_id}"/>
+                            <field name="fba_transit_location_id"/>
+                            <field name="fba_sellable_location_id"/>
+                            <field name="fba_reserved_location_id"/>
+                            <field name="fba_unsellable_location_id"/>
+                            <field name="inventory_reconciliation_enabled"/>
+                            <field name="last_inventory_audit_at"/>
+                        </group>
+                        <group string="Setup">
+                            <div class="alert alert-info" role="alert" colspan="2">
+                                <strong>Source</strong> is the client's warehouse stock location.<br/>
+                                <strong>Ship-From Address</strong> is the physical address sent to Amazon for inbound planning.<br/>
+                                <strong>Transit</strong> is inventory sent to Amazon but not received yet.<br/>
+                                <strong>Sellable</strong> is inventory Amazon has received and can sell.<br/>
+                                <strong>Reserved</strong> is inventory Amazon has reserved.<br/>
+                                <strong>Unsellable</strong> is inventory Amazon holds but cannot sell.
+                            </div>
+                            <button name="action_create_fba_stock_structure"
+                                    type="object"
+                                    string="Create FBA Stock Structure"
+                                    class="btn-primary"
+                                    icon="fa-sitemap"
+                                    groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"/>
                         </group>
                     </group>
                     <div class="alert alert-info" role="alert">
@@ -127,7 +161,7 @@
                         </group>
                     </group>
                     <div class="alert alert-warning" role="alert" invisible="not auto_sync_enabled">
-                        Pull Stock and Pull Prices are manual Amazon → Odoo reconciliation actions. Do not use them when Odoo is master unless you intentionally want to reconcile from Amazon.
+                        Inventory Audit compares Amazon with Odoo and records suggestions. Pull Prices remains manual. Inventory is never changed automatically unless Settings explicitly selects Automatic reconciliation mode.
                     </div>
                     <group invisible="not auto_sync_enabled">
                         <button name="action_apply_sync_schedule" type="object" string="Apply Schedule" class="btn-primary" icon="fa-clock-o"/>

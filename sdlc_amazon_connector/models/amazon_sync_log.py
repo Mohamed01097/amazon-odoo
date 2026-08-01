@@ -29,6 +29,7 @@ class AmazonSyncLog(models.Model):
         # Stock
         ('stock_export', 'Stock Export'),
         ('stock_pull', 'Stock Pull'),
+        ('inventory_reconciliation', 'Inventory Reconciliation'),
         # Prices
         ('price_export', 'Price Export'),
         ('price_pull', 'Price Pull'),

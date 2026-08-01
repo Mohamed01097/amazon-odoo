@@ -3,8 +3,8 @@ import logging
 import requests
 from datetime import datetime, timedelta, timezone
 
-from odoo import models, fields
-from odoo.exceptions import UserError
+from odoo import _, api, fields, models
+from odoo.exceptions import AccessError, UserError, ValidationError
 
 from .amazon_api import (
     AmazonAPI, FEED_JSON_LISTINGS, FEED_POST_PRODUCT_PRICING, FEED_POST_INVENTORY,
@@ -12,6 +12,41 @@ from .amazon_api import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+FBA_LOCATION_DEFINITIONS = {
+    'transit': {
+        'field': 'fba_transit_location_id',
+        'label': 'FBA Transit Location',
+        'name': 'Amazon FBA Transit',
+        'usage': 'transit',
+    },
+    'sellable': {
+        'field': 'fba_sellable_location_id',
+        'label': 'FBA Sellable Location',
+        'name': 'Amazon FBA Sellable',
+        'usage': 'internal',
+    },
+    'reserved': {
+        'field': 'fba_reserved_location_id',
+        'label': 'FBA Reserved Location',
+        'name': 'Amazon FBA Reserved',
+        'usage': 'internal',
+    },
+    'unsellable': {
+        'field': 'fba_unsellable_location_id',
+        'label': 'FBA Unsellable Location',
+        'name': 'Amazon FBA Unsellable',
+        'usage': 'internal',
+    },
+}
+
+FBA_CONFIGURATION_FIELDS = {
+    'fba_warehouse_id',
+    'fba_source_location_id',
+    'fba_ship_from_partner_id',
+    *(definition['field'] for definition in FBA_LOCATION_DEFINITIONS.values()),
+}
 
 
 def _amazon_datetime_to_odoo(value):
@@ -74,6 +109,7 @@ MARKETPLACE_REGION = {
 class AmazonInstance(models.Model):
     _name = 'amazon.instance'
     _description = 'Amazon Instance'
+    _check_company_auto = True
 
     name = fields.Char(required=True)
     seller_id = fields.Char('Seller ID')
@@ -106,8 +142,56 @@ class AmazonInstance(models.Model):
     ], string='Fulfillment Program', default='none')
 
     # Warehouses
-    fba_warehouse_id = fields.Many2one('stock.warehouse', string='FBA Warehouse')
+    fba_warehouse_id = fields.Many2one(
+        'stock.warehouse',
+        string='FBA Warehouse',
+        check_company=True,
+        domain="[('active', '=', True), ('company_id', '=', company_id)]",
+        help="Warehouse whose Stock location contains the Amazon FBA inventory locations.",
+    )
     fbm_warehouse_id = fields.Many2one('stock.warehouse', string='FBM Warehouse')
+    fba_source_location_id = fields.Many2one(
+        'stock.location',
+        string='FBA Source Location',
+        check_company=True,
+        domain="[('active', '=', True), ('usage', '=', 'internal'), ('company_id', 'in', [company_id, False])]",
+        help="Client warehouse stock location from which inventory will later be sent to Amazon.",
+    )
+    fba_ship_from_partner_id = fields.Many2one(
+        'res.partner',
+        string='FBA Ship-From Address',
+        check_company=True,
+        domain="[('active', '=', True), ('company_id', 'in', [company_id, False])]",
+        help="Physical source address sent to Amazon when creating an FBA inbound plan.",
+    )
+    fba_transit_location_id = fields.Many2one(
+        'stock.location',
+        string='FBA Transit Location',
+        check_company=True,
+        domain="[('active', '=', True), ('usage', '=', 'transit'), ('company_id', '=', company_id)]",
+        help="Company-owned inventory sent to Amazon but not received by Amazon yet.",
+    )
+    fba_sellable_location_id = fields.Many2one(
+        'stock.location',
+        string='FBA Sellable Location',
+        check_company=True,
+        domain="[('active', '=', True), ('usage', '=', 'internal'), ('company_id', '=', company_id)]",
+        help="Company-owned inventory Amazon has received and can sell.",
+    )
+    fba_reserved_location_id = fields.Many2one(
+        'stock.location',
+        string='FBA Reserved Location',
+        check_company=True,
+        domain="[('active', '=', True), ('usage', '=', 'internal'), ('company_id', '=', company_id)]",
+        help="Company-owned inventory Amazon has reserved.",
+    )
+    fba_unsellable_location_id = fields.Many2one(
+        'stock.location',
+        string='FBA Unsellable Location',
+        check_company=True,
+        domain="[('active', '=', True), ('usage', '=', 'internal'), ('company_id', '=', company_id)]",
+        help="Company-owned inventory Amazon holds but cannot sell.",
+    )
 
     # Defaults
     default_currency_id = fields.Many2one('res.currency', string='Default Currency')
@@ -235,6 +319,341 @@ class AmazonInstance(models.Model):
         'CHECK (status_sync_lookback_minutes IS NULL OR status_sync_lookback_minutes >= 0)',
         'Status sync lookback minutes cannot be negative.',
     )
+
+    @api.model
+    def _check_fba_configuration_access(self):
+        if (
+            self.env.su
+            or self.env.user.has_group('sdlc_amazon_connector.group_amazon_manager')
+            or self.env.user.has_group('stock.group_stock_manager')
+        ):
+            return
+        raise AccessError(_(
+            "Only an Amazon Connector Manager or Inventory Administrator can change "
+            "the FBA stock structure configuration."
+        ))
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        if any(FBA_CONFIGURATION_FIELDS.intersection(vals) for vals in vals_list):
+            self._check_fba_configuration_access()
+        return super().create(vals_list)
+
+    def write(self, vals):
+        if FBA_CONFIGURATION_FIELDS.intersection(vals):
+            self._check_fba_configuration_access()
+        return super().write(vals)
+
+    @api.constrains(
+        'company_id',
+        'fba_warehouse_id',
+        'fba_source_location_id',
+        'fba_ship_from_partner_id',
+        'fba_transit_location_id',
+        'fba_sellable_location_id',
+        'fba_reserved_location_id',
+        'fba_unsellable_location_id',
+    )
+    def _check_fba_stock_configuration(self):
+        for instance in self:
+            company = instance.company_id
+            warehouse = instance.fba_warehouse_id
+            ship_from_partner = instance.fba_ship_from_partner_id
+            if ship_from_partner:
+                if not ship_from_partner.active:
+                    raise ValidationError(_("The FBA Ship-From Address must be active."))
+                if ship_from_partner.company_id and ship_from_partner.company_id != company:
+                    raise ValidationError(_(
+                        "The FBA Ship-From Address must belong to the Amazon instance "
+                        "company or be a shared contact."
+                    ))
+            if warehouse:
+                if not company or warehouse.company_id != company:
+                    raise ValidationError(_(
+                        "The FBA warehouse must belong to the Amazon instance company."
+                    ))
+                if not warehouse.active:
+                    raise ValidationError(_("The FBA warehouse must be active."))
+
+            configured_locations = {
+                'source': instance.fba_source_location_id,
+                **{
+                    role: instance[definition['field']]
+                    for role, definition in FBA_LOCATION_DEFINITIONS.items()
+                },
+            }
+            used_location_ids = {}
+            for role, location in configured_locations.items():
+                if not location:
+                    continue
+                label = (
+                    _("FBA Source Location")
+                    if role == 'source'
+                    else _(FBA_LOCATION_DEFINITIONS[role]['label'])
+                )
+                if not location.active:
+                    raise ValidationError(_("%s must be active.", label))
+
+                expected_usage = (
+                    'internal'
+                    if role == 'source'
+                    else FBA_LOCATION_DEFINITIONS[role]['usage']
+                )
+                if location.usage != expected_usage:
+                    raise ValidationError(_(
+                        "%s must have location type %s.", label, expected_usage
+                    ))
+
+                if role == 'source':
+                    if location.company_id and location.company_id != company:
+                        raise ValidationError(_(
+                            "The FBA Source Location must belong to the Amazon instance company "
+                            "or be a shared location."
+                        ))
+                    if location.amazon_fba_location_type:
+                        raise ValidationError(_(
+                            "The FBA Source Location cannot also be a connector-managed FBA location."
+                        ))
+                elif not company or location.company_id != company:
+                    raise ValidationError(_(
+                        "%s must belong to the Amazon instance company.", label
+                    ))
+
+                previous_role = used_location_ids.get(location.id)
+                if previous_role:
+                    raise ValidationError(_(
+                        "The same stock location cannot be assigned to both %s and %s.",
+                        previous_role,
+                        label,
+                    ))
+                used_location_ids[location.id] = label
+
+                if role in {'sellable', 'reserved', 'unsellable'}:
+                    stock_location = warehouse.lot_stock_id if warehouse else False
+                    if (
+                        not stock_location
+                        or location == stock_location
+                        or not location._child_of(stock_location)
+                    ):
+                        raise ValidationError(_(
+                            "%s must be below the configured FBA warehouse Stock location.", label
+                        ))
+                elif (
+                    role == 'transit'
+                    and warehouse
+                    and location._child_of(warehouse.lot_stock_id)
+                ):
+                    raise ValidationError(_(
+                        "The FBA Transit Location cannot be inside the FBA warehouse Stock hierarchy."
+                    ))
+
+                if role != 'source' and (
+                    location.amazon_instance_id
+                    and location.amazon_instance_id != instance
+                ):
+                    raise ValidationError(_(
+                        "%s is managed by another Amazon instance.", label
+                    ))
+                if role != 'source' and (
+                    location.amazon_fba_location_type
+                    and location.amazon_fba_location_type != role
+                ):
+                    raise ValidationError(_(
+                        "%s is marked for a different FBA role.", label
+                    ))
+
+    def _validate_fba_setup_location(self, location, role):
+        """Validate one setup candidate without changing stock."""
+        self.ensure_one()
+        definition = FBA_LOCATION_DEFINITIONS[role]
+        label = _(definition['label'])
+        if not location.active:
+            raise UserError(_("%s must be active.", label))
+        if location.usage != definition['usage']:
+            raise UserError(_(
+                "%s must have location type %s.", label, definition['usage']
+            ))
+        if location.company_id != self.company_id:
+            raise UserError(_("%s must belong to the Amazon instance company.", label))
+        if role in {'sellable', 'reserved', 'unsellable'}:
+            stock_location = self.fba_warehouse_id.lot_stock_id
+            if location == stock_location or not location._child_of(stock_location):
+                raise UserError(_(
+                    "%s must be below the configured FBA warehouse Stock location.", label
+                ))
+        elif self.fba_warehouse_id and location._child_of(self.fba_warehouse_id.lot_stock_id):
+            raise UserError(_(
+                "The FBA Transit Location cannot be inside the FBA warehouse Stock hierarchy."
+            ))
+        if location.amazon_instance_id and location.amazon_instance_id != self:
+            raise UserError(_("%s is managed by another Amazon instance.", label))
+        if (
+            location.amazon_fba_location_type
+            and location.amazon_fba_location_type != role
+        ):
+            raise UserError(_("%s is marked for a different FBA role.", label))
+
+    def _claim_fba_location(self, location, role):
+        """Attach the stable connector marker. Return whether it was repaired."""
+        self.ensure_one()
+        self._validate_fba_setup_location(location, role)
+        if (
+            location.amazon_instance_id == self
+            and location.amazon_fba_location_type == role
+        ):
+            return False
+
+        other_location = self.env['stock.location'].sudo().with_context(active_test=False).search([
+            ('id', '!=', location.id),
+            ('amazon_instance_id', '=', self.id),
+            ('amazon_fba_location_type', '=', role),
+        ], limit=1)
+        if other_location:
+            raise UserError(_(
+                "%s is already represented by %s. Resolve the duplicate configuration first.",
+                _(FBA_LOCATION_DEFINITIONS[role]['label']),
+                other_location.display_name,
+            ))
+        if location.amazon_instance_id or location.amazon_fba_location_type:
+            raise UserError(_(
+                "%s already has incompatible Amazon FBA ownership metadata.",
+                location.display_name,
+            ))
+        location.sudo().write({
+            'amazon_instance_id': self.id,
+            'amazon_fba_location_type': role,
+        })
+        return True
+
+    def action_create_fba_stock_structure(self):
+        """Create or repair only the locations required by the future FBA flow."""
+        self.ensure_one()
+        self._check_fba_configuration_access()
+        if not self.company_id:
+            raise UserError(_("Select an Instance Company before creating the FBA stock structure."))
+        if not self.fba_warehouse_id:
+            raise UserError(_("Select an FBA Warehouse before creating the FBA stock structure."))
+        if self.fba_warehouse_id.company_id != self.company_id:
+            raise UserError(_("The FBA Warehouse must belong to the Amazon instance company."))
+        if not self.fba_warehouse_id.active:
+            raise UserError(_("The FBA Warehouse must be active."))
+
+        created = []
+        reused = []
+        linked = []
+        skipped = []
+
+        source_location = self.fba_source_location_id
+        if not source_location:
+            source_warehouse = self.fbm_warehouse_id
+            candidate = source_warehouse.lot_stock_id if source_warehouse else False
+            if (
+                source_warehouse
+                and source_warehouse.active
+                and source_warehouse.company_id == self.company_id
+                and candidate.active
+                and candidate.usage == 'internal'
+                and candidate.company_id == self.company_id
+            ):
+                source_location = candidate
+                self.sudo().write({'fba_source_location_id': source_location.id})
+                linked.append(_("FBA Source Location"))
+            else:
+                raise UserError(_(
+                    "Select the FBA Source Location. No safe source location could be determined "
+                    "from an already configured source warehouse."
+                ))
+        else:
+            if not source_location.active or source_location.usage != 'internal':
+                raise UserError(_("The FBA Source Location must be an active internal location."))
+            if source_location.company_id and source_location.company_id != self.company_id:
+                raise UserError(_(
+                    "The FBA Source Location must belong to the Amazon instance company "
+                    "or be a shared location."
+                ))
+            skipped.append(_("FBA Source Location was already configured"))
+
+        Location = self.env['stock.location'].sudo().with_context(active_test=False)
+        stock_location = self.fba_warehouse_id.lot_stock_id
+        for role, definition in FBA_LOCATION_DEFINITIONS.items():
+            field_name = definition['field']
+            label = _(definition['label'])
+            parent_location = stock_location if definition['usage'] == 'internal' else False
+            location = self[field_name].sudo()
+
+            if location:
+                self._validate_fba_setup_location(location, role)
+                marker_repaired = self._claim_fba_location(location, role)
+                reused.append(label)
+                if marker_repaired:
+                    linked.append(_("%s marker", label))
+                continue
+
+            location = Location.search([
+                ('amazon_instance_id', '=', self.id),
+                ('amazon_fba_location_type', '=', role),
+            ], limit=1)
+            if location:
+                self._validate_fba_setup_location(location, role)
+                reused.append(label)
+            else:
+                structural_domain = [
+                    ('name', '=', definition['name']),
+                    ('company_id', '=', self.company_id.id),
+                    ('usage', '=', definition['usage']),
+                    ('active', '=', True),
+                    ('location_id', '=', parent_location.id if parent_location else False),
+                ]
+                candidates = Location.search(structural_domain)
+                if len(candidates) > 1:
+                    raise UserError(_(
+                        "Multiple locations match %s. Resolve the duplicates before running setup.",
+                        label,
+                    ))
+                if candidates:
+                    location = candidates
+                    self._claim_fba_location(location, role)
+                    reused.append(label)
+                    linked.append(_("%s marker", label))
+                else:
+                    location = Location.create({
+                        'name': definition['name'],
+                        'usage': definition['usage'],
+                        'company_id': self.company_id.id,
+                        'location_id': parent_location.id if parent_location else False,
+                        'active': True,
+                        'amazon_instance_id': self.id,
+                        'amazon_fba_location_type': role,
+                    })
+                    created.append(label)
+
+            self.sudo().write({field_name: location.id})
+            linked.append(label)
+
+        self._check_fba_stock_configuration()
+        if not linked and not created:
+            skipped.append(_("No configuration changes were needed"))
+
+        lines = [
+            _("Created: %s", ", ".join(created) if created else _("None")),
+            _("Reused: %s", ", ".join(reused) if reused else _("None")),
+            _("Linked/repaired: %s", ", ".join(linked) if linked else _("None")),
+            _("Skipped: %s", ", ".join(skipped) if skipped else _("None")),
+        ]
+        _logger.info(
+            "FBA stock structure configured for Amazon instance %s (id=%s): "
+            "transit=%s, sellable=%s, reserved=%s, unsellable=%s",
+            self.name,
+            self.id,
+            self.fba_transit_location_id.display_name,
+            self.fba_sellable_location_id.display_name,
+            self.fba_reserved_location_id.display_name,
+            self.fba_unsellable_location_id.display_name,
+        )
+        return self._notify(
+            _("FBA Stock Structure"),
+            "\n".join(lines),
+        )
 
     # ── Auto Sync Scheduler ──
     auto_sync_enabled = fields.Boolean('Enable Auto Sync', default=False)
@@ -828,54 +1247,8 @@ class AmazonInstance(models.Model):
     # ══════════════════════════════════════════════════
 
     def action_pull_stock(self):
-        """Manual Amazon → Odoo stock reconciliation."""
-        self.ensure_one()
-        self._check_required_fields()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        try:
-            rows = self._api_call_safe(
-                api.fetch_fba_inventory_report, self, access_token,
-                error_msg="Failed to fetch FBA inventory from Amazon"
-            )
-        except UserError as exc:
-            msg = str(exc.args[0] if exc.args else exc)
-            if 'FATAL' in msg:
-                return self._notify("Pull Stock", "No FBA inventory found on Amazon. This account may have no FBA listings, or the SP-API app is missing the FBA Inventory role.", 'warning')
-            if 'CANCELLED' in msg:
-                return self._notify("Pull Stock", "No FBA inventory data available. Amazon has no active FBA inventory for this account.", 'warning')
-            raise
-        updated = 0
-        for row in rows:
-            sku = (row.get('sku') or row.get('seller-sku') or '').strip()
-            if not sku:
-                continue
-            qty = float(row.get('afn-fulfillable-quantity') or row.get('quantity') or 0)
-
-            amz_prod = self.env['amazon.product'].search([
-                ('sku', '=', sku), ('instance_id', '=', self.id)
-            ], limit=1)
-            if amz_prod:
-                amz_prod.amazon_qty = qty
-                # Update Odoo stock quant if mapped and warehouse set
-                if amz_prod.odoo_product_id and self.fba_warehouse_id:
-                    location = self.fba_warehouse_id.lot_stock_id
-                    self.env['stock.quant'].with_context(inventory_mode=True).sudo().create({
-                        'product_id': amz_prod.odoo_product_id.id,
-                        'location_id': location.id,
-                        'inventory_quantity': qty,
-                    })
-                updated += 1
-
-        self.last_stock_sync = fields.Datetime.now()
-        return self._notify(
-            "Stock Pull",
-            "%d product stock level(s) pulled from Amazon. This is Amazon → Odoo reconciliation; "
-            "do not use it when Odoo is stock master unless you intentionally want to reconcile." % updated,
-            'warning',
-            True,
-        )
+        """Compatibility alias for the supported FBA Inventory API audit."""
+        return self.action_run_inventory_audit()
 
     # ══════════════════════════════════════════════════
     # Price Pull (Amazon → Odoo)
@@ -1495,14 +1868,15 @@ class AmazonInstance(models.Model):
 
     def _download_fba_inventory_report(self, report_rec):
         self.ensure_one()
+        if report_rec.report_type in ('live_stock', 'adjustment'):
+            raise UserError(
+                "Legacy FBA inventory reports are not used for reconciliation. "
+                "Run an Inventory Audit, which uses the supported FBA Inventory API v1."
+            )
         access_token = self._get_access_token_or_raise()
         api = AmazonAPI()
 
-        if report_rec.report_type == 'live_stock':
-            rows = self._api_call_safe(api.fetch_fba_inventory_report, self, access_token, error_msg="Failed to fetch FBA inventory")
-        elif report_rec.report_type == 'adjustment':
-            rows = self._api_call_safe(api.fetch_fba_inventory_adjustment_report, self, access_token, error_msg="Failed to fetch adjustment report")
-        elif report_rec.report_type == 'fba_shipment':
+        if report_rec.report_type == 'fba_shipment':
             rows = self._api_call_safe(api.fetch_fba_shipment_report, self, access_token, error_msg="Failed to fetch FBA shipment report")
         else:
             raise UserError("Unknown report type: %s" % report_rec.report_type)
@@ -1652,139 +2026,73 @@ class AmazonInstance(models.Model):
     # Inbound Shipments
     # ══════════════════════════════════════════════════
 
-    def _create_inbound_shipment_plan(self, shipment):
-        """Create inbound shipment plan on Amazon."""
+    def _create_inbound_shipment_plan(self, shipment, payload=None):
+        """Start createInboundPlan and persist both asynchronous identifiers."""
         self.ensure_one()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
+        shipment.ensure_one()
+        shipment._check_inbound_manager_access()
+        if shipment.instance_id != self:
+            raise UserError(_("The inbound shipment belongs to another Amazon instance."))
+        payload = payload or shipment._prepare_create_inbound_plan_payload()
 
-        items = []
-        for line in shipment.line_ids:
-            items.append({
-                "msku": line.sku,
-                "prepOwner": "SELLER",
-                "quantity": int(line.quantity_shipped),
+        try:
+            access_token = self._get_access_token_or_raise()
+            result = self._api_call_safe(
+                AmazonAPI().create_inbound_plan,
+                self,
+                access_token,
+                payload,
+                error_msg=_("Failed to create inbound plan"),
+            )
+        except UserError as exc:
+            # A notification is returned instead of raising after the external call so
+            # the diagnostic remains durable and cannot be lost to an RPC rollback.
+            shipment.sudo().write({
+                'create_operation_status': 'failed',
+                'create_operation_error_code': 'CREATE_REQUEST_FAILED',
+                'create_operation_error_message': str(exc),
+                'state': 'failed',
             })
+            return self._notify(
+                _("Inbound Plan Creation"), str(exc), 'danger', sticky=True,
+            )
 
-        body = {
-            "destinationMarketplaces": [self.marketplace_id],
-            "items": items,
-            "sourceAddress": {
-                "name": self.name,
-                "countryCode": "IN",
-            },
-        }
-
-        result = self._api_call_safe(
-            api.create_inbound_plan, self, access_token, body,
-            error_msg="Failed to create inbound plan"
+        if not shipment._apply_create_inbound_plan_response(result):
+            return self._notify(
+                _("Inbound Plan Creation"),
+                shipment.create_operation_error_message,
+                'danger',
+                sticky=True,
+            )
+        return self._notify(
+            _("Inbound Plan Creation"),
+            _(
+                "Inbound plan creation started.\nAmazon Operation ID: %s",
+                shipment.create_operation_id,
+            ),
+            'success',
         )
-        plan_id = result.get('inboundPlanId', '')
-        if plan_id:
-            shipment.shipment_id = plan_id
-        shipment.state = 'planning'
 
     def _submit_inbound_shipment(self, shipment):
-        """Submit inbound shipment to Amazon."""
-        self.ensure_one()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        if not shipment.shipment_id:
-            raise UserError("Create a shipment plan first.")
-
-        # Get shipment details from the plan
-        result = self._api_call_safe(
-            api.get_inbound_plan, self, access_token, shipment.shipment_id,
-            error_msg="Failed to get inbound plan"
-        )
-        shipment.state = 'submitted'
+        """Compatibility guard for the later packing/placement phase."""
+        raise UserError(_("This action belongs to a later FBA workflow phase."))
 
     def _update_inbound_shipment_tracking(self, shipment):
-        """Update tracking info and mark as shipped."""
-        shipment.state = 'shipped'
-        shipment.ship_date = fields.Date.today()
+        """Compatibility guard for the later transportation/tracking phase."""
+        raise UserError(_("This action belongs to a later FBA workflow phase."))
 
     def _check_inbound_shipment_status(self, shipment):
-        """Check shipment status from Amazon."""
+        """Backward-compatible entry point for Phase 2 operation polling."""
         self.ensure_one()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        if not shipment.shipment_id:
-            raise UserError("No shipment ID to check.")
-
-        result = self._api_call_safe(
-            api.get_inbound_plan, self, access_token, shipment.shipment_id,
-            error_msg="Failed to check shipment status"
-        )
-        status = result.get('status', '')
-        status_map = {
-            'ACTIVE': 'submitted', 'SHIPPED': 'shipped', 'IN_TRANSIT': 'in_transit',
-            'RECEIVING': 'receiving', 'CLOSED': 'closed', 'CANCELLED': 'cancelled',
-        }
-        if status in status_map:
-            shipment.state = status_map[status]
-
-        # Update line received quantities if available
-        try:
-            items_data = api.get_shipment_items(self, access_token, shipment.shipment_id, shipment.shipment_id)
-            for item in items_data.get('items', []):
-                sku = item.get('msku', '')
-                line = shipment.line_ids.filtered(lambda l: l.sku == sku)
-                if line:
-                    line[0].quantity_received = item.get('quantityReceived', 0)
-        except Exception as exc:
-            _logger.warning("Failed to fetch shipment items: %s", exc)
+        return shipment.action_check_create_operation_status()
 
     def _import_inbound_shipment(self, shipment):
-        """Import existing shipment from Amazon by ID."""
-        self.ensure_one()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        result = self._api_call_safe(
-            api.get_inbound_plan, self, access_token, shipment.shipment_id,
-            error_msg="Failed to import shipment"
-        )
-        if result.get('sourceAddress', {}).get('name'):
-            shipment.shipment_name = result['sourceAddress']['name']
-
-        # Import items
-        try:
-            items_data = api.get_shipment_items(self, access_token, shipment.shipment_id, shipment.shipment_id)
-            for item in items_data.get('items', []):
-                sku = item.get('msku', '')
-                if not sku:
-                    continue
-                existing_line = shipment.line_ids.filtered(lambda l: l.sku == sku)
-                vals = {
-                    'shipment_id': shipment.id,
-                    'sku': sku,
-                    'fnsku': item.get('fnsku', ''),
-                    'quantity_shipped': item.get('quantity', 0),
-                    'quantity_received': item.get('quantityReceived', 0),
-                }
-                amz_prod = self.env['amazon.product'].search([
-                    ('sku', '=', sku), ('instance_id', '=', self.id)
-                ], limit=1)
-                if amz_prod:
-                    vals['amazon_product_id'] = amz_prod.id
-                    if amz_prod.odoo_product_id:
-                        vals['odoo_product_id'] = amz_prod.odoo_product_id.id
-                if existing_line:
-                    existing_line[0].write(vals)
-                else:
-                    self.env['amazon.inbound.shipment.line'].create(vals)
-        except Exception as exc:
-            _logger.warning("Failed to import shipment items: %s", exc)
-
-        shipment.state = 'submitted'
+        """Compatibility guard for the later inbound-plan import phase."""
+        raise UserError(_("This action belongs to a later FBA workflow phase."))
 
     def _get_shipment_labels(self, shipment):
-        """Fetch labels — placeholder, labels require specific API not yet available."""
-        _logger.info("Label fetching for shipment %s — not yet implemented in SP-API v2024", shipment.shipment_id)
-        raise UserError("Label download is not yet supported via SP-API. Download labels from Amazon Seller Central.")
+        """Compatibility guard for the later labels phase."""
+        raise UserError(_("This action belongs to a later FBA workflow phase."))
 
     # ══════════════════════════════════════════════════
     # MCF Outbound Orders
@@ -2209,11 +2517,8 @@ class AmazonInstance(models.Model):
                 _logger.error("Cron removal import failed for %s: %s", inst.display_name, exc)
 
     def cron_pull_stock(self):
-        for inst in self.env['amazon.instance'].search([]):
-            _logger.warning(
-                "Cron stock pull skipped for %s. Amazon → Odoo stock reconciliation is manual only.",
-                inst.display_name,
-            )
+        """Compatibility scheduler: enqueue supported inventory audits."""
+        return self.env['amazon.inventory.reconciliation.run'].cron_enqueue_inventory_audits()
 
     def cron_pull_prices(self):
         for inst in self.env['amazon.instance'].search([]):

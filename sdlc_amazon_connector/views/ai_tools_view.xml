@@ -376,6 +376,10 @@
                         </setting>
                     </block>
                     <block title="Inventory" name="amazon_inv_block">
+                        <setting string="Inventory Reconciliation Mode"
+                                 help="Manual is the default and records suggestions only. Automatic applies only exact, quantity-balanced transfers between Amazon locations; total differences always remain manual.">
+                            <field name="amazon_inventory_reconciliation_mode"/>
+                        </setting>
                         <setting string="Low Stock Alert Threshold" help="Alert when Amazon stock falls below this level.">
                             <field name="amazon_low_stock_threshold"/>
                         </setting>

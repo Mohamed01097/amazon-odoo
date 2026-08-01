@@ -1,0 +1,288 @@
+<odoo>
+    <record id="amazon_inventory_reconciliation_search" model="ir.ui.view">
+        <field name="name">amazon.inventory.reconciliation.search</field>
+        <field name="model">amazon.inventory.reconciliation</field>
+        <field name="arch" type="xml">
+            <search string="Inventory Differences">
+                <field name="sku"/>
+                <field name="odoo_product_id"/>
+                <field name="instance_id"/>
+                <field name="run_id"/>
+                <filter name="pending" string="Pending Review"
+                        domain="[('status', 'in', ('pending_review', 'failed'))]"/>
+                <filter name="mismatch" string="Differences"
+                        domain="[('status', '!=', 'matched')]"/>
+                <filter name="critical" string="Critical"
+                        domain="[('severity', '=', 'critical')]"/>
+                <separator/>
+                <filter name="matched" string="Matched"
+                        domain="[('status', '=', 'matched')]"/>
+                <filter name="applied" string="Applied"
+                        domain="[('status', '=', 'applied')]"/>
+                <group>
+                    <filter name="group_run" string="Audit Run" context="{'group_by': 'run_id'}"/>
+                    <filter name="group_status" string="Status" context="{'group_by': 'status'}"/>
+                    <filter name="group_action" string="Suggested Action" context="{'group_by': 'suggested_action'}"/>
+                    <filter name="group_instance" string="Instance" context="{'group_by': 'instance_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="amazon_inventory_reconciliation_list" model="ir.ui.view">
+        <field name="name">amazon.inventory.reconciliation.list</field>
+        <field name="model">amazon.inventory.reconciliation</field>
+        <field name="arch" type="xml">
+            <list string="Amazon Inventory Reconciliation"
+                  decoration-success="status == 'matched'"
+                  decoration-warning="severity == 'warning' and status == 'pending_review'"
+                  decoration-danger="severity == 'critical' and status in ('pending_review', 'failed')"
+                  create="0" delete="0">
+                <field name="run_date"/>
+                <field name="instance_id" optional="show"/>
+                <field name="sku"/>
+                <field name="odoo_product_id"/>
+                <field name="amazon_sellable" string="Amazon Sellable" optional="show"/>
+                <field name="odoo_sellable" string="Odoo Sellable" optional="show"/>
+                <field name="difference_sellable" string="Sellable Diff" optional="show"/>
+                <field name="amazon_reserved" string="Amazon Reserved" optional="hide"/>
+                <field name="odoo_reserved" string="Odoo Reserved" optional="hide"/>
+                <field name="difference_reserved" string="Reserved Diff" optional="show"/>
+                <field name="amazon_unsellable" string="Amazon Unsellable" optional="hide"/>
+                <field name="odoo_unsellable" string="Odoo Unsellable" optional="hide"/>
+                <field name="difference_unsellable" string="Unsellable Diff" optional="show"/>
+                <field name="amazon_inbound" string="Amazon Physical Inbound" optional="show"/>
+                <field name="odoo_transit" string="Odoo Transit" optional="show"/>
+                <field name="difference_inbound" string="Inbound Diff" optional="show"/>
+                <field name="suggested_action"/>
+                <field name="severity"/>
+                <field name="status"/>
+                <button name="action_apply_suggested_action" type="object"
+                        string="Apply Suggested Action" class="btn-primary"
+                        groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"
+                        invisible="status != 'pending_review' or suggested_action in ('none', 'inventory_adjustment', 'manual_review')"/>
+                <button name="action_ignore_difference" type="object"
+                        string="Ignore Difference"
+                        groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"
+                        invisible="status not in ('pending_review', 'failed')"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_inventory_reconciliation_form" model="ir.ui.view">
+        <field name="name">amazon.inventory.reconciliation.form</field>
+        <field name="model">amazon.inventory.reconciliation</field>
+        <field name="arch" type="xml">
+            <form string="Amazon Inventory Reconciliation" create="0" delete="0">
+                <header>
+                    <button name="action_apply_suggested_action" type="object"
+                            string="Apply Suggested Action" class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"
+                            invisible="status != 'pending_review' or suggested_action in ('none', 'inventory_adjustment', 'manual_review')"/>
+                    <button name="action_ignore_difference" type="object"
+                            string="Ignore Difference"
+                            groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"
+                            invisible="status not in ('pending_review', 'failed')"/>
+                    <field name="status" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_open_transfers" type="object"
+                                class="oe_stat_button" icon="fa-exchange"
+                                invisible="not applied_picking_id">
+                            <field name="applied_picking_id" widget="statinfo" string="Transfer"/>
+                        </button>
+                    </div>
+                    <group>
+                        <group string="Audit">
+                            <field name="run_id"/>
+                            <field name="run_date"/>
+                            <field name="instance_id"/>
+                            <field name="sku"/>
+                            <field name="amazon_product_id"/>
+                            <field name="odoo_product_id"/>
+                        </group>
+                        <group string="Decision">
+                            <field name="suggested_action"/>
+                            <field name="severity"/>
+                            <field name="applied_picking_id"/>
+                            <field name="applied_at"/>
+                            <field name="applied_by_id"/>
+                        </group>
+                    </group>
+                    <group string="Quantity Comparison" col="5">
+                        <div class="o_form_label">Bucket</div>
+                        <div class="o_form_label">Amazon</div>
+                        <div class="o_form_label">Odoo</div>
+                        <div class="o_form_label">Difference (Amazon − Odoo)</div>
+                        <separator/>
+                        <div class="o_form_label">Sellable</div>
+                        <field name="amazon_sellable" nolabel="1"/>
+                        <field name="odoo_sellable" nolabel="1"/>
+                        <field name="difference_sellable" nolabel="1"/>
+                        <separator/>
+                        <div class="o_form_label">Reserved</div>
+                        <field name="amazon_reserved" nolabel="1"/>
+                        <field name="odoo_reserved" nolabel="1"/>
+                        <field name="difference_reserved" nolabel="1"/>
+                        <separator/>
+                        <div class="o_form_label">Unsellable</div>
+                        <field name="amazon_unsellable" nolabel="1"/>
+                        <field name="odoo_unsellable" nolabel="1"/>
+                        <field name="difference_unsellable" nolabel="1"/>
+                        <separator/>
+                        <div class="o_form_label">Physical Inbound / Transit</div>
+                        <field name="amazon_inbound" nolabel="1"/>
+                        <field name="odoo_transit" nolabel="1"/>
+                        <field name="difference_inbound" nolabel="1"/>
+                    </group>
+                    <group string="Amazon Inbound Detail">
+                        <field name="amazon_inbound_working"/>
+                        <field name="amazon_inbound_shipped"/>
+                        <field name="amazon_inbound_receiving"/>
+                    </group>
+                    <field name="error_message" invisible="not error_message"/>
+                    <notebook>
+                        <page string="Raw Amazon Response"
+                              groups="sdlc_amazon_connector.group_amazon_manager">
+                            <field name="raw_response" widget="text" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="amazon_inventory_reconciliation_action" model="ir.actions.act_window">
+        <field name="name">Inventory Differences</field>
+        <field name="res_model">amazon.inventory.reconciliation</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="amazon_inventory_reconciliation_search"/>
+        <field name="context">{'search_default_mismatch': 1}</field>
+    </record>
+
+    <record id="amazon_inventory_reconciliation_run_list" model="ir.ui.view">
+        <field name="name">amazon.inventory.reconciliation.run.list</field>
+        <field name="model">amazon.inventory.reconciliation.run</field>
+        <field name="arch" type="xml">
+            <list string="Amazon Inventory Audits" create="0" delete="0"
+                  decoration-danger="state == 'failed'"
+                  decoration-success="state == 'completed' and mismatch_count == 0"
+                  decoration-warning="state == 'completed' and mismatch_count &gt; 0">
+                <field name="name"/>
+                <field name="run_date"/>
+                <field name="instance_id"/>
+                <field name="trigger"/>
+                <field name="mode"/>
+                <field name="products_checked"/>
+                <field name="matched_count"/>
+                <field name="mismatch_count"/>
+                <field name="critical_count"/>
+                <field name="pending_review_count"/>
+                <field name="state"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_inventory_reconciliation_run_form" model="ir.ui.view">
+        <field name="name">amazon.inventory.reconciliation.run.form</field>
+        <field name="model">amazon.inventory.reconciliation.run</field>
+        <field name="arch" type="xml">
+            <form string="Inventory Health" create="0" delete="0">
+                <header>
+                    <button name="action_retry" type="object" string="Retry Audit"
+                            class="btn-primary" invisible="state != 'failed'"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_open_differences" type="object"
+                            string="Open Differences" class="btn-primary"
+                            invisible="state != 'completed' or mismatch_count == 0"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_open_lines" type="object"
+                                class="oe_stat_button" icon="fa-cubes">
+                            <field name="products_checked" widget="statinfo" string="Products Checked"/>
+                        </button>
+                        <button name="action_open_lines" type="object"
+                                class="oe_stat_button" icon="fa-check">
+                            <field name="matched_count" widget="statinfo" string="Matched"/>
+                        </button>
+                        <button name="action_open_differences" type="object"
+                                class="oe_stat_button" icon="fa-exclamation-triangle">
+                            <field name="mismatch_count" widget="statinfo" string="Mismatch"/>
+                        </button>
+                        <button name="action_open_differences" type="object"
+                                class="oe_stat_button" icon="fa-bolt">
+                            <field name="critical_count" widget="statinfo" string="Critical"/>
+                        </button>
+                        <button name="action_open_differences" type="object"
+                                class="oe_stat_button" icon="fa-clock-o">
+                            <field name="pending_review_count" widget="statinfo" string="Pending Review"/>
+                        </button>
+                        <button name="action_open_transfers" type="object"
+                                class="oe_stat_button" icon="fa-exchange"
+                                invisible="transfer_count == 0">
+                            <field name="transfer_count" widget="statinfo" string="Transfers"/>
+                        </button>
+                    </div>
+                    <widget name="web_ribbon" title="Manual Review"
+                            bg_color="text-bg-warning"
+                            invisible="state != 'completed' or mismatch_count == 0"/>
+                    <group>
+                        <group string="Inventory Health">
+                            <field name="name"/>
+                            <field name="instance_id"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                            <field name="run_date"/>
+                            <field name="trigger"/>
+                            <field name="mode"/>
+                        </group>
+                        <group string="Background Job">
+                            <field name="retry_count"/>
+                            <field name="max_retries"/>
+                            <field name="next_run_at"/>
+                            <field name="amazon_request_ids"
+                                   groups="sdlc_amazon_connector.group_amazon_manager"/>
+                        </group>
+                    </group>
+                    <div class="alert alert-info" role="alert">
+                        Amazon physical inbound equals inboundShippedQuantity plus
+                        inboundReceivingQuantity. inboundWorkingQuantity is displayed
+                        on each line but excluded from Transit because Amazon defines it
+                        as inventory notified, not necessarily shipped.
+                    </div>
+                    <field name="last_error" invisible="not last_error"/>
+                    <notebook>
+                        <page string="Reconciliation">
+                            <field name="reconciliation_ids" readonly="1">
+                                <list decoration-success="status == 'matched'"
+                                      decoration-danger="severity == 'critical' and status in ('pending_review', 'failed')">
+                                    <field name="sku"/>
+                                    <field name="odoo_product_id"/>
+                                    <field name="difference_sellable" string="Sellable Diff"/>
+                                    <field name="difference_reserved" string="Reserved Diff"/>
+                                    <field name="difference_unsellable" string="Unsellable Diff"/>
+                                    <field name="difference_inbound" string="Inbound Diff"/>
+                                    <field name="suggested_action"/>
+                                    <field name="severity"/>
+                                    <field name="status"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Raw Amazon Response"
+                              groups="sdlc_amazon_connector.group_amazon_manager">
+                            <field name="raw_response" widget="text" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="amazon_inventory_reconciliation_run_action" model="ir.actions.act_window">
+        <field name="name">Inventory Health</field>
+        <field name="res_model">amazon.inventory.reconciliation.run</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

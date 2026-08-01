@@ -34,3 +34,14 @@ class ResConfigSettings(models.TransientModel):
         config_parameter='amazon_connector.low_stock_threshold',
         default=10,
     )
+    amazon_inventory_reconciliation_mode = fields.Selection([
+        ('manual', 'Manual'),
+        ('automatic', 'Automatic'),
+    ], string='Inventory Reconciliation Mode',
+       config_parameter='amazon_connector.inventory_reconciliation_mode',
+       default='manual', required=True,
+       help=(
+           'Manual only records suggested actions. Automatic may apply exact, '
+           'quantity-balanced transfers between configured Amazon locations; '
+           'total quantity differences always require manual review.'
+       ))

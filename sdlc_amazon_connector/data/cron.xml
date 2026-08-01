@@ -107,6 +107,28 @@
 
     <!-- ═══ FBA Schedulers ═══ -->
 
+    <record id="cron_amazon_process_inbound_operation_jobs" model="ir.cron">
+        <field name="name">Amazon: Poll Inbound Operations</field>
+        <field name="model_id" ref="model_amazon_inbound_operation_job"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_process_inbound_operation_jobs()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+        <field name="priority">7</field>
+    </record>
+
+    <record id="cron_amazon_sync_inbound_receiving" model="ir.cron">
+        <field name="name">Amazon: Synchronize Inbound Receiving</field>
+        <field name="model_id" ref="model_amazon_inbound_shipment"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_enqueue_receiving_sync()</field>
+        <field name="interval_number">30</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+        <field name="priority">8</field>
+    </record>
+
     <record id="cron_amazon_import_removal" model="ir.cron">
         <field name="name">Amazon: Import Removal Orders</field>
         <field name="model_id" ref="model_amazon_instance"/>
@@ -118,13 +140,35 @@
     </record>
 
     <record id="cron_amazon_pull_stock" model="ir.cron">
-        <field name="name">Amazon: Pull Stock Levels</field>
+        <field name="name">Amazon: Enqueue Inventory Audits (Compatibility)</field>
         <field name="model_id" ref="model_amazon_instance"/>
         <field name="state">code</field>
         <field name="code">model.cron_pull_stock()</field>
         <field name="interval_number">4</field>
         <field name="interval_type">hours</field>
         <field name="active">False</field>
+    </record>
+
+    <record id="cron_amazon_enqueue_inventory_audits" model="ir.cron">
+        <field name="name">Amazon: Enqueue Daily FBA Inventory Audits</field>
+        <field name="model_id" ref="model_amazon_inventory_reconciliation_run"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_enqueue_inventory_audits()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="active">True</field>
+        <field name="priority">9</field>
+    </record>
+
+    <record id="cron_amazon_process_inventory_audits" model="ir.cron">
+        <field name="name">Amazon: Process FBA Inventory Audits</field>
+        <field name="model_id" ref="model_amazon_inventory_reconciliation_run"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_process_inventory_audits()</field>
+        <field name="interval_number">5</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+        <field name="priority">10</field>
     </record>
 
     <record id="cron_amazon_pull_prices" model="ir.cron">

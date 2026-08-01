@@ -11,13 +11,14 @@
         <field name="arch" type="xml">
             <list string="Inbound Shipments">
                 <field name="name"/>
-                <field name="shipment_id"/>
+                <field name="inbound_plan_id"/>
                 <field name="shipment_name"/>
-                <field name="destination_fulfillment_center"/>
+                <field name="create_operation_status"/>
+                <field name="raw_plan_status" optional="show"/>
                 <field name="state"/>
-                <field name="carrier_name"/>
-                <field name="ship_date"/>
                 <field name="instance_id"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="shipment_id" optional="hide"/>
             </list>
         </field>
     </record>
@@ -28,47 +29,423 @@
         <field name="arch" type="xml">
             <form string="Inbound Shipment">
                 <header>
-                    <button name="action_create_shipment_plan" type="object" string="Create Shipment Plan" class="btn-primary" invisible="state != 'draft'"/>
-                    <button name="action_submit_shipment" type="object" string="Submit Shipment" invisible="state not in ('draft','planning')"/>
-                    <button name="action_mark_shipped" type="object" string="Mark Shipped" invisible="state != 'submitted'"/>
-                    <button name="action_check_status" type="object" string="Check Status" invisible="state in ('draft','closed','cancelled')"/>
-                    <button name="action_import_by_shipment_id" type="object" string="Import by Shipment ID" invisible="state != 'draft'"/>
-                    <button name="action_get_labels" type="object" string="Get Labels" invisible="not shipment_id"/>
-                    <button name="action_cancel" type="object" string="Cancel" invisible="state in ('closed','cancelled')"/>
-                    <field name="state" widget="statusbar"/>
+                    <button name="action_create_shipment_plan"
+                            type="object"
+                            string="Create Shipment Plan"
+                            class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="state not in ('draft', 'failed') or inbound_plan_id or create_operation_status in ('pending', 'in_progress')"/>
+                    <button name="action_check_create_operation_status"
+                            type="object"
+                            string="Check Plan Creation Status"
+                            class="btn-secondary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="not create_operation_id"/>
+                    <button name="action_generate_packing_options"
+                            type="object"
+                            string="Generate Packing"
+                            class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="packing_generation_status in ('pending', 'in_progress') or (packing_generation_operation_id and not packing_options_expired) or not ((state == 'plan_created' and not packing_option_ids) or (state == 'packing_generated' and packing_options_expired))"/>
+                    <button name="action_refresh_packing_options"
+                            type="object"
+                            string="Refresh Packing"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="state not in ('plan_created', 'packing_generated', 'packing_confirmed', 'placement_generated', 'placement_confirmed')"/>
+                    <button name="action_confirm_packing_option"
+                            type="object"
+                            string="Confirm Packing"
+                            class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="state != 'packing_generated' or packing_confirmation_operation_id"/>
+                    <button name="action_generate_placement_options"
+                            type="object"
+                            string="Generate Placement"
+                            class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="placement_generation_status in ('pending', 'in_progress') or (placement_generation_operation_id and not placement_options_expired) or not ((state == 'packing_confirmed' and not placement_option_ids) or (state == 'placement_generated' and placement_options_expired))"/>
+                    <button name="action_refresh_placement_options"
+                            type="object"
+                            string="Refresh Placement"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="state not in ('packing_confirmed', 'placement_generated', 'placement_confirmed')"/>
+                    <button name="action_confirm_placement_option"
+                            type="object"
+                            string="Confirm Placement"
+                            class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="state != 'placement_generated' or placement_confirmation_operation_id"/>
+
+                    <button name="action_create_picking"
+                            type="object"
+                            string="Create Picking"
+                            class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="state != 'placement_confirmed'"/>
+                    <button name="action_open_picking"
+                            type="object"
+                            string="Open Picking"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="not picking_ids"/>
+                    <button name="action_confirm_shipment"
+                            type="object"
+                            string="Confirm Shipment"
+                            class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="state != 'ready_to_ship' and not (state == 'shipment_confirmed' and shipment_confirmation_status == 'failed')"/>
+                    <button name="action_refresh_shipment_status"
+                            type="object"
+                            string="Refresh Shipment Status"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="state not in ('placement_confirmed', 'picking_created', 'ready_to_ship', 'shipment_confirmed', 'waiting_receiving', 'partially_received', 'received', 'closed')"/>
+                    <button name="action_sync_receiving"
+                            type="object"
+                            string="Sync Amazon Receiving"
+                            class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="state not in ('waiting_receiving', 'partially_received', 'received')"/>
+
+                    <!-- Retained technical actions are deliberately unavailable until later phases. -->
+                    <button name="action_mark_shipped" type="object" string="Mark Shipped" invisible="True"/>
+                    <button name="action_import_by_shipment_id" type="object" string="Import by Shipment ID" invisible="True"/>
+                    <button name="action_get_labels" type="object" string="Get Labels" invisible="True"/>
+                    <button name="action_cancel"
+                            type="object"
+                            string="Cancel"
+                            invisible="state != 'draft' or inbound_plan_id or create_operation_id"/>
+                    <field name="state" widget="statusbar"
+                           statusbar_visible="draft,planning,plan_created,packing_generated,packing_confirmed,placement_generated,placement_confirmed,picking_created,ready_to_ship,shipment_confirmed,waiting_receiving,partially_received,received,closed,failed"/>
+                    <field name="packing_options_expired" invisible="True"/>
+                    <field name="placement_options_expired" invisible="True"/>
+                    <field name="shipment_confirmation_status" invisible="True"/>
+                    <field name="receiving_sync_status" invisible="True"/>
+                    <field name="picking_ids" invisible="True"/>
                 </header>
                 <sheet>
                     <group>
-                        <group string="Shipment Info">
+                        <group string="Inbound Plan">
                             <field name="name"/>
-                            <field name="instance_id"/>
-                            <field name="shipment_id"/>
-                            <field name="shipment_name"/>
-                            <field name="destination_fulfillment_center"/>
-                            <field name="label_prep_type"/>
+                            <field name="instance_id" readonly="state != 'draft'"/>
+                            <field name="company_id" groups="base.group_multi_company" readonly="1"/>
+                            <field name="shipment_name" readonly="state not in ('draft', 'failed')"/>
+                            <field name="inbound_plan_id" readonly="1"/>
+                            <field name="raw_plan_status" readonly="1"/>
+                            <field name="plan_created_at" readonly="1"/>
+                            <field name="shipment_id" string="Amazon Shipment ID" readonly="1" optional="hide"/>
                         </group>
-                        <group string="Carrier &amp; Tracking">
-                            <field name="carrier_type"/>
-                            <field name="carrier_name"/>
-                            <field name="tracking_id"/>
-                            <field name="pro_number"/>
-                            <field name="ship_date"/>
-                            <field name="estimated_arrival"/>
-                            <field name="picking_id"/>
+                        <group string="Amazon Operation">
+                            <field name="create_operation_id" readonly="1"/>
+                            <field name="create_operation_status" readonly="1"/>
+                            <field name="raw_create_operation_status" readonly="1"/>
+                            <field name="last_operation_check_at" readonly="1"/>
+                            <field name="create_operation_error_code" readonly="1"
+                                   groups="sdlc_amazon_connector.group_amazon_manager"/>
+                            <field name="create_operation_error_message" readonly="1"
+                                   groups="sdlc_amazon_connector.group_amazon_manager"/>
                         </group>
                     </group>
-                    <field name="line_ids">
+
+                    <separator string="Planned Items"/>
+                    <field name="line_ids" readonly="state not in ('draft', 'failed')">
                         <list editable="bottom">
-                            <field name="amazon_product_id"/>
-                            <field name="odoo_product_id"/>
-                            <field name="sku"/>
-                            <field name="fnsku"/>
-                            <field name="quantity_shipped"/>
-                            <field name="quantity_received"/>
-                            <field name="quantity_in_case"/>
-                            <field name="quantity_discrepancy"/>
+                            <field name="amazon_product_id"
+                                   domain="[('instance_id', '=', parent.instance_id)]"
+                                   required="1"/>
+                            <field name="odoo_product_id" readonly="1"/>
+                            <field name="sku" readonly="1"/>
+                            <field name="planned_quantity" required="1"/>
+                            <field name="prep_owner" required="1"/>
+                            <field name="label_owner" required="1"/>
+                            <field name="fnsku" optional="hide"/>
+                            <field name="quantity_shipped" optional="hide" readonly="1"/>
+                            <field name="quantity_received" optional="hide" readonly="1"/>
+                            <field name="received_moved_quantity" optional="hide" readonly="1"/>
+                            <field name="quantity_damaged" optional="hide" readonly="1"/>
+                            <field name="quantity_lost" optional="hide" readonly="1"/>
                         </list>
                     </field>
+
+                    <notebook>
+                        <page string="Packing">
+                            <group>
+                                <group string="Packing Operations">
+                                    <field name="packing_generation_operation_id" readonly="1"/>
+                                    <field name="packing_generation_status" readonly="1"/>
+                                    <field name="packing_confirmation_operation_id" readonly="1"/>
+                                    <field name="packing_confirmation_status" readonly="1"/>
+                                    <field name="packing_last_refresh_at" readonly="1"/>
+                                </group>
+                                <group string="Packing Diagnostics"
+                                       groups="sdlc_amazon_connector.group_amazon_manager">
+                                    <field name="packing_error_code" readonly="1"/>
+                                    <field name="packing_error_message" readonly="1"/>
+                                </group>
+                            </group>
+                            <field name="packing_option_ids" readonly="state not in ('packing_generated', 'packing_confirmed')">
+                                <list>
+                                    <field name="selected"/>
+                                    <field name="option_name" readonly="1"/>
+                                    <field name="amazon_packing_option_id" readonly="1"/>
+                                    <field name="status" readonly="1"/>
+                                    <field name="expiration_date" readonly="1"/>
+                                    <field name="fee_amount" readonly="1"/>
+                                    <field name="fee_currency" readonly="1"/>
+                                    <field name="amazon_packing_group_ids" optional="hide" readonly="1"/>
+                                </list>
+                                <form string="Amazon FBA Packing Option">
+                                    <sheet>
+                                        <group>
+                                            <group>
+                                                <field name="selected"/>
+                                                <field name="option_name" readonly="1"/>
+                                                <field name="amazon_packing_option_id" readonly="1"/>
+                                                <field name="status" readonly="1"/>
+                                                <field name="expiration_date" readonly="1"/>
+                                            </group>
+                                            <group>
+                                                <field name="fee_amount" readonly="1"/>
+                                                <field name="fee_currency" readonly="1"/>
+                                                <field name="amazon_packing_group_ids" readonly="1"/>
+                                            </group>
+                                        </group>
+                                        <separator string="Local Box Details (not submitted in Phase 3)"/>
+                                        <field name="box_ids">
+                                            <list editable="bottom">
+                                                <field name="amazon_box_id" optional="hide"/>
+                                                <field name="amazon_packing_group_id"/>
+                                                <field name="length"/>
+                                                <field name="width"/>
+                                                <field name="height"/>
+                                                <field name="dimension_unit"/>
+                                                <field name="weight"/>
+                                                <field name="weight_unit"/>
+                                            </list>
+                                            <form string="Amazon FBA Box">
+                                                <sheet>
+                                                    <field name="instance_id" invisible="True"/>
+                                                    <group>
+                                                        <group>
+                                                            <field name="amazon_box_id"/>
+                                                            <field name="amazon_packing_group_id"/>
+                                                            <field name="length"/>
+                                                            <field name="width"/>
+                                                            <field name="height"/>
+                                                            <field name="dimension_unit"/>
+                                                        </group>
+                                                        <group>
+                                                            <field name="weight"/>
+                                                            <field name="weight_unit"/>
+                                                        </group>
+                                                    </group>
+                                                    <field name="line_ids">
+                                                        <list editable="bottom">
+                                                            <field name="amazon_product_id"
+                                                                   domain="[('instance_id', '=', parent.instance_id)]"/>
+                                                            <field name="msku"/>
+                                                            <field name="quantity"/>
+                                                        </list>
+                                                    </field>
+                                                </sheet>
+                                            </form>
+                                        </field>
+                                        <field name="raw_response" readonly="1"
+                                               groups="sdlc_amazon_connector.group_amazon_manager"/>
+                                    </sheet>
+                                </form>
+                            </field>
+                            <field name="packing_response" readonly="1" nolabel="1"
+                                   groups="sdlc_amazon_connector.group_amazon_manager"/>
+                        </page>
+                        <page string="Placement">
+                            <group>
+                                <group string="Placement Operations">
+                                    <field name="placement_generation_operation_id" readonly="1"/>
+                                    <field name="placement_generation_status" readonly="1"/>
+                                    <field name="placement_confirmation_operation_id" readonly="1"/>
+                                    <field name="placement_confirmation_status" readonly="1"/>
+                                    <field name="placement_last_refresh_at" readonly="1"/>
+                                </group>
+                                <group string="Placement Diagnostics"
+                                       groups="sdlc_amazon_connector.group_amazon_manager">
+                                    <field name="placement_error_code" readonly="1"/>
+                                    <field name="placement_error_message" readonly="1"/>
+                                </group>
+                            </group>
+                            <field name="placement_option_ids" readonly="state not in ('placement_generated', 'placement_confirmed')">
+                                <list>
+                                    <field name="selected"/>
+                                    <field name="amazon_placement_option_id" readonly="1"/>
+                                    <field name="status" readonly="1"/>
+                                    <field name="destination_fc" readonly="1"/>
+                                    <field name="amazon_shipment_ids" readonly="1"/>
+                                    <field name="fee" readonly="1"/>
+                                    <field name="currency" readonly="1"/>
+                                    <field name="expiration_date" readonly="1"/>
+                                </list>
+                                <form string="Amazon FBA Placement Option">
+                                    <sheet>
+                                        <group>
+                                            <group>
+                                                <field name="selected"/>
+                                                <field name="amazon_placement_option_id" readonly="1"/>
+                                                <field name="status" readonly="1"/>
+                                                <field name="expiration_date" readonly="1"/>
+                                            </group>
+                                            <group>
+                                                <field name="destination_fc" readonly="1"/>
+                                                <field name="amazon_shipment_ids" readonly="1"/>
+                                                <field name="fee" readonly="1"/>
+                                                <field name="currency" readonly="1"/>
+                                            </group>
+                                        </group>
+                                        <field name="raw_response" readonly="1" nolabel="1"
+                                               groups="sdlc_amazon_connector.group_amazon_manager"/>
+                                    </sheet>
+                                </form>
+                            </field>
+                            <field name="placement_response" readonly="1" nolabel="1"
+                                   groups="sdlc_amazon_connector.group_amazon_manager"/>
+                        </page>
+                        <page string="Inventory">
+                            <group>
+                                <group string="Stock Transfer">
+                                    <field name="picking_id" string="Primary Picking" readonly="1"/>
+                                    <field name="picking_count" readonly="1"/>
+                                </group>
+                                <group string="Movement Boundary">
+                                    <field name="instance_id" string="Amazon Instance" readonly="1"/>
+                                    <div class="alert alert-info" role="alert" colspan="2">
+                                        Shipping moves stock from the configured Source to Amazon Transit.
+                                        Receiving synchronization moves only newly received quantities from
+                                        Amazon Transit to Amazon Sellable using standard stock moves.
+                                    </div>
+                                </group>
+                            </group>
+                            <field name="picking_ids" readonly="1">
+                                <list create="0" delete="0">
+                                    <field name="name"/>
+                                    <field name="state"/>
+                                    <field name="picking_type_id"/>
+                                    <field name="location_id"/>
+                                    <field name="location_dest_id"/>
+                                    <field name="amazon_fba_movement_type" optional="show"/>
+                                    <field name="scheduled_date"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Shipping">
+                            <group>
+                                <group string="Amazon Shipment">
+                                    <field name="shipment_id" string="Amazon Shipment ID" readonly="1"/>
+                                    <field name="shipment_confirmation_id" readonly="1"/>
+                                    <field name="selected_transportation_option_id" readonly="1"/>
+                                    <field name="shipment_status" readonly="1"/>
+                                    <field name="shipment_last_refresh_at" readonly="1"/>
+                                </group>
+                                <group string="Carrier &amp; Tracking">
+                                    <field name="carrier_type"
+                                           readonly="state in ('shipment_confirmed', 'waiting_receiving', 'partially_received', 'received', 'closed') and shipment_confirmation_status != 'failed'"/>
+                                    <field name="carrier_name"
+                                           readonly="state in ('shipment_confirmed', 'waiting_receiving', 'partially_received', 'received', 'closed') and shipment_confirmation_status != 'failed'"/>
+                                    <field name="shipping_method"
+                                           readonly="state in ('shipment_confirmed', 'waiting_receiving', 'partially_received', 'received', 'closed') and shipment_confirmation_status != 'failed'"/>
+                                    <field name="tracking_id"
+                                           readonly="state in ('shipment_confirmed', 'waiting_receiving', 'partially_received', 'received', 'closed') and shipment_confirmation_status != 'failed'"/>
+                                    <field name="pro_number"
+                                           invisible="shipping_method != 'ltl'"
+                                           readonly="state in ('shipment_confirmed', 'waiting_receiving', 'partially_received', 'received', 'closed') and shipment_confirmation_status != 'failed'"/>
+                                    <field name="bill_of_lading_number"
+                                           invisible="shipping_method != 'ltl'"
+                                           readonly="state in ('shipment_confirmed', 'waiting_receiving', 'partially_received', 'received', 'closed') and shipment_confirmation_status != 'failed'"/>
+                                    <field name="ship_date"
+                                           readonly="state in ('shipment_confirmed', 'waiting_receiving', 'partially_received', 'received', 'closed') and shipment_confirmation_status != 'failed'"/>
+                                </group>
+                            </group>
+                            <group>
+                                <group string="Confirmation Job">
+                                    <field name="shipment_confirmation_operation_id" readonly="1"/>
+                                    <field name="shipment_confirmation_status" readonly="1"/>
+                                </group>
+                                <group string="Diagnostics"
+                                       groups="sdlc_amazon_connector.group_amazon_manager">
+                                    <field name="shipment_error_code" readonly="1"/>
+                                    <field name="shipment_error_message" readonly="1"/>
+                                </group>
+                            </group>
+                            <field name="shipment_response" readonly="1" nolabel="1"
+                                   groups="sdlc_amazon_connector.group_amazon_manager"/>
+                        </page>
+                        <page string="Receiving">
+                            <group>
+                                <group string="Amazon Receiving">
+                                    <field name="sent_quantity" readonly="1"/>
+                                    <field name="received_quantity" readonly="1"/>
+                                    <field name="remaining_quantity" readonly="1"/>
+                                    <field name="damaged_quantity" readonly="1"/>
+                                    <field name="lost_quantity" readonly="1"/>
+                                </group>
+                                <group string="Synchronization">
+                                    <field name="receiving_status" readonly="1"/>
+                                    <field name="receiving_sync_status" readonly="1"/>
+                                    <field name="last_receiving_sync_at" readonly="1"/>
+                                    <field name="receiving_discrepancy_count" readonly="1"/>
+                                    <field name="receiving_error_message" readonly="1"
+                                           groups="sdlc_amazon_connector.group_amazon_manager"/>
+                                </group>
+                            </group>
+                            <div class="alert alert-warning" role="alert">
+                                Amazon currently exposes cumulative shipped and received quantities through
+                                the preserved, non-deprecated Fulfillment Inbound v0 item operation. It does
+                                not expose shipment-scoped damaged or lost quantities. Closed shortages are
+                                retained below as unresolved discrepancies and are never silently removed.
+                            </div>
+                            <field name="receiving_discrepancy_ids" readonly="1">
+                                <list create="0" delete="0"
+                                      decoration-danger="status == 'open'">
+                                    <field name="sku"/>
+                                    <field name="discrepancy_type"/>
+                                    <field name="quantity"/>
+                                    <field name="amazon_status"/>
+                                    <field name="amazon_reported_lost" optional="hide"/>
+                                    <field name="status"/>
+                                    <field name="create_date"/>
+                                    <field name="resolved_at" optional="hide"/>
+                                </list>
+                            </field>
+                            <field name="receiving_response" readonly="1" nolabel="1"
+                                   groups="sdlc_amazon_connector.group_amazon_manager"/>
+                        </page>
+                        <page string="Amazon Operation"
+                              groups="sdlc_amazon_connector.group_amazon_manager">
+                            <group>
+                                <group>
+                                    <field name="create_operation_request_id" readonly="1"/>
+                                    <field name="last_operation_request_id" readonly="1"/>
+                                </group>
+                                <group>
+                                    <div class="alert alert-info" role="alert" colspan="2">
+                                        Inbound plan creation is asynchronous. The background job polls Amazon;
+                                        this page stores sanitized responses and never stores access credentials.
+                                    </div>
+                                </group>
+                            </group>
+                            <field name="create_operation_response" readonly="1" nolabel="1"/>
+                            <field name="operation_job_ids" readonly="1">
+                                <list>
+                                    <field name="operation_type"/>
+                                    <field name="operation_id"/>
+                                    <field name="state"/>
+                                    <field name="raw_operation_status" optional="show"/>
+                                    <field name="retry_count"/>
+                                    <field name="max_retries"/>
+                                    <field name="next_run_at"/>
+                                    <field name="started_at"/>
+                                    <field name="finished_at"/>
+                                    <field name="last_error" optional="hide"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
                 </sheet>
             </form>
         </field>
