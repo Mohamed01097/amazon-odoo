@@ -180,6 +180,10 @@ class AmazonInboundShipment(models.Model):
     placement_option_ids = fields.One2many(
         'amazon.fba.placement.option', 'inbound_shipment_id', string='Placement Options',
     )
+    physical_shipment_ids = fields.One2many(
+        'amazon.fba.physical.shipment', 'inbound_shipment_id',
+        string='Amazon Physical Shipments',
+    )
     packing_options_expired = fields.Boolean(compute='_compute_options_expired')
     placement_options_expired = fields.Boolean(compute='_compute_options_expired')
 
@@ -779,7 +783,7 @@ class AmazonInboundShipment(models.Model):
         currency = valid[0][0]
         return sum(amount for code, amount in valid if code == currency), currency
 
-    def _fetch_all_option_pages(self, api_method_name, response_key):
+    def _fetch_all_option_pages(self, api_method_name, response_key, *scope_args):
         self.ensure_one()
         if not self.inbound_plan_id:
             raise UserError(_("The inbound plan must be created before loading Amazon options."))
@@ -796,6 +800,7 @@ class AmazonInboundShipment(models.Model):
                 self.instance_id,
                 access_token,
                 self.inbound_plan_id,
+                *scope_args,
                 20,
                 token,
                 error_msg=_("Failed to retrieve Amazon %s", response_key),
@@ -811,6 +816,113 @@ class AmazonInboundShipment(models.Model):
                 raise UserError(_("Amazon returned a repeated pagination token for %s.", response_key))
             seen_tokens.add(token)
         raise UserError(_("Amazon returned too many pages while loading %s.", response_key))
+
+    def _planned_msku_quantities(self):
+        self.ensure_one()
+        quantities = {}
+        for line in self.line_ids:
+            msku = (line.sku or '').strip()
+            if msku:
+                quantities[msku] = quantities.get(msku, 0) + line.planned_quantity
+        return quantities
+
+    def _amazon_product_for_msku(self, msku):
+        self.ensure_one()
+        plan_line = self.line_ids.filtered(lambda line: (line.sku or '').strip() == msku)[:1]
+        if plan_line.amazon_product_id:
+            return plan_line.amazon_product_id
+        return self.env['amazon.product'].sudo().search([
+            ('instance_id', '=', self.instance_id.id),
+            ('sku', '=', msku),
+        ], limit=1)
+
+    def _validated_amazon_items(self, item_values, context_label):
+        validated = []
+        seen = set()
+        for value in item_values:
+            if not isinstance(value, dict):
+                raise UserError(_("Amazon returned an invalid item for %s.", context_label))
+            msku = str(value.get('msku') or '').strip()
+            quantity = value.get('quantity')
+            if not msku:
+                raise UserError(_("Amazon returned an item without an MSKU for %s.", context_label))
+            if msku in seen:
+                raise UserError(_("Amazon returned duplicate MSKU %s for %s.", msku, context_label))
+            if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= 500000:
+                raise UserError(_("Amazon returned an invalid quantity for MSKU %s in %s.", msku, context_label))
+            seen.add(msku)
+            validated.append((msku, quantity, value))
+        return validated
+
+    def _assert_quantity_distribution(self, actual, context_label):
+        self.ensure_one()
+        planned = self._planned_msku_quantities()
+        if planned and actual != planned:
+            raise UserError(_(
+                "%s quantities do not match the inbound plan. Planned: %s; Amazon: %s",
+                context_label, planned, actual,
+            ))
+
+    def _sync_packing_groups(self, option, packing_group_ids):
+        self.ensure_one()
+        Group = self.env['amazon.fba.packing.group'].sudo()
+        Item = self.env['amazon.fba.packing.group.item'].sudo()
+        group_ids = [str(value or '').strip() for value in packing_group_ids or []]
+        if not group_ids or len(group_ids) != len(set(group_ids)) or any(
+            not INBOUND_PLAN_ID_RE.fullmatch(group_id) for group_id in group_ids
+        ):
+            raise UserError(_("Amazon returned invalid packingGroupIds for packing option %s.", option.amazon_packing_option_id))
+
+        totals = {}
+        for group_id in group_ids:
+            items, pages = self._fetch_all_option_pages(
+                'list_packing_group_items', 'items', group_id,
+            )
+            group = Group.search([
+                ('packing_option_id', '=', option.id),
+                ('amazon_packing_group_id', '=', group_id),
+            ], limit=1)
+            vals = {
+                'packing_option_id': option.id,
+                'amazon_packing_group_id': group_id,
+                'raw_response': self._sanitized_json(pages),
+            }
+            if group:
+                group.write(vals)
+            else:
+                group = Group.create(vals)
+
+            seen_mskus = set()
+            for msku, quantity, value in self._validated_amazon_items(
+                items, _("packing group %s", group_id),
+            ):
+                seen_mskus.add(msku)
+                totals[msku] = totals.get(msku, 0) + quantity
+                product = self._amazon_product_for_msku(msku)
+                item_vals = {
+                    'packing_group_id': group.id,
+                    'amazon_product_id': product.id or False,
+                    'msku': msku,
+                    'asin': str(value.get('asin') or '').strip() or False,
+                    'fnsku': str(value.get('fnsku') or '').strip() or False,
+                    'quantity': quantity,
+                    'raw_response': self._sanitized_json(value),
+                }
+                item = Item.search([
+                    ('packing_group_id', '=', group.id), ('msku', '=', msku),
+                ], limit=1)
+                if item:
+                    item.write(item_vals)
+                else:
+                    Item.create(item_vals)
+            group.item_ids.filtered(lambda item: item.msku not in seen_mskus).unlink()
+
+        option.packing_group_ids.filtered(
+            lambda group: group.amazon_packing_group_id not in group_ids
+        ).unlink()
+        self._assert_quantity_distribution(
+            totals, _("Packing option %s", option.amazon_packing_option_id),
+        )
 
     def _sync_packing_options(self, option_values):
         self.ensure_one()
@@ -829,6 +941,7 @@ class AmazonInboundShipment(models.Model):
             seen.add(option_id)
             status = str(value.get('status') or '').strip().upper()
             fee_amount, fee_currency = self._option_fee(value.get('fees'))
+            discount_amount, discount_currency = self._option_fee(value.get('discounts'))
             vals = {
                 'instance_id': self.instance_id.id,
                 'inbound_shipment_id': self.id,
@@ -838,6 +951,8 @@ class AmazonInboundShipment(models.Model):
                 'expiration_date': self._amazon_datetime(value.get('expiration')),
                 'fee_amount': fee_amount,
                 'fee_currency': fee_currency,
+                'discount_amount': discount_amount,
+                'discount_currency': discount_currency,
                 'amazon_packing_group_ids': json.dumps(
                     value.get('packingGroups') or [], ensure_ascii=False,
                 ),
@@ -895,6 +1010,7 @@ class AmazonInboundShipment(models.Model):
             seen.add(option_id)
             status = str(value.get('status') or '').strip().upper()
             fee_amount, fee_currency = self._option_fee(value.get('fees'))
+            discount_amount, discount_currency = self._option_fee(value.get('discounts'))
             vals = {
                 'inbound_shipment_id': self.id,
                 'amazon_placement_option_id': option_id,
@@ -904,6 +1020,8 @@ class AmazonInboundShipment(models.Model):
                 ),
                 'fee': fee_amount,
                 'currency': fee_currency,
+                'discount': discount_amount,
+                'discount_currency': discount_currency,
                 'expiration_date': self._amazon_datetime(value.get('expiration')),
                 'raw_response': self._sanitized_json(value),
             }
@@ -943,29 +1061,147 @@ class AmazonInboundShipment(models.Model):
 
     def _refresh_packing_options(self):
         self.ensure_one()
-        options, pages = self._fetch_all_option_pages('list_packing_options', 'packingOptions')
-        synced = self._sync_packing_options(options)
-        self.sudo().write({
-            'packing_last_refresh_at': fields.Datetime.now(),
-            'packing_error_code': False,
-            'packing_error_message': False,
-            'packing_response': self._merge_phase3_response(
-                'packing_response', 'listPackingOptions', pages,
-            ),
-        })
+        with self.env.cr.savepoint():
+            options, pages = self._fetch_all_option_pages('list_packing_options', 'packingOptions')
+            synced = self._sync_packing_options(options)
+            by_id = {
+                str(value.get('packingOptionId') or '').strip(): value
+                for value in options if isinstance(value, dict)
+            }
+            for option in synced:
+                self._sync_packing_groups(
+                    option, (by_id.get(option.amazon_packing_option_id) or {}).get('packingGroups'),
+                )
+            self.sudo().write({
+                'packing_last_refresh_at': fields.Datetime.now(),
+                'packing_error_code': False,
+                'packing_error_message': False,
+                'packing_response': self._merge_phase3_response(
+                    'packing_response', 'listPackingOptions', pages,
+                ),
+            })
         return synced
 
     def _refresh_placement_options(self):
         self.ensure_one()
-        options, pages = self._fetch_all_option_pages('list_placement_options', 'placementOptions')
-        synced = self._sync_placement_options(options)
-        self.sudo().write({
-            'placement_last_refresh_at': fields.Datetime.now(),
-            'placement_error_code': False,
-            'placement_error_message': False,
-            'placement_response': self._merge_phase3_response(
-                'placement_response', 'listPlacementOptions', pages,
-            ),
+        with self.env.cr.savepoint():
+            options, pages = self._fetch_all_option_pages('list_placement_options', 'placementOptions')
+            synced = self._sync_placement_options(options)
+            self.sudo().write({
+                'placement_last_refresh_at': fields.Datetime.now(),
+                'placement_error_code': False,
+                'placement_error_message': False,
+                'placement_response': self._merge_phase3_response(
+                    'placement_response', 'listPlacementOptions', pages,
+                ),
+            })
+        return synced
+
+    def _sync_confirmed_physical_shipments(self, placement_option):
+        """Materialize shipment splits only after placement confirmation succeeds."""
+        self.ensure_one()
+        PhysicalShipment = self.env['amazon.fba.physical.shipment'].sudo()
+        PhysicalLine = self.env['amazon.fba.physical.shipment.line'].sudo()
+        try:
+            shipment_ids = json.loads(placement_option.amazon_shipment_ids or '[]')
+        except (TypeError, ValueError):
+            shipment_ids = []
+        shipment_ids = [str(value or '').strip() for value in shipment_ids]
+        if not shipment_ids or len(shipment_ids) != len(set(shipment_ids)) or any(
+            not INBOUND_PLAN_ID_RE.fullmatch(shipment_id) for shipment_id in shipment_ids
+        ):
+            raise UserError(_("The confirmed placement option has invalid Amazon shipment IDs."))
+
+        access_token = self.instance_id._get_access_token_or_raise()
+        api = AmazonAPI()
+        totals = {}
+        synced = PhysicalShipment
+        destinations = set()
+        for shipment_id in shipment_ids:
+            result = self.instance_id._api_call_safe(
+                api.get_shipment,
+                self.instance_id,
+                access_token,
+                self.inbound_plan_id,
+                shipment_id,
+                error_msg=_("Failed to retrieve Amazon shipment %s", shipment_id),
+            )
+            if not isinstance(result, dict):
+                raise UserError(_("Amazon returned an invalid getShipment response."))
+            returned_shipment_id = str(result.get('shipmentId') or '').strip()
+            returned_option_id = str(result.get('placementOptionId') or '').strip()
+            confirmation_id = str(result.get('shipmentConfirmationId') or '').strip()
+            if returned_shipment_id != shipment_id:
+                raise UserError(_("Amazon getShipment returned a mismatched shipmentId."))
+            if returned_option_id != placement_option.amazon_placement_option_id:
+                raise UserError(_("Amazon getShipment returned a mismatched placementOptionId."))
+            if not confirmation_id:
+                raise UserError(_("Amazon has not produced a shipmentConfirmationId yet."))
+            destination = result.get('destination') if isinstance(result.get('destination'), dict) else {}
+            destination_fc = str(destination.get('warehouseId') or '').strip()
+            if destination_fc:
+                destinations.add(destination_fc)
+            shipment_vals = {
+                'inbound_shipment_id': self.id,
+                'placement_option_id': placement_option.id,
+                'amazon_shipment_id': shipment_id,
+                'shipment_confirmation_id': confirmation_id,
+                'amazon_reference_id': str(result.get('amazonReferenceId') or '').strip() or False,
+                'name': str(result.get('name') or '').strip() or False,
+                'status': str(result.get('status') or '').strip().upper() or False,
+                'destination_fc': destination_fc or False,
+                'raw_response': self._sanitized_json(result),
+            }
+            physical = PhysicalShipment.search([
+                ('inbound_shipment_id', '=', self.id),
+                ('amazon_shipment_id', '=', shipment_id),
+            ], limit=1)
+            if physical:
+                physical.write(shipment_vals)
+            else:
+                physical = PhysicalShipment.create(shipment_vals)
+            synced |= physical
+
+            items, pages = self._fetch_all_option_pages(
+                'list_shipment_items', 'items', shipment_id,
+            )
+            seen_mskus = set()
+            for msku, quantity, value in self._validated_amazon_items(
+                items, _("shipment %s", shipment_id),
+            ):
+                seen_mskus.add(msku)
+                totals[msku] = totals.get(msku, 0) + quantity
+                product = self._amazon_product_for_msku(msku)
+                line_vals = {
+                    'physical_shipment_id': physical.id,
+                    'amazon_product_id': product.id or False,
+                    'msku': msku,
+                    'asin': str(value.get('asin') or '').strip() or False,
+                    'fnsku': str(value.get('fnsku') or '').strip() or False,
+                    'quantity': quantity,
+                    'raw_response': self._sanitized_json(value),
+                }
+                line = PhysicalLine.search([
+                    ('physical_shipment_id', '=', physical.id), ('msku', '=', msku),
+                ], limit=1)
+                if line:
+                    line.write(line_vals)
+                else:
+                    PhysicalLine.create(line_vals)
+            physical.line_ids.filtered(lambda line: line.msku not in seen_mskus).unlink()
+            physical.write({
+                'raw_response': self._sanitized_json({
+                    'getShipment': result,
+                    'listShipmentItems': pages,
+                }),
+            })
+
+        self.physical_shipment_ids.filtered(
+            lambda shipment: shipment.amazon_shipment_id not in shipment_ids
+        ).unlink()
+        self._assert_quantity_distribution(totals, _("Placement shipment distribution"))
+        placement_option.sudo().write({
+            'destination_fc': next(iter(destinations)) if len(destinations) == 1 else False,
         })
         return synced
 
@@ -1107,6 +1343,10 @@ class AmazonInboundShipment(models.Model):
             state = 'placement_generated' if self.state == 'packing_confirmed' else self.state
         elif operation_type == 'confirm_placement_option':
             self._refresh_placement_options()
+            selected = self.placement_option_ids.filtered('selected')
+            if len(selected) != 1 or selected.status != 'ACCEPTED':
+                raise UserError(_("Amazon did not return exactly one accepted placement option."))
+            self._sync_confirmed_physical_shipments(selected)
             state = 'placement_confirmed'
         else:
             raise UserError(_("Unsupported inbound operation type: %s", operation_type))
@@ -1147,7 +1387,8 @@ class AmazonInboundShipment(models.Model):
         })
 
         if normalized in {'SUCCESS', 'SUCCEEDED', 'COMPLETED', 'COMPLETE'}:
-            self._complete_phase3_operation(job)
+            with self.env.cr.savepoint():
+                self._complete_phase3_operation(job)
             return 'success'
         if normalized in {'FAILED', 'FAILURE', 'ERROR'}:
             self.sudo().write({
@@ -1197,10 +1438,28 @@ class AmazonInboundShipment(models.Model):
         )
         self.invalidate_recordset()
 
+    def _ensure_plan_ready_for_packing(self):
+        self.ensure_one()
+        if not self.inbound_plan_id:
+            raise UserError(_("Packing options require a valid inboundPlanId."))
+        if self.create_operation_status != 'success':
+            raise UserError(_("Packing options require a successfully completed Create Inbound Plan operation."))
+
+    def _ensure_packing_confirmed_for_placement(self):
+        self.ensure_one()
+        selected = self.packing_option_ids.filtered('selected')
+        if (
+            self.packing_confirmation_status != 'success'
+            or len(selected) != 1
+            or selected.status != 'ACCEPTED'
+        ):
+            raise UserError(_("Placement options require one successfully confirmed packing option."))
+
     def action_generate_packing_options(self):
         self.ensure_one()
         self._check_inbound_manager_access()
         self._lock_phase3_workflow()
+        self._ensure_plan_ready_for_packing()
         regeneration = self.state == 'packing_generated' and self.packing_options_expired
         if self.state != 'plan_created' and not regeneration:
             raise UserError(_("Packing options can only be generated after the inbound plan is created."))
@@ -1227,8 +1486,7 @@ class AmazonInboundShipment(models.Model):
         self.ensure_one()
         self._check_inbound_manager_access()
         self._lock_phase3_workflow()
-        if not self.inbound_plan_id:
-            raise UserError(_("Create the inbound plan before refreshing packing options."))
+        self._ensure_plan_ready_for_packing()
         _job, created = self._enqueue_refresh_job('refresh_packing_options')
         return self.instance_id._notify(
             _("Packing Options"),
@@ -1266,6 +1524,7 @@ class AmazonInboundShipment(models.Model):
         self.ensure_one()
         self._check_inbound_manager_access()
         self._lock_phase3_workflow()
+        self._ensure_packing_confirmed_for_placement()
         regeneration = self.state == 'placement_generated' and self.placement_options_expired
         if self.state != 'packing_confirmed' and not regeneration:
             raise UserError(_("Placement options cannot be generated before packing confirmation."))
@@ -1293,6 +1552,7 @@ class AmazonInboundShipment(models.Model):
         self.ensure_one()
         self._check_inbound_manager_access()
         self._lock_phase3_workflow()
+        self._ensure_packing_confirmed_for_placement()
         if self.state not in ('packing_confirmed', 'placement_generated', 'placement_confirmed'):
             raise UserError(_("Confirm packing before refreshing placement options."))
         _job, created = self._enqueue_refresh_job('refresh_placement_options')

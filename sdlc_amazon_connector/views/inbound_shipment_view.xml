@@ -191,6 +191,8 @@
                                     <field name="expiration_date" readonly="1"/>
                                     <field name="fee_amount" readonly="1"/>
                                     <field name="fee_currency" readonly="1"/>
+                                    <field name="discount_amount" readonly="1" optional="hide"/>
+                                    <field name="discount_currency" readonly="1" optional="hide"/>
                                     <field name="amazon_packing_group_ids" optional="hide" readonly="1"/>
                                 </list>
                                 <form string="Amazon FBA Packing Option">
@@ -206,9 +208,31 @@
                                             <group>
                                                 <field name="fee_amount" readonly="1"/>
                                                 <field name="fee_currency" readonly="1"/>
+                                                <field name="discount_amount" readonly="1"/>
+                                                <field name="discount_currency" readonly="1"/>
                                                 <field name="amazon_packing_group_ids" readonly="1"/>
                                             </group>
                                         </group>
+                                        <separator string="Amazon Packing Groups and Items"/>
+                                        <field name="packing_group_ids" readonly="1">
+                                            <list>
+                                                <field name="amazon_packing_group_id"/>
+                                                <field name="item_ids" widget="many2many_tags"/>
+                                            </list>
+                                            <form string="Amazon FBA Packing Group">
+                                                <sheet>
+                                                    <field name="amazon_packing_group_id" readonly="1"/>
+                                                    <field name="item_ids" readonly="1">
+                                                        <list>
+                                                            <field name="msku"/>
+                                                            <field name="asin"/>
+                                                            <field name="fnsku"/>
+                                                            <field name="quantity"/>
+                                                        </list>
+                                                    </field>
+                                                </sheet>
+                                            </form>
+                                        </field>
                                         <separator string="Local Box Details (not submitted in Phase 3)"/>
                                         <field name="box_ids">
                                             <list editable="bottom">
@@ -281,6 +305,8 @@
                                     <field name="amazon_shipment_ids" readonly="1"/>
                                     <field name="fee" readonly="1"/>
                                     <field name="currency" readonly="1"/>
+                                    <field name="discount" readonly="1" optional="hide"/>
+                                    <field name="discount_currency" readonly="1" optional="hide"/>
                                     <field name="expiration_date" readonly="1"/>
                                 </list>
                                 <form string="Amazon FBA Placement Option">
@@ -297,8 +323,38 @@
                                                 <field name="amazon_shipment_ids" readonly="1"/>
                                                 <field name="fee" readonly="1"/>
                                                 <field name="currency" readonly="1"/>
+                                                <field name="discount" readonly="1"/>
+                                                <field name="discount_currency" readonly="1"/>
                                             </group>
                                         </group>
+                                        <separator string="Amazon Physical Shipments"/>
+                                        <field name="physical_shipment_ids" readonly="1">
+                                            <list>
+                                                <field name="amazon_shipment_id"/>
+                                                <field name="shipment_confirmation_id"/>
+                                                <field name="destination_fc"/>
+                                                <field name="status"/>
+                                            </list>
+                                            <form string="Amazon FBA Physical Shipment">
+                                                <sheet>
+                                                    <group>
+                                                        <field name="amazon_shipment_id"/>
+                                                        <field name="shipment_confirmation_id"/>
+                                                        <field name="amazon_reference_id"/>
+                                                        <field name="destination_fc"/>
+                                                        <field name="status"/>
+                                                    </group>
+                                                    <field name="line_ids" readonly="1">
+                                                        <list>
+                                                            <field name="msku"/>
+                                                            <field name="asin"/>
+                                                            <field name="fnsku"/>
+                                                            <field name="quantity"/>
+                                                        </list>
+                                                    </field>
+                                                </sheet>
+                                            </form>
+                                        </field>
                                         <field name="raw_response" readonly="1" nolabel="1"
                                                groups="sdlc_amazon_connector.group_amazon_manager"/>
                                     </sheet>

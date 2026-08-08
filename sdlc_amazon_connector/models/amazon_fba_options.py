@@ -27,6 +27,8 @@ class AmazonFbaPackingOption(models.Model):
     expiration_date = fields.Datetime(readonly=True, copy=False)
     fee_amount = fields.Float(readonly=True, copy=False, digits=(16, 2))
     fee_currency = fields.Char(readonly=True, copy=False, size=3)
+    discount_amount = fields.Float(readonly=True, copy=False, digits=(16, 2))
+    discount_currency = fields.Char(readonly=True, copy=False, size=3)
     selected = fields.Boolean(index=True, copy=False)
     amazon_packing_group_ids = fields.Text(
         readonly=True, copy=False,
@@ -37,6 +39,9 @@ class AmazonFbaPackingOption(models.Model):
         groups='sdlc_amazon_connector.group_amazon_manager',
     )
     box_ids = fields.One2many('amazon.fba.box', 'packing_option_id', string='Packing Boxes')
+    packing_group_ids = fields.One2many(
+        'amazon.fba.packing.group', 'packing_option_id', string='Amazon Packing Groups',
+    )
 
     _unique_amazon_option = models.Constraint(
         'UNIQUE (inbound_shipment_id, amazon_packing_option_id)',
@@ -99,6 +104,94 @@ class AmazonFbaPackingOption(models.Model):
                     "Packing option selection cannot change after Amazon confirmation starts."
                 ))
         return super().write(vals)
+
+
+class AmazonFbaPackingGroup(models.Model):
+    _name = 'amazon.fba.packing.group'
+    _description = 'Amazon FBA Packing Group'
+    _rec_name = 'amazon_packing_group_id'
+    _order = 'id'
+    _check_company_auto = True
+
+    packing_option_id = fields.Many2one(
+        'amazon.fba.packing.option', required=True, ondelete='cascade', index=True,
+        check_company=True,
+    )
+    inbound_shipment_id = fields.Many2one(
+        'amazon.inbound.shipment', related='packing_option_id.inbound_shipment_id',
+        store=True, readonly=True, index=True,
+    )
+    instance_id = fields.Many2one(
+        'amazon.instance', related='packing_option_id.instance_id',
+        store=True, readonly=True, index=True,
+    )
+    company_id = fields.Many2one(
+        'res.company', related='packing_option_id.company_id',
+        store=True, readonly=True, index=True,
+    )
+    amazon_packing_group_id = fields.Char(required=True, copy=False, index=True)
+    item_ids = fields.One2many(
+        'amazon.fba.packing.group.item', 'packing_group_id', string='Items',
+    )
+    raw_response = fields.Text(
+        readonly=True, copy=False,
+        groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+
+    _unique_group = models.Constraint(
+        'UNIQUE (packing_option_id, amazon_packing_group_id)',
+        'A packing group can only occur once on a packing option.',
+    )
+
+
+class AmazonFbaPackingGroupItem(models.Model):
+    _name = 'amazon.fba.packing.group.item'
+    _description = 'Amazon FBA Packing Group Item'
+    _order = 'msku, id'
+    _check_company_auto = True
+
+    packing_group_id = fields.Many2one(
+        'amazon.fba.packing.group', required=True, ondelete='cascade', index=True,
+        check_company=True,
+    )
+    inbound_shipment_id = fields.Many2one(
+        'amazon.inbound.shipment', related='packing_group_id.inbound_shipment_id',
+        store=True, readonly=True, index=True,
+    )
+    instance_id = fields.Many2one(
+        'amazon.instance', related='packing_group_id.instance_id',
+        store=True, readonly=True, index=True,
+    )
+    company_id = fields.Many2one(
+        'res.company', related='packing_group_id.company_id',
+        store=True, readonly=True, index=True,
+    )
+    amazon_product_id = fields.Many2one('amazon.product', ondelete='restrict', index=True)
+    msku = fields.Char(required=True, index=True)
+    asin = fields.Char()
+    fnsku = fields.Char()
+    quantity = fields.Integer(required=True)
+    raw_response = fields.Text(
+        readonly=True, copy=False,
+        groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+
+    _unique_group_msku = models.Constraint(
+        'UNIQUE (packing_group_id, msku)',
+        'An MSKU can only occur once in a packing group.',
+    )
+    _positive_quantity = models.Constraint(
+        'CHECK (quantity > 0 AND quantity <= 500000)',
+        'Packing group item quantity must be from 1 to 500000.',
+    )
+
+    @api.constrains('amazon_product_id', 'instance_id', 'msku')
+    def _check_product_mapping(self):
+        for item in self.filtered('amazon_product_id'):
+            if item.amazon_product_id.instance_id != item.instance_id:
+                raise ValidationError(_("The packing group product must belong to the same instance."))
+            if (item.amazon_product_id.sku or '').strip() != (item.msku or '').strip():
+                raise ValidationError(_("The packing group MSKU must match the Amazon Product SKU."))
 
 
 class AmazonFbaBox(models.Model):
@@ -233,11 +326,17 @@ class AmazonFbaPlacementOption(models.Model):
     )
     fee = fields.Float(readonly=True, copy=False, digits=(16, 2))
     currency = fields.Char(readonly=True, copy=False, size=3)
+    discount = fields.Float(readonly=True, copy=False, digits=(16, 2))
+    discount_currency = fields.Char(readonly=True, copy=False, size=3)
     selected = fields.Boolean(index=True, copy=False)
     expiration_date = fields.Datetime(readonly=True, copy=False)
     raw_response = fields.Text(
         readonly=True, copy=False,
         groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+    physical_shipment_ids = fields.One2many(
+        'amazon.fba.physical.shipment', 'placement_option_id',
+        string='Amazon Physical Shipments',
     )
 
     _unique_amazon_option = models.Constraint(
@@ -295,3 +394,102 @@ class AmazonFbaPlacementOption(models.Model):
                     "Placement option selection cannot change after Amazon confirmation starts."
                 ))
         return super().write(vals)
+
+
+class AmazonFbaPhysicalShipment(models.Model):
+    _name = 'amazon.fba.physical.shipment'
+    _description = 'Amazon FBA Physical Shipment'
+    _rec_name = 'amazon_shipment_id'
+    _order = 'amazon_shipment_id, id'
+    _check_company_auto = True
+
+    inbound_shipment_id = fields.Many2one(
+        'amazon.inbound.shipment', required=True, ondelete='cascade', index=True,
+        check_company=True,
+    )
+    placement_option_id = fields.Many2one(
+        'amazon.fba.placement.option', required=True, ondelete='cascade', index=True,
+        check_company=True,
+    )
+    instance_id = fields.Many2one(
+        'amazon.instance', related='inbound_shipment_id.instance_id',
+        store=True, readonly=True, index=True,
+    )
+    company_id = fields.Many2one(
+        'res.company', related='inbound_shipment_id.company_id',
+        store=True, readonly=True, index=True,
+    )
+    amazon_shipment_id = fields.Char(required=True, copy=False, index=True)
+    shipment_confirmation_id = fields.Char(copy=False, index=True)
+    amazon_reference_id = fields.Char(copy=False)
+    name = fields.Char(copy=False)
+    status = fields.Char(copy=False, index=True)
+    destination_fc = fields.Char(copy=False)
+    line_ids = fields.One2many(
+        'amazon.fba.physical.shipment.line', 'physical_shipment_id', string='Items',
+    )
+    raw_response = fields.Text(
+        readonly=True, copy=False,
+        groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+
+    _unique_plan_shipment = models.Constraint(
+        'UNIQUE (inbound_shipment_id, amazon_shipment_id)',
+        'An Amazon shipment ID can only occur once on an inbound plan.',
+    )
+
+    @api.constrains('inbound_shipment_id', 'placement_option_id')
+    def _check_placement_plan(self):
+        for shipment in self:
+            if shipment.placement_option_id.inbound_shipment_id != shipment.inbound_shipment_id:
+                raise ValidationError(_("The physical shipment placement option must belong to the same inbound plan."))
+
+
+class AmazonFbaPhysicalShipmentLine(models.Model):
+    _name = 'amazon.fba.physical.shipment.line'
+    _description = 'Amazon FBA Physical Shipment Item'
+    _order = 'msku, id'
+    _check_company_auto = True
+
+    physical_shipment_id = fields.Many2one(
+        'amazon.fba.physical.shipment', required=True, ondelete='cascade', index=True,
+        check_company=True,
+    )
+    inbound_shipment_id = fields.Many2one(
+        'amazon.inbound.shipment', related='physical_shipment_id.inbound_shipment_id',
+        store=True, readonly=True, index=True,
+    )
+    instance_id = fields.Many2one(
+        'amazon.instance', related='physical_shipment_id.instance_id',
+        store=True, readonly=True, index=True,
+    )
+    company_id = fields.Many2one(
+        'res.company', related='physical_shipment_id.company_id',
+        store=True, readonly=True, index=True,
+    )
+    amazon_product_id = fields.Many2one('amazon.product', ondelete='restrict', index=True)
+    msku = fields.Char(required=True, index=True)
+    asin = fields.Char()
+    fnsku = fields.Char()
+    quantity = fields.Integer(required=True)
+    raw_response = fields.Text(
+        readonly=True, copy=False,
+        groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+
+    _unique_shipment_msku = models.Constraint(
+        'UNIQUE (physical_shipment_id, msku)',
+        'An MSKU can only occur once in a physical Amazon shipment.',
+    )
+    _positive_quantity = models.Constraint(
+        'CHECK (quantity > 0 AND quantity <= 500000)',
+        'Physical shipment item quantity must be from 1 to 500000.',
+    )
+
+    @api.constrains('amazon_product_id', 'instance_id', 'msku')
+    def _check_product_mapping(self):
+        for item in self.filtered('amazon_product_id'):
+            if item.amazon_product_id.instance_id != item.instance_id:
+                raise ValidationError(_("The physical shipment product must belong to the same instance."))
+            if (item.amazon_product_id.sku or '').strip() != (item.msku or '').strip():
+                raise ValidationError(_("The physical shipment MSKU must match the Amazon Product SKU."))

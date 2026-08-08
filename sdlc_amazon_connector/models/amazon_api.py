@@ -1281,7 +1281,9 @@ class AmazonAPI():
         """Start v2024-03-20 packing-option generation."""
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/packingOptions"
-        resp = self._amazon_request(instance, access_token, 'POST', url)
+        # Amazon exposes no idempotency key for this asynchronous write.  An
+        # ambiguous transport failure must be reviewed instead of replayed.
+        resp = self._amazon_request(instance, access_token, 'POST', url, max_retries=0)
         return self._json_response_with_request_id(resp)
 
     def list_packing_options(self, instance, access_token, plan_id, page_size=20,
@@ -1302,14 +1304,30 @@ class AmazonAPI():
             f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
             f"/packingOptions/{packing_option_id}/confirmation"
         )
-        resp = self._amazon_request(instance, access_token, 'POST', url)
+        resp = self._amazon_request(instance, access_token, 'POST', url, max_retries=0)
+        return self._json_response_with_request_id(resp)
+
+    def list_packing_group_items(self, instance, access_token, plan_id, packing_group_id,
+                                 page_size=20, pagination_token=None):
+        """Return one official listPackingGroupItems page."""
+        endpoint = self._get_endpoint(instance)
+        url = (
+            f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
+            f"/packingGroups/{packing_group_id}/items"
+        )
+        params = {'pageSize': page_size}
+        if pagination_token:
+            params['paginationToken'] = pagination_token
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return self._json_response_with_request_id(resp)
 
     def generate_placement_options(self, instance, access_token, plan_id, body=None):
         """Start v2024-03-20 placement generation with its required JSON body."""
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/placementOptions"
-        resp = self._amazon_request(instance, access_token, 'POST', url, body=body or {})
+        resp = self._amazon_request(
+            instance, access_token, 'POST', url, body=body or {}, max_retries=0,
+        )
         return self._json_response_with_request_id(resp)
 
     def list_placement_options(self, instance, access_token, plan_id, page_size=20,
@@ -1330,7 +1348,7 @@ class AmazonAPI():
             f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
             f"/placementOptions/{placement_option_id}/confirmation"
         )
-        resp = self._amazon_request(instance, access_token, 'POST', url)
+        resp = self._amazon_request(instance, access_token, 'POST', url, max_retries=0)
         return self._json_response_with_request_id(resp)
 
     def get_shipment(self, instance, access_token, plan_id, shipment_id):
@@ -1351,11 +1369,20 @@ class AmazonAPI():
         resp = self._amazon_request(instance, access_token, 'PUT', url, body=body)
         return self._json_response_with_request_id(resp)
 
-    def get_shipment_items(self, instance, access_token, plan_id, shipment_id):
+    def list_shipment_items(self, instance, access_token, plan_id, shipment_id,
+                            page_size=20, pagination_token=None):
+        """Return one official listShipmentItems page."""
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/shipments/{shipment_id}/items"
-        resp = self._amazon_request(instance, access_token, 'GET', url)
-        return resp.json()
+        params = {'pageSize': page_size}
+        if pagination_token:
+            params['paginationToken'] = pagination_token
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
+        return self._json_response_with_request_id(resp)
+
+    def get_shipment_items(self, instance, access_token, plan_id, shipment_id):
+        """Backward-compatible alias for the first listShipmentItems page."""
+        return self.list_shipment_items(instance, access_token, plan_id, shipment_id)
 
     def get_inbound_shipment_items_v0(self, instance, access_token,
                                       shipment_confirmation_id, max_pages=100):
