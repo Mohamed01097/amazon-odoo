@@ -68,10 +68,12 @@ REPORT_MERCHANT_LISTINGS = 'GET_MERCHANT_LISTINGS_ALL_DATA'
 REPORT_FBA_INVENTORY = 'GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA'
 REPORT_FBA_SHIPMENT = 'GET_AMAZON_FULFILLED_SHIPMENTS_DATA_GENERAL'
 REPORT_FBA_RETURNS = 'GET_FBA_FULFILLMENT_CUSTOMER_RETURNS_DATA'
-REPORT_FBA_INVENTORY_ADJUSTMENT = 'GET_FBA_INVENTORY_ADJUSTMENTS_DATA'
+REPORT_FBA_INVENTORY_ADJUSTMENT = 'GET_LEDGER_DETAIL_VIEW_DATA'
+REPORT_FBA_REIMBURSEMENTS = 'GET_FBA_REIMBURSEMENTS_DATA'
 REPORT_SETTLEMENT = 'GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE'
 REPORT_SELLER_FEEDBACK = 'GET_SELLER_FEEDBACK_DATA'
-REPORT_REMOVAL = 'GET_FBA_RECOMMENDED_REMOVAL_DATA'
+REPORT_REMOVAL_ORDER_DETAIL = 'GET_FBA_FULFILLMENT_REMOVAL_ORDER_DETAIL_DATA'
+REPORT_REMOVAL_SHIPMENT_DETAIL = 'GET_FBA_FULFILLMENT_REMOVAL_SHIPMENT_DETAIL_DATA'
 REPORT_VCS_TAX = 'GET_FLAT_FILE_VAT_INVOICE_DATA_REPORT'
 REPORT_FBA_LIVE_STOCK = 'GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA'
 
@@ -84,6 +86,7 @@ FEED_POST_PRODUCT_PRICING = 'POST_PRODUCT_PRICING_DATA'   # deprecated
 FEED_POST_INVENTORY = 'POST_INVENTORY_AVAILABILITY_DATA'  # deprecated
 FEED_ORDER_FULFILLMENT = 'POST_ORDER_FULFILLMENT_DATA'
 FEED_INVOICE_UPLOAD = 'UPLOAD_VAT_INVOICE'
+FEED_FBA_CREATE_REMOVAL = 'POST_FLAT_FILE_FBA_CREATE_REMOVAL'
 
 
 class AmazonAPI():
@@ -484,7 +487,8 @@ class AmazonAPI():
     # Reports API
     # ══════════════════════════════════════════════════
 
-    def create_report(self, instance, access_token, report_type, start_date=None, end_date=None):
+    def create_report(self, instance, access_token, report_type, start_date=None,
+                      end_date=None, report_options=None):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/reports/2021-06-30/reports"
         body = {
@@ -495,6 +499,8 @@ class AmazonAPI():
             body["dataStartTime"] = start_date
         if end_date:
             body["dataEndTime"] = end_date
+        if report_options:
+            body["reportOptions"] = report_options
         resp = self._amazon_request(instance, access_token, 'POST', url, body=body)
         return resp.json()
 
@@ -592,9 +598,13 @@ class AmazonAPI():
             "Report generation timed out after %d seconds." % max_wait
         )
 
-    def fetch_report_rows(self, instance, access_token, report_type, delimiter='\t', start_date=None, end_date=None):
+    def fetch_report_rows(self, instance, access_token, report_type, delimiter='\t',
+                          start_date=None, end_date=None, report_options=None):
         """Generic: request a report, wait, download, parse TSV/CSV → list of dicts."""
-        create_resp = self.create_report(instance, access_token, report_type, start_date, end_date)
+        create_resp = self.create_report(
+            instance, access_token, report_type, start_date, end_date,
+            report_options=report_options,
+        )
         report_id = create_resp.get('reportId')
         if not report_id:
             raise requests.exceptions.RequestException("No reportId returned.")
@@ -641,8 +651,20 @@ class AmazonAPI():
     def fetch_fba_returns_report(self, instance, access_token):
         return self.fetch_report_rows(instance, access_token, REPORT_FBA_RETURNS)
 
-    def fetch_fba_inventory_adjustment_report(self, instance, access_token):
-        return self.fetch_report_rows(instance, access_token, REPORT_FBA_INVENTORY_ADJUSTMENT)
+    def fetch_fba_inventory_adjustment_report(self, instance, access_token,
+                                              start_date=None, end_date=None):
+        return self.fetch_report_rows(
+            instance, access_token, REPORT_FBA_INVENTORY_ADJUSTMENT,
+            start_date=start_date, end_date=end_date,
+            report_options={'eventType': 'Adjustments'},
+        )
+
+    def fetch_fba_reimbursements_report(self, instance, access_token,
+                                        start_date=None, end_date=None):
+        return self.fetch_report_rows(
+            instance, access_token, REPORT_FBA_REIMBURSEMENTS,
+            start_date=start_date, end_date=end_date,
+        )
 
     def fetch_settlement_report(self, instance, access_token):
         return self.fetch_report_rows(instance, access_token, REPORT_SETTLEMENT)
@@ -650,8 +672,24 @@ class AmazonAPI():
     def fetch_seller_feedback_report(self, instance, access_token):
         return self.fetch_report_rows(instance, access_token, REPORT_SELLER_FEEDBACK)
 
+    def fetch_removal_order_detail_report(self, instance, access_token,
+                                          start_date=None, end_date=None):
+        return self.fetch_report_rows(
+            instance, access_token, REPORT_REMOVAL_ORDER_DETAIL,
+            start_date=start_date, end_date=end_date,
+        )
+
+    def fetch_removal_shipment_detail_report(self, instance, access_token,
+                                             start_date=None, end_date=None):
+        return self.fetch_report_rows(
+            instance, access_token, REPORT_REMOVAL_SHIPMENT_DETAIL,
+            start_date=start_date, end_date=end_date,
+        )
+
+    # Backward-compatible alias. It now returns authoritative removal-order
+    # detail, never the recommendations report used by the legacy code.
     def fetch_removal_report(self, instance, access_token):
-        return self.fetch_report_rows(instance, access_token, REPORT_REMOVAL)
+        return self.fetch_removal_order_detail_report(instance, access_token)
 
     def fetch_vcs_tax_report(self, instance, access_token):
         return self.fetch_report_rows(instance, access_token, REPORT_VCS_TAX)
@@ -797,6 +835,12 @@ class AmazonAPI():
         resp = self._amazon_request(instance, access_token, 'GET', url)
         return resp.json()
 
+    def get_feed_document(self, instance, access_token, document_id):
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/feeds/2021-06-30/documents/{document_id}"
+        resp = self._amazon_request(instance, access_token, 'GET', url)
+        return resp.json()
+
     def submit_feed(self, instance, access_token, feed_type, content, content_type='text/xml; charset=UTF-8'):
         """Full feed submission flow: create doc → upload → create feed.
 
@@ -811,6 +855,51 @@ class AmazonAPI():
         self.upload_feed_document(upload_url, content, content_type=content_type, instance=instance)
         feed = self.create_feed(instance, access_token, feed_type, doc_id)
         return feed
+
+    @staticmethod
+    def build_fba_removal_flat_file(order):
+        """Build Amazon's documented flat-file FBA removal feed.
+
+        The field names deliberately mirror the official FBA feed table. The
+        connector sends one row per SKU and never includes credentials or
+        internal database identifiers.
+        """
+        partner = order.ship_to_partner_id if order.removal_type == 'return_to_address' else False
+        headers = [
+            'MerchantRemovalOrderID', 'RemovalDisposition', 'MerchantSKU',
+            'SellableQuantity', 'UnsellableQuantity', 'AddressName',
+            'AddressFieldOne', 'AddressFieldTwo', 'AddressFieldThree',
+            'AddressCity', 'AddressCountryCode', 'AddressStateOrRegion',
+            'AddressPostalCode', 'ContactPhoneNumber', 'ShippingNotes',
+        ]
+
+        def safe(value):
+            return str(value or '').replace('\t', ' ').replace('\r', ' ').replace('\n', ' ')
+
+        rows = ['\t'.join(headers)]
+        disposition = 'Return' if order.removal_type == 'return_to_address' else 'Disposal'
+        for line in order.line_ids:
+            sellable = line.requested_quantity if line.disposition.lower() == 'sellable' else 0
+            unsellable = line.requested_quantity if line.disposition.lower() != 'sellable' else 0
+            values = [
+                order.amazon_removal_order_id or order.name,
+                disposition,
+                line.sku,
+                int(sellable),
+                int(unsellable),
+                partner.name if partner else '',
+                partner.street if partner else '',
+                partner.street2 if partner else '',
+                '',
+                partner.city if partner else '',
+                partner.country_id.code if partner and partner.country_id else '',
+                partner.state_id.code or partner.state_id.name if partner and partner.state_id else '',
+                partner.zip if partner else '',
+                partner.phone or partner.mobile if partner else '',
+                order.shipping_notes,
+            ]
+            rows.append('\t'.join(safe(value) for value in values))
+        return '\n'.join(rows) + '\n'
 
     # ── Feed XML builders ──
 

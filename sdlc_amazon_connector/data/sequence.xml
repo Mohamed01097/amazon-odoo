@@ -20,6 +20,13 @@
         <field name="padding">4</field>
     </record>
 
+    <record id="seq_amazon_phase7_job" model="ir.sequence">
+        <field name="name">Amazon Phase 7 Job</field>
+        <field name="code">amazon.phase7.job</field>
+        <field name="prefix">FBA7/</field>
+        <field name="padding">6</field>
+    </record>
+
     <record id="seq_amazon_inbound_shipment" model="ir.sequence">
         <field name="name">Amazon Inbound Shipment</field>
         <field name="code">amazon.inbound.shipment</field>

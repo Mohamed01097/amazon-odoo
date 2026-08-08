@@ -30,6 +30,7 @@ SOURCE_MODELS = {
     'amazon.order.status.sync.job',
     'amazon.inbound.operation.job',
     'amazon.inventory.reconciliation.run',
+    'amazon.phase7.job',
 }
 
 INBOUND_READ_OPERATIONS = {
@@ -179,6 +180,8 @@ class AmazonOperationControl(models.Model):
             return 'inventory_reconciliation'
         if source._name == 'amazon.inbound.operation.job':
             return source.operation_type or 'inbound_operation'
+        if source._name == 'amazon.phase7.job':
+            return source.operation_type or 'phase7_job'
         return source._name
 
     @api.model
@@ -241,6 +244,7 @@ class AmazonOperationControl(models.Model):
             'amazon.order.import.job',
             'amazon.order.status.sync.job',
             'amazon.inventory.reconciliation.run',
+            'amazon.phase7.job',
         }:
             return True
         if source._name == 'amazon.inbound.operation.job':
@@ -397,6 +401,7 @@ class AmazonOperationControl(models.Model):
             'amazon.order.status.sync.job': ('draft', 'pending', 'running'),
             'amazon.inbound.operation.job': ('pending', 'in_progress'),
             'amazon.inventory.reconciliation.run': ('queued', 'running'),
+            'amazon.phase7.job': ('pending', 'running', 'waiting_amazon'),
         }
         if source.state in active_states[source._name] and self.state != 'retry_pending':
             raise UserError(_("This source job is already queued or running."))
@@ -415,8 +420,10 @@ class AmazonOperationControl(models.Model):
             values.update(state='pending', next_run_at=now)
         elif source._name == 'amazon.inbound.operation.job':
             values.update(state='pending', next_run_at=now)
-        else:
+        elif source._name == 'amazon.inventory.reconciliation.run':
             values.update(state='queued', next_run_at=now)
+        else:
+            values.update(state='pending', next_run_at=now)
         source.sudo().with_context(skip_amazon_operation_tracking=True).write(values)
         retry_count = self.retry_count + 1
         self.write({
@@ -515,6 +522,7 @@ class AmazonOperationControl(models.Model):
             'amazon.order.status.sync.job': ('failed', 'partial'),
             'amazon.inbound.operation.job': ('failed',),
             'amazon.inventory.reconciliation.run': ('failed',),
+            'amazon.phase7.job': ('failed',),
         }
         created = 0
         remaining = max(int(limit or 0), 0)
@@ -837,6 +845,33 @@ class AmazonOperationJobMonitor(models.Model):
                   JOIN amazon_instance i ON i.id = j.instance_id
              LEFT JOIN amazon_operation_control c
                     ON c.source_model = 'amazon.inventory.reconciliation.run' AND c.source_id = j.id
+                UNION ALL
+                SELECT j.id * 10 + 5, 'amazon.phase7.job', j.id,
+                       j.name::varchar, j.instance_id, j.company_id, j.operation_type,
+                       CASE WHEN c.state IN ('retry_pending','manual_review','cancelled','exhausted') THEN c.state
+                            WHEN j.state = 'waiting_amazon' THEN 'pending'
+                            ELSE j.state END,
+                       COALESCE(c.priority, 50),
+                       CASE WHEN j.state = 'done' THEN 100.0
+                            WHEN j.total_found > 0 THEN LEAST(100.0, j.total_processed * 100.0 / j.total_found)
+                            WHEN j.state = 'running' THEN 10.0 ELSE 0.0 END,
+                       j.total_processed, j.total_failed,
+                       COALESCE(c.retry_count, j.retry_count, 0),
+                       COALESCE(c.max_retries, j.max_retries, i.maximum_automatic_retries, 5),
+                       COALESCE(c.next_retry_at, j.next_run_at), j.started_at,
+                       COALESCE(j.last_activity_at, j.write_date, j.create_date), j.finished_at,
+                       CASE WHEN j.started_at IS NULL THEN 0.0
+                            ELSE EXTRACT(EPOCH FROM (COALESCE(j.finished_at, now()) - j.started_at)) END,
+                       COALESCE(c.last_error_code, j.last_error_code),
+                       COALESCE(c.last_error_message, j.last_error_message),
+                       COALESCE(c.last_amazon_request_id, j.amazon_request_id),
+                       COALESCE(c.responsible_user_id, j.responsible_user_id, j.create_uid),
+                       c.error_category, COALESCE(c.retry_safe, FALSE), c.waiting_reason,
+                       COALESCE(c.severity, 'info'), c.id
+                  FROM amazon_phase7_job j
+                  JOIN amazon_instance i ON i.id = j.instance_id
+             LEFT JOIN amazon_operation_control c
+                    ON c.source_model = 'amazon.phase7.job' AND c.source_id = j.id
             )
         """)
 
@@ -1007,6 +1042,17 @@ class AmazonOperationsDashboard(models.Model):
     inbound_blocked = fields.Integer(readonly=True)
     inventory_mismatches = fields.Integer(readonly=True)
     critical_inventory_differences = fields.Integer(readonly=True)
+    returns_awaiting_classification = fields.Integer(readonly=True)
+    sellable_returns = fields.Integer(readonly=True)
+    unsellable_returns = fields.Integer(readonly=True)
+    removal_orders_requested = fields.Integer(readonly=True)
+    removal_orders_in_transit = fields.Integer(readonly=True)
+    removal_orders_awaiting_receipt = fields.Integer(readonly=True)
+    disposal_orders_pending = fields.Integer(readonly=True)
+    lost_inventory_events = fields.Integer(readonly=True)
+    damaged_inventory_events = fields.Integer(readonly=True)
+    unmatched_reimbursements = fields.Integer(readonly=True)
+    failed_phase7_jobs = fields.Integer(readonly=True)
     api_errors_24h = fields.Integer(readonly=True)
     rate_limits_1h = fields.Integer(readonly=True)
     rate_limits_24h = fields.Integer(readonly=True)
@@ -1073,6 +1119,43 @@ class AmazonOperationsDashboard(models.Model):
                 'critical_inventory_differences': self.env['amazon.inventory.reconciliation'].sudo().search_count([
                     ('instance_id', '=', instance.id), ('severity', '=', 'critical'),
                     ('status', 'not in', ('matched', 'ignored', 'applied')),
+                ]),
+                'returns_awaiting_classification': self.env['amazon.return.report.line'].sudo().search_count([
+                    ('instance_id', '=', instance.id),
+                    '|', ('state', '=', 'pending'), ('manual_review_required', '=', True),
+                ]),
+                'sellable_returns': self.env['amazon.return.report.line'].sudo().search_count([
+                    ('instance_id', '=', instance.id), ('operational_disposition', '=', 'sellable'),
+                ]),
+                'unsellable_returns': self.env['amazon.return.report.line'].sudo().search_count([
+                    ('instance_id', '=', instance.id), ('operational_disposition', '=', 'unsellable'),
+                ]),
+                'removal_orders_requested': self.env['amazon.removal.order'].sudo().search_count([
+                    ('instance_id', '=', instance.id),
+                    ('state', 'in', ('submitted', 'processing')),
+                ]),
+                'removal_orders_in_transit': self.env['amazon.removal.order'].sudo().search_count([
+                    ('instance_id', '=', instance.id), ('state', '=', 'in_transit'),
+                ]),
+                'removal_orders_awaiting_receipt': self.env['amazon.removal.order'].sudo().search_count([
+                    ('instance_id', '=', instance.id), ('state', '=', 'awaiting_receipt'),
+                ]),
+                'disposal_orders_pending': self.env['amazon.removal.order'].sudo().search_count([
+                    ('instance_id', '=', instance.id), ('removal_type', '=', 'disposal'),
+                    ('state', 'not in', ('completed', 'cancelled')),
+                ]),
+                'lost_inventory_events': self.env['amazon.fba.inventory.adjustment'].sudo().search_count([
+                    ('instance_id', '=', instance.id), ('event_category', '=', 'lost'),
+                ]),
+                'damaged_inventory_events': self.env['amazon.fba.inventory.adjustment'].sudo().search_count([
+                    ('instance_id', '=', instance.id), ('event_category', '=', 'damaged'),
+                ]),
+                'unmatched_reimbursements': self.env['amazon.fba.reimbursement'].sudo().search_count([
+                    ('instance_id', '=', instance.id),
+                    ('review_state', 'in', ('unmatched', 'manual_review')),
+                ]),
+                'failed_phase7_jobs': self.env['amazon.phase7.job'].sudo().search_count([
+                    ('instance_id', '=', instance.id), ('state', '=', 'failed'),
                 ]),
                 'api_errors_24h': sum(metrics.mapped('error_count_24h')),
                 'rate_limits_1h': sum(metrics.mapped('throttle_count_1h')),

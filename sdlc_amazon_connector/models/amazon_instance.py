@@ -39,12 +39,31 @@ FBA_LOCATION_DEFINITIONS = {
         'name': 'Amazon FBA Unsellable',
         'usage': 'internal',
     },
+    'return_source': {
+        'field': 'fba_return_source_location_id',
+        'label': 'FBA Customer Return Source',
+        'name': 'Amazon FBA Customer Returns',
+        'usage': 'customer',
+    },
+    'removal_transit': {
+        'field': 'fba_removal_transit_location_id',
+        'label': 'FBA Removal Transit Location',
+        'name': 'Amazon FBA Removal Transit',
+        'usage': 'transit',
+    },
+    'disposal': {
+        'field': 'fba_disposal_location_id',
+        'label': 'FBA Disposal / Inventory Loss Location',
+        'name': 'Amazon FBA Disposal / Inventory Loss',
+        'usage': 'inventory',
+    },
 }
 
 FBA_CONFIGURATION_FIELDS = {
     'fba_warehouse_id',
     'fba_source_location_id',
     'fba_ship_from_partner_id',
+    'fba_removal_return_partner_id',
     *(definition['field'] for definition in FBA_LOCATION_DEFINITIONS.values()),
 }
 
@@ -192,6 +211,39 @@ class AmazonInstance(models.Model):
         domain="[('active', '=', True), ('usage', '=', 'internal'), ('company_id', '=', company_id)]",
         help="Company-owned inventory Amazon holds but cannot sell.",
     )
+    fba_return_source_location_id = fields.Many2one(
+        'stock.location', string='FBA Customer Return Source', check_company=True,
+        domain="[('active', '=', True), ('usage', '=', 'customer'), ('company_id', '=', company_id)]",
+        help="Virtual source used only when a configured customer-return event creates a stock move.",
+    )
+    fba_removal_transit_location_id = fields.Many2one(
+        'stock.location', string='FBA Removal Transit Location', check_company=True,
+        domain="[('active', '=', True), ('usage', '=', 'transit'), ('company_id', '=', company_id)]",
+        help="Inventory dispatched by Amazon but not physically received in the customer warehouse.",
+    )
+    fba_disposal_location_id = fields.Many2one(
+        'stock.location', string='FBA Disposal / Inventory Loss Location', check_company=True,
+        domain="[('active', '=', True), ('usage', '=', 'inventory'), ('company_id', '=', company_id)]",
+    )
+    fba_removal_return_partner_id = fields.Many2one(
+        'res.partner', string='FBA Removal Return Address', check_company=True,
+        domain="[('active', '=', True), ('company_id', 'in', [company_id, False])]",
+        help="Dedicated destination for return-to-address removals. It is never inferred from Ship-From.",
+    )
+    return_stock_policy = fields.Selection([
+        ('informational', 'Informational Only'),
+        ('event_moves', 'Create Moves from Return Events'),
+        ('audit_only', 'Reconcile through Inventory Audit Only'),
+    ], default='informational', required=True)
+    adjustment_stock_policy = fields.Selection([
+        ('informational', 'Informational Only'),
+        ('event_moves', 'Create Moves from Trusted Events'),
+        ('audit_only', 'Reconcile through Inventory Audit Only'),
+    ], default='informational', required=True)
+    last_fba_return_sync_at = fields.Datetime(readonly=True)
+    last_fba_removal_sync_at = fields.Datetime(readonly=True)
+    last_fba_adjustment_sync_at = fields.Datetime(readonly=True)
+    last_fba_reimbursement_sync_at = fields.Datetime(readonly=True)
 
     # Defaults
     default_currency_id = fields.Many2one('res.currency', string='Default Currency')
@@ -353,6 +405,10 @@ class AmazonInstance(models.Model):
         'fba_sellable_location_id',
         'fba_reserved_location_id',
         'fba_unsellable_location_id',
+        'fba_return_source_location_id',
+        'fba_removal_transit_location_id',
+        'fba_disposal_location_id',
+        'fba_removal_return_partner_id',
     )
     def _check_fba_stock_configuration(self):
         for instance in self:
@@ -366,6 +422,14 @@ class AmazonInstance(models.Model):
                     raise ValidationError(_(
                         "The FBA Ship-From Address must belong to the Amazon instance "
                         "company or be a shared contact."
+                    ))
+            removal_partner = instance.fba_removal_return_partner_id
+            if removal_partner:
+                if not removal_partner.active:
+                    raise ValidationError(_("The FBA Removal Return Address must be active."))
+                if removal_partner.company_id and removal_partner.company_id != company:
+                    raise ValidationError(_(
+                        "The FBA Removal Return Address must belong to the instance company or be shared."
                     ))
             if warehouse:
                 if not company or warehouse.company_id != company:
@@ -439,12 +503,12 @@ class AmazonInstance(models.Model):
                             "%s must be below the configured FBA warehouse Stock location.", label
                         ))
                 elif (
-                    role == 'transit'
+                    role in {'transit', 'return_source', 'removal_transit', 'disposal'}
                     and warehouse
                     and location._child_of(warehouse.lot_stock_id)
                 ):
                     raise ValidationError(_(
-                        "The FBA Transit Location cannot be inside the FBA warehouse Stock hierarchy."
+                        "%s cannot be inside the FBA warehouse Stock hierarchy.", label
                     ))
 
                 if role != 'source' and (
@@ -1961,66 +2025,31 @@ class AmazonInstance(models.Model):
     # ══════════════════════════════════════════════════
 
     def _submit_removal_order(self, removal_order):
-        _logger.info("Removal order submission to Amazon: %s (via Feeds API)", removal_order.name)
-        removal_order.state = 'submitted'
+        """Backward-compatible entry point: queue the real feed workflow."""
+        removal_order.ensure_one()
+        removal_order._validate_submission()
+        job = self.env['amazon.phase7.job'].enqueue(
+            self, 'removal_submit', source=removal_order,
+        )
+        removal_order.state = 'queued'
+        return job
 
     def _check_removal_order_status(self, removal_order):
+        """Backward-compatible entry point: queue both official detail reports."""
         self.ensure_one()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-        rows = self._api_call_safe(api.fetch_removal_report, self, access_token, error_msg="Failed to fetch removal report")
-        for row in rows:
-            rid = row.get('order-id', '')
-            if rid == removal_order.removal_order_id:
-                status = row.get('order-status', '')
-                if status.lower() == 'completed':
-                    removal_order.state = 'completed'
-                elif status.lower() in ('pending', 'processing'):
-                    removal_order.state = 'processing'
+        return self.env['amazon.phase7.job'].enqueue(
+            self, 'removal_status', source=removal_order,
+        )
 
     def action_import_removal_orders(self):
-        """Import removal orders from Amazon report."""
+        """Queue authoritative removal-order and shipment-detail reports."""
         self.ensure_one()
         self._check_required_fields()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        try:
-            rows = self._api_call_safe(api.fetch_removal_report, self, access_token, error_msg="Failed to fetch removal report")
-        except UserError as exc:
-            msg = str(exc.args[0] if exc.args else exc)
-            if 'CANCELLED' in msg:
-                return self._notify("Removal Orders", "No removal order data available. This account has no FBA removal orders.", 'warning')
-            raise
-        imported = 0
-        for row in rows:
-            rid = row.get('order-id', '')
-            if not rid:
-                continue
-            existing = self.env['amazon.removal.order'].search([
-                ('removal_order_id', '=', rid), ('instance_id', '=', self.id)
-            ], limit=1)
-            if existing:
-                continue
-            order_type = 'Disposal' if 'disposal' in (row.get('order-type', '')).lower() else 'Return'
-            rec = self.env['amazon.removal.order'].create({
-                'instance_id': self.id,
-                'removal_order_id': rid,
-                'order_type': order_type,
-                'state': 'completed' if row.get('order-status', '').lower() == 'completed' else 'processing',
-            })
-            sku = row.get('sku', '')
-            if sku:
-                self.env['amazon.removal.order.line'].create({
-                    'order_id': rec.id,
-                    'sku': sku,
-                    'fnsku': row.get('fnsku', ''),
-                    'requested_quantity': float(row.get('requested-quantity', 0) or 0),
-                    'shipped_quantity': float(row.get('shipped-quantity', 0) or 0),
-                    'cancelled_quantity': float(row.get('cancelled-quantity', 0) or 0),
-                })
-            imported += 1
-        return self._notify("Removal Orders", "%d removal order(s) imported." % imported)
+        today = fields.Date.today()
+        job = self.env['amazon.phase7.job'].enqueue(
+            self, 'removal_status', date_from=today - timedelta(days=30), date_to=today,
+        )
+        return self._notify(_("Removal Orders"), _("Import job %s was queued.", job.display_name))
 
     # ══════════════════════════════════════════════════
     # Inbound Shipments

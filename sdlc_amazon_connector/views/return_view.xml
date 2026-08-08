@@ -1,7 +1,12 @@
 <odoo>
     <record id="amazon_return_action" model="ir.actions.act_window">
-        <field name="name">Return Reports</field>
+        <field name="name">Customer Return Imports</field>
         <field name="res_model">amazon.return.report</field>
+        <field name="view_mode">list,form</field>
+    </record>
+    <record id="amazon_customer_return_action" model="ir.actions.act_window">
+        <field name="name">Customer Returns</field>
+        <field name="res_model">amazon.return.report.line</field>
         <field name="view_mode">list,form</field>
     </record>
 
@@ -9,12 +14,9 @@
         <field name="name">amazon.return.report.list</field>
         <field name="model">amazon.return.report</field>
         <field name="arch" type="xml">
-            <list string="Return Reports">
-                <field name="name"/>
-                <field name="report_date"/>
-                <field name="line_count"/>
-                <field name="state"/>
-                <field name="instance_id"/>
+            <list string="Customer Return Imports" decoration-danger="state == 'failed'">
+                <field name="name"/><field name="report_date"/><field name="line_count"/>
+                <field name="state"/><field name="instance_id"/><field name="company_id" groups="base.group_multi_company"/>
             </list>
         </field>
     </record>
@@ -23,33 +25,71 @@
         <field name="name">amazon.return.report.form</field>
         <field name="model">amazon.return.report</field>
         <field name="arch" type="xml">
-            <form string="Return Report">
+            <form string="Customer Return Import">
                 <header>
-                    <button name="action_download_report" type="object" string="Download Report" class="btn-primary" invisible="state != 'draft'"/>
-                    <button name="action_process_returns" type="object" string="Process Returns" invisible="state != 'downloaded'"/>
+                    <button name="action_download_report" type="object" string="Queue Import" class="btn-primary" invisible="state not in ('draft', 'failed')" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_process_returns" type="object" string="Classify Returns" invisible="state not in ('downloaded', 'processed')" groups="sdlc_amazon_connector.group_amazon_manager"/>
                     <field name="state" widget="statusbar"/>
                 </header>
                 <sheet>
                     <group>
-                        <field name="name"/>
-                        <field name="instance_id"/>
-                        <field name="report_date"/>
+                        <group><field name="name"/><field name="instance_id"/><field name="company_id" groups="base.group_multi_company"/></group>
+                        <group><field name="report_date"/><field name="amazon_report_id" readonly="1"/><field name="imported_at"/></group>
                     </group>
-                    <field name="line_ids">
+                    <field name="last_error" invisible="not last_error"/>
+                    <field name="line_ids" readonly="1">
                         <list>
-                            <field name="amazon_order_id"/>
-                            <field name="sku"/>
-                            <field name="asin"/>
-                            <field name="product_name"/>
-                            <field name="quantity"/>
-                            <field name="return_date"/>
-                            <field name="return_reason"/>
-                            <field name="status"/>
-                            <field name="state"/>
-                            <field name="credit_note_id"/>
+                            <field name="return_date"/><field name="amazon_order_id"/><field name="sku"/>
+                            <field name="fnsku"/><field name="quantity"/><field name="detailed_disposition"/>
+                            <field name="operational_disposition"/><field name="stock_action_state"/>
+                            <field name="manual_review_required"/>
                         </list>
                     </field>
                 </sheet>
+                <chatter/>
+            </form>
+        </field>
+    </record>
+
+    <record id="amazon_customer_return_list" model="ir.ui.view">
+        <field name="name">amazon.return.report.line.list</field>
+        <field name="model">amazon.return.report.line</field>
+        <field name="arch" type="xml">
+            <list string="FBA Customer Returns" decoration-warning="manual_review_required">
+                <field name="return_date"/><field name="amazon_order_id"/><field name="sku"/>
+                <field name="fnsku"/><field name="quantity"/><field name="detailed_disposition"/>
+                <field name="return_reason"/><field name="status"/><field name="operational_disposition"/>
+                <field name="stock_action_state"/><field name="instance_id"/>
+            </list>
+        </field>
+    </record>
+    <record id="amazon_customer_return_form" model="ir.ui.view">
+        <field name="name">amazon.return.report.line.form</field>
+        <field name="model">amazon.return.report.line</field>
+        <field name="arch" type="xml">
+            <form string="FBA Customer Return">
+                <header><field name="state" widget="statusbar"/></header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button class="oe_stat_button" type="object" name="action_view_amazon_order" icon="fa-shopping-cart" invisible="not amazon_order_count"><field name="amazon_order_count" widget="statinfo" string="Amazon Order"/></button>
+                        <button class="oe_stat_button" type="object" name="action_view_sale_order" icon="fa-file-text-o" invisible="not sale_order_count"><field name="sale_order_count" widget="statinfo" string="Sale Order"/></button>
+                        <button class="oe_stat_button" type="object" name="action_view_stock_move" icon="fa-exchange" invisible="not stock_move_count"><field name="stock_move_count" widget="statinfo" string="Stock Move"/></button>
+                        <button class="oe_stat_button" type="object" name="action_view_reimbursements" icon="fa-money" invisible="not reimbursement_count"><field name="reimbursement_count" widget="statinfo" string="Reimbursements"/></button>
+                        <button class="oe_stat_button" type="object" name="action_view_sync_logs" icon="fa-history" invisible="not sync_log_count"><field name="sync_log_count" widget="statinfo" string="Sync Logs"/></button>
+                    </div>
+                    <group>
+                        <group><field name="instance_id"/><field name="amazon_order_id"/><field name="amazon_order_item_id"/><field name="order_id"/><field name="linked_sale_order_id"/></group>
+                        <group><field name="return_date"/><field name="status"/><field name="detailed_disposition"/><field name="operational_disposition"/><field name="return_reason"/></group>
+                    </group>
+                    <group>
+                        <group><field name="sku"/><field name="fnsku"/><field name="asin"/><field name="amazon_product_id"/><field name="odoo_product_id"/><field name="quantity"/></group>
+                        <group><field name="fulfillment_center_id"/><field name="license_plate_number"/><field name="stock_action_state"/><field name="linked_stock_move_id"/><field name="inventory_reflected"/><field name="manual_review_required"/></group>
+                    </group>
+                    <field name="review_reason" invisible="not review_reason"/>
+                    <field name="customer_comments" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <field name="raw_response" widget="text" groups="sdlc_amazon_connector.group_amazon_technical_admin"/>
+                </sheet>
+                <chatter/>
             </form>
         </field>
     </record>

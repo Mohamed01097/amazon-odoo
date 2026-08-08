@@ -1,0 +1,78 @@
+<odoo>
+    <record id="amazon_fba_inventory_adjustment_action" model="ir.actions.act_window">
+        <field name="name">Inventory Adjustments</field><field name="res_model">amazon.fba.inventory.adjustment</field><field name="view_mode">list,form</field>
+    </record>
+    <record id="amazon_fba_reimbursement_action" model="ir.actions.act_window">
+        <field name="name">Reimbursements</field><field name="res_model">amazon.fba.reimbursement</field><field name="view_mode">list,form</field>
+    </record>
+    <record id="amazon_phase7_job_action" model="ir.actions.act_window">
+        <field name="name">Returns &amp; Removals Jobs</field><field name="res_model">amazon.phase7.job</field><field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_fba_inventory_adjustment_list" model="ir.ui.view">
+        <field name="name">amazon.fba.inventory.adjustment.list</field><field name="model">amazon.fba.inventory.adjustment</field>
+        <field name="arch" type="xml">
+            <list decoration-warning="manual_review_required">
+                <field name="event_date"/><field name="reference_id"/><field name="sku"/><field name="fnsku"/>
+                <field name="quantity"/><field name="reason_code"/><field name="event_category"/>
+                <field name="disposition"/><field name="stock_action_state"/><field name="state"/><field name="instance_id"/>
+            </list>
+        </field>
+    </record>
+    <record id="amazon_fba_inventory_adjustment_form" model="ir.ui.view">
+        <field name="name">amazon.fba.inventory.adjustment.form</field><field name="model">amazon.fba.inventory.adjustment</field>
+        <field name="arch" type="xml">
+            <form><header><field name="state" widget="statusbar"/></header><sheet>
+                <div class="oe_button_box" name="button_box">
+                    <button class="oe_stat_button" type="object" name="action_view_stock_move" icon="fa-exchange" invisible="not stock_move_count"><field name="stock_move_count" widget="statinfo" string="Stock Move"/></button>
+                    <button class="oe_stat_button" type="object" name="action_view_reimbursements" icon="fa-money" invisible="not reimbursement_count"><field name="reimbursement_count" widget="statinfo" string="Reimbursements"/></button>
+                    <button class="oe_stat_button" type="object" name="action_view_sync_logs" icon="fa-history" invisible="not sync_log_count"><field name="sync_log_count" widget="statinfo" string="Sync Logs"/></button>
+                </div>
+                <widget name="web_ribbon" title="Manual Review" bg_color="text-bg-warning" invisible="not manual_review_required"/>
+                <group><group><field name="instance_id"/><field name="event_date"/><field name="reference_id"/><field name="transaction_event_id"/><field name="reason_code"/><field name="event_category"/></group><group><field name="sku"/><field name="fnsku"/><field name="asin"/><field name="amazon_product_id"/><field name="odoo_product_id"/><field name="quantity"/><field name="disposition"/></group></group>
+                <group><field name="reconciled_quantity"/><field name="unreconciled_quantity"/><field name="inventory_reflected"/><field name="stock_action_state"/><field name="linked_stock_move_id"/><field name="reversal_of_adjustment_id"/><field name="linked_reimbursement_id"/></group>
+                <field name="review_reason" invisible="not review_reason"/><field name="raw_report_data" groups="sdlc_amazon_connector.group_amazon_technical_admin"/>
+            </sheet><chatter/></form>
+        </field>
+    </record>
+
+    <record id="amazon_fba_reimbursement_list" model="ir.ui.view">
+        <field name="name">amazon.fba.reimbursement.list</field><field name="model">amazon.fba.reimbursement</field>
+        <field name="arch" type="xml">
+            <list decoration-warning="review_state == 'manual_review'">
+                <field name="approval_date"/><field name="reimbursement_id"/><field name="reimbursement_reason"/>
+                <field name="reimbursement_classification"/><field name="amazon_order_id"/><field name="sku"/>
+                <field name="quantity_reimbursed_cash"/><field name="quantity_reimbursed_inventory"/>
+                <field name="amount_total"/><field name="currency_id"/><field name="review_state"/><field name="instance_id"/>
+            </list>
+        </field>
+    </record>
+    <record id="amazon_fba_reimbursement_form" model="ir.ui.view">
+        <field name="name">amazon.fba.reimbursement.form</field><field name="model">amazon.fba.reimbursement</field>
+        <field name="arch" type="xml">
+            <form><header><button name="action_match" type="object" string="Match Operational Event" class="btn-primary" invisible="review_state == 'matched'" groups="sdlc_amazon_connector.group_amazon_manager"/><field name="review_state" widget="statusbar"/></header><sheet>
+                <div class="oe_button_box" name="button_box">
+                    <button class="oe_stat_button" type="object" name="action_view_amazon_order" icon="fa-shopping-cart" invisible="not amazon_order_count"><field name="amazon_order_count" widget="statinfo" string="Amazon Order"/></button>
+                    <button class="oe_stat_button" type="object" name="action_view_sale_order" icon="fa-file-text-o" invisible="not sale_order_count"><field name="sale_order_count" widget="statinfo" string="Sale Order"/></button>
+                    <button class="oe_stat_button" type="object" name="action_view_return" icon="fa-undo" invisible="not return_count"><field name="return_count" widget="statinfo" string="Customer Return"/></button>
+                    <button class="oe_stat_button" type="object" name="action_view_adjustment" icon="fa-balance-scale" invisible="not adjustment_count"><field name="adjustment_count" widget="statinfo" string="Adjustment"/></button>
+                    <button class="oe_stat_button" type="object" name="action_view_removal_order" icon="fa-truck" invisible="not removal_order_count"><field name="removal_order_count" widget="statinfo" string="Removal Order"/></button>
+                    <button class="oe_stat_button" type="object" name="action_view_sync_logs" icon="fa-history" invisible="not sync_log_count"><field name="sync_log_count" widget="statinfo" string="Sync Logs"/></button>
+                </div>
+                <group><group><field name="instance_id"/><field name="reimbursement_id"/><field name="case_id"/><field name="approval_date"/><field name="reimbursement_reason"/><field name="reimbursement_classification"/></group><group><field name="amazon_order_id"/><field name="amazon_order_item_id"/><field name="sku"/><field name="fnsku"/><field name="asin"/><field name="odoo_product_id"/></group></group>
+                <group string="Value (stored for Phase 8 only)"><field name="quantity_reimbursed_cash"/><field name="quantity_reimbursed_inventory"/><field name="quantity_reimbursed_total"/><field name="amount_per_unit"/><field name="amount_total"/><field name="currency_id"/><field name="currency_code"/><field name="accounting_state"/></group>
+                <group string="Matching"><field name="original_reimbursement_id"/><field name="original_reimbursement_type"/><field name="linked_return_id"/><field name="linked_adjustment_id"/><field name="linked_removal_order_id"/><field name="linked_settlement_id"/><field name="match_method"/><field name="review_note"/></group>
+                <field name="raw_report_data" groups="sdlc_amazon_connector.group_amazon_technical_admin"/>
+            </sheet><chatter/></form>
+        </field>
+    </record>
+
+    <record id="amazon_phase7_job_list" model="ir.ui.view">
+        <field name="name">amazon.phase7.job.list</field><field name="model">amazon.phase7.job</field>
+        <field name="arch" type="xml"><list decoration-danger="state == 'failed'"><field name="name"/><field name="operation_type"/><field name="stage"/><field name="state"/><field name="total_found"/><field name="total_processed"/><field name="total_failed"/><field name="retry_count"/><field name="next_run_at"/><field name="instance_id"/></list></field>
+    </record>
+    <record id="amazon_phase7_job_form" model="ir.ui.view">
+        <field name="name">amazon.phase7.job.form</field><field name="model">amazon.phase7.job</field>
+        <field name="arch" type="xml"><form><header><field name="state" widget="statusbar"/></header><sheet><group><group><field name="name"/><field name="instance_id"/><field name="operation_type"/><field name="stage"/><field name="date_from"/><field name="date_to"/></group><group><field name="amazon_report_id"/><field name="feed_id"/><field name="retry_count"/><field name="next_run_at"/><field name="started_at"/><field name="finished_at"/></group></group><group><field name="total_found"/><field name="total_processed"/><field name="total_failed"/><field name="last_error_code"/></group><field name="last_error_message"/><field name="raw_document" groups="sdlc_amazon_connector.group_amazon_technical_admin"/></sheet><chatter/></form></field>
+    </record>
+</odoo>

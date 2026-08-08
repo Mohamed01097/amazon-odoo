@@ -207,4 +207,53 @@
         <field name="domain_force">[('company_id', 'in', company_ids)]</field>
         <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
     </record>
+
+    <record id="rule_amazon_return_report_company" model="ir.rule">
+        <field name="name">Amazon customer return imports by company</field>
+        <field name="model_id" ref="model_amazon_return_report"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_return_line_company" model="ir.rule">
+        <field name="name">Amazon customer returns by company</field>
+        <field name="model_id" ref="model_amazon_return_report_line"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_removal_order_company" model="ir.rule">
+        <field name="name">Amazon removal orders by company</field>
+        <field name="model_id" ref="model_amazon_removal_order"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_removal_line_company" model="ir.rule">
+        <field name="name">Amazon removal lines by company</field>
+        <field name="model_id" ref="model_amazon_removal_order_line"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_removal_shipment_company" model="ir.rule">
+        <field name="name">Amazon removal shipments by company</field>
+        <field name="model_id" ref="model_amazon_removal_shipment"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_adjustment_company" model="ir.rule">
+        <field name="name">Amazon inventory adjustments by company</field>
+        <field name="model_id" ref="model_amazon_fba_inventory_adjustment"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_reimbursement_company" model="ir.rule">
+        <field name="name">Amazon reimbursements by company</field>
+        <field name="model_id" ref="model_amazon_fba_reimbursement"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_phase7_job_company" model="ir.rule">
+        <field name="name">Amazon Phase 7 jobs by company</field>
+        <field name="model_id" ref="model_amazon_phase7_job"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
 </odoo>

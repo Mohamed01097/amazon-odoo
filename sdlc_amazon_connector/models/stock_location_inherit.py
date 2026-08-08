@@ -11,6 +11,9 @@ class StockLocation(models.Model):
             ('sellable', 'FBA Sellable'),
             ('reserved', 'FBA Reserved'),
             ('unsellable', 'FBA Unsellable'),
+            ('return_source', 'FBA Customer Return Source'),
+            ('removal_transit', 'FBA Removal Transit'),
+            ('disposal', 'FBA Disposal / Inventory Loss'),
         ],
         string='Amazon FBA Location Type',
         copy=False,
@@ -46,6 +49,9 @@ class StockLocation(models.Model):
             'sellable': 'internal',
             'reserved': 'internal',
             'unsellable': 'internal',
+            'return_source': 'customer',
+            'removal_transit': 'transit',
+            'disposal': 'inventory',
         }
         for location in self:
             role = location.amazon_fba_location_type
@@ -81,5 +87,5 @@ class StockLocation(models.Model):
                     ))
             elif warehouse and location._child_of(warehouse.lot_stock_id):
                 raise ValidationError(_(
-                    "The Amazon FBA transit location cannot be inside the FBA warehouse Stock hierarchy."
+                    "Amazon FBA virtual/transit locations cannot be inside the FBA warehouse Stock hierarchy."
                 ))

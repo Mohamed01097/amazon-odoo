@@ -44,6 +44,10 @@
                 <field name="waiting_retry"/>
                 <field name="inbound_blocked"/>
                 <field name="inventory_mismatches"/>
+                <field name="returns_awaiting_classification"/>
+                <field name="removal_orders_awaiting_receipt"/>
+                <field name="unmatched_reimbursements"/>
+                <field name="failed_phase7_jobs"/>
                 <field name="api_errors_24h"/>
                 <field name="rate_limits_24h"/>
                 <field name="last_successful_sync_at"/>
@@ -116,6 +120,19 @@
                         <field name="inbound_in_progress"/>
                         <field name="critical_inventory_differences"/>
                         <field name="inventory_mismatches"/>
+                    </group>
+                    <group string="Returns, Removals and Reimbursements" col="4">
+                        <field name="returns_awaiting_classification"/>
+                        <field name="sellable_returns"/>
+                        <field name="unsellable_returns"/>
+                        <field name="removal_orders_requested"/>
+                        <field name="removal_orders_in_transit"/>
+                        <field name="removal_orders_awaiting_receipt"/>
+                        <field name="disposal_orders_pending"/>
+                        <field name="lost_inventory_events"/>
+                        <field name="damaged_inventory_events"/>
+                        <field name="unmatched_reimbursements"/>
+                        <field name="failed_phase7_jobs"/>
                     </group>
                     <notebook>
                         <page string="Rate-Limit Operations">

@@ -130,12 +130,12 @@
     </record>
 
     <record id="cron_amazon_import_removal" model="ir.cron">
-        <field name="name">Amazon: Import Removal Orders</field>
+        <field name="name">Amazon: Refresh Removal Status</field>
         <field name="model_id" ref="model_amazon_instance"/>
         <field name="state">code</field>
-        <field name="code">model.cron_import_removal_orders()</field>
-        <field name="interval_number">1</field>
-        <field name="interval_type">days</field>
+        <field name="code">model.cron_refresh_fba_removal_status()</field>
+        <field name="interval_number">4</field>
+        <field name="interval_type">hours</field>
         <field name="active">False</field>
     </record>
 
@@ -295,6 +295,49 @@ for inst in env['amazon.instance'].search([]):
         <field name="interval_type">days</field>
         <field name="active">True</field>
         <field name="priority">16</field>
+    </record>
+
+    <record id="cron_amazon_process_phase7_jobs" model="ir.cron">
+        <field name="name">Amazon: Process Removal Orders and FBA Events</field>
+        <field name="model_id" ref="model_amazon_phase7_job"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_process_jobs()</field>
+        <field name="interval_number">5</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+        <field name="priority">8</field>
+    </record>
+    <record id="cron_amazon_import_fba_customer_returns" model="ir.cron">
+        <field name="name">Amazon: Import FBA Customer Returns</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_import_fba_customer_returns()</field>
+        <field name="interval_number">1</field><field name="interval_type">days</field>
+        <field name="active">False</field><field name="priority">9</field>
+    </record>
+    <record id="cron_amazon_import_fba_inventory_adjustments" model="ir.cron">
+        <field name="name">Amazon: Import FBA Inventory Adjustments</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_import_fba_inventory_adjustments()</field>
+        <field name="interval_number">1</field><field name="interval_type">days</field>
+        <field name="active">False</field><field name="priority">10</field>
+    </record>
+    <record id="cron_amazon_import_fba_reimbursements" model="ir.cron">
+        <field name="name">Amazon: Import FBA Reimbursements</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_import_fba_reimbursements()</field>
+        <field name="interval_number">1</field><field name="interval_type">days</field>
+        <field name="active">False</field><field name="priority">11</field>
+    </record>
+    <record id="cron_amazon_match_fba_reimbursements" model="ir.cron">
+        <field name="name">Amazon: Match FBA Reimbursements</field>
+        <field name="model_id" ref="model_amazon_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_match_fba_reimbursements()</field>
+        <field name="interval_number">4</field><field name="interval_type">hours</field>
+        <field name="active">True</field><field name="priority">12</field>
     </record>
 
 </odoo>

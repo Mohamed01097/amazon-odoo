@@ -43,6 +43,9 @@
                     <button name="action_import_settlement_reports" type="object" string="Import Settlements"/>
                     <button name="action_check_canceled_orders" type="object" string="Check Cancellations"/>
                     <button name="action_import_removal_orders" type="object" string="Import Removals"/>
+                    <button name="action_import_fba_customer_returns" type="object" string="Import FBA Returns"/>
+                    <button name="action_import_fba_inventory_adjustments" type="object" string="Import Adjustments"/>
+                    <button name="action_import_fba_reimbursements" type="object" string="Import Reimbursements"/>
                 </header>
                 <sheet>
                     <div class="oe_button_box" name="button_box">
@@ -98,6 +101,12 @@
                             <field name="fba_sellable_location_id"/>
                             <field name="fba_reserved_location_id"/>
                             <field name="fba_unsellable_location_id"/>
+                            <field name="fba_return_source_location_id"/>
+                            <field name="fba_removal_transit_location_id"/>
+                            <field name="fba_disposal_location_id"/>
+                            <field name="fba_removal_return_partner_id" context="{'default_company_id': company_id}"/>
+                            <field name="return_stock_policy"/>
+                            <field name="adjustment_stock_policy"/>
                             <field name="inventory_reconciliation_enabled"/>
                             <field name="last_inventory_audit_at"/>
                         </group>
@@ -109,6 +118,8 @@
                                 <strong>Sellable</strong> is inventory Amazon has received and can sell.<br/>
                                 <strong>Reserved</strong> is inventory Amazon has reserved.<br/>
                                 <strong>Unsellable</strong> is inventory Amazon holds but cannot sell.
+                                <br/><strong>Removal Transit</strong> holds dispatched removals until physical receipt.
+                                <br/><strong>Disposal/Loss</strong> is the auditable destination for confirmed loss events.
                             </div>
                             <button name="action_create_fba_stock_structure"
                                     type="object"
@@ -133,6 +144,10 @@
                             <field name="last_product_sync"/>
                             <field name="last_order_sync"/>
                             <field name="last_stock_sync"/>
+                            <field name="last_fba_return_sync_at"/>
+                            <field name="last_fba_removal_sync_at"/>
+                            <field name="last_fba_adjustment_sync_at"/>
+                            <field name="last_fba_reimbursement_sync_at"/>
                         </group>
                     </group>
 

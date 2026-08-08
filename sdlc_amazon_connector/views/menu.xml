@@ -14,6 +14,8 @@
     <menuitem id="amazon_retry_center_menu" parent="amazon_operations_menu"
               name="Retry Center" action="amazon_retry_center_action" sequence="30"
               groups="sdlc_amazon_connector.group_amazon_manager"/>
+    <menuitem id="amazon_phase7_job_menu" parent="amazon_operations_menu"
+              name="Returns &amp; Removals Jobs" action="amazon_phase7_job_action" sequence="35"/>
     <menuitem id="amazon_operations_api_logs_menu" parent="amazon_operations_menu"
               name="API Telemetry" action="amazon_sync_log_action" sequence="40"/>
     <menuitem id="amazon_operations_rate_metrics_menu" parent="amazon_operations_menu"
@@ -55,6 +57,8 @@
     <menuitem id="amazon_inventory_health_menu" parent="amazon_fba_menu" name="Inventory Health" action="amazon_inventory_reconciliation_run_action" sequence="20"/>
     <menuitem id="amazon_inventory_difference_menu" parent="amazon_fba_menu" name="Inventory Differences" action="amazon_inventory_reconciliation_action" sequence="21"/>
     <menuitem id="amazon_removal_order_menu" parent="amazon_fba_menu" name="Removal Orders" action="amazon_removal_order_action" sequence="30"/>
+    <menuitem id="amazon_removal_shipment_menu" parent="amazon_fba_menu" name="Removal Shipments" action="amazon_removal_shipment_action" sequence="31"/>
+    <menuitem id="amazon_disposal_order_menu" parent="amazon_fba_menu" name="Disposal Orders" action="amazon_disposal_order_action" sequence="32"/>
     <menuitem id="amazon_fba_inventory_menu" parent="amazon_fba_menu" name="Legacy Inventory Reports" action="amazon_fba_inventory_action" sequence="40"/>
     <menuitem id="amazon_outbound_order_menu" parent="amazon_fba_menu" name="MCF Outbound Orders" action="amazon_outbound_order_action" sequence="50"/>
 
@@ -79,7 +83,10 @@
 
     <!-- Returns &amp; Refunds -->
     <menuitem id="amazon_returns_menu" parent="amazon_root" name="Returns &amp; Refunds" sequence="40"/>
-    <menuitem id="amazon_return_report_menu" parent="amazon_returns_menu" name="Return Reports" action="amazon_return_action" sequence="10"/>
+    <menuitem id="amazon_customer_return_menu" parent="amazon_returns_menu" name="Customer Returns" action="amazon_customer_return_action" sequence="10"/>
+    <menuitem id="amazon_return_report_menu" parent="amazon_returns_menu" name="Return Import Runs" action="amazon_return_action" sequence="11"/>
+    <menuitem id="amazon_fba_inventory_adjustment_menu" parent="amazon_returns_menu" name="Inventory Adjustments" action="amazon_fba_inventory_adjustment_action" sequence="20"/>
+    <menuitem id="amazon_fba_reimbursement_menu" parent="amazon_returns_menu" name="Reimbursements" action="amazon_fba_reimbursement_action" sequence="30"/>
 
     <!-- Accounting -->
     <menuitem id="amazon_accounting_menu" parent="amazon_root" name="Accounting" sequence="50"/>

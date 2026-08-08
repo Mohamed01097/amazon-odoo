@@ -1,61 +1,85 @@
 <odoo>
     <record id="amazon_removal_order_action" model="ir.actions.act_window">
-        <field name="name">Removal Orders</field>
-        <field name="res_model">amazon.removal.order</field>
-        <field name="view_mode">list,form</field>
+        <field name="name">Removal Orders</field><field name="res_model">amazon.removal.order</field><field name="view_mode">list,form</field>
+    </record>
+    <record id="amazon_disposal_order_action" model="ir.actions.act_window">
+        <field name="name">Disposal Orders</field><field name="res_model">amazon.removal.order</field><field name="view_mode">list,form</field>
+        <field name="domain">[('removal_type', '=', 'disposal')]</field><field name="context">{'default_removal_type': 'disposal'}</field>
+    </record>
+    <record id="amazon_removal_shipment_action" model="ir.actions.act_window">
+        <field name="name">Removal Shipments</field><field name="res_model">amazon.removal.shipment</field><field name="view_mode">list,form</field>
     </record>
 
     <record id="amazon_removal_order_list" model="ir.ui.view">
-        <field name="name">amazon.removal.order.list</field>
-        <field name="model">amazon.removal.order</field>
+        <field name="name">amazon.removal.order.list</field><field name="model">amazon.removal.order</field>
         <field name="arch" type="xml">
-            <list string="Removal Orders">
-                <field name="name"/>
-                <field name="removal_order_id"/>
-                <field name="order_type"/>
-                <field name="state"/>
-                <field name="line_count"/>
-                <field name="instance_id"/>
+            <list decoration-danger="state == 'failed'" decoration-warning="manual_review_required">
+                <field name="name"/><field name="amazon_removal_order_id"/><field name="removal_type"/>
+                <field name="amazon_status"/><field name="state"/><field name="total_requested_quantity"/>
+                <field name="total_shipped_quantity"/><field name="total_disposed_quantity"/>
+                <field name="total_received_quantity"/><field name="tracking_number"/><field name="instance_id"/>
             </list>
         </field>
     </record>
 
     <record id="amazon_removal_order_form" model="ir.ui.view">
-        <field name="name">amazon.removal.order.form</field>
-        <field name="model">amazon.removal.order</field>
+        <field name="name">amazon.removal.order.form</field><field name="model">amazon.removal.order</field>
         <field name="arch" type="xml">
-            <form string="Removal Order">
+            <form string="FBA Removal Order">
                 <header>
-                    <button name="action_submit_to_amazon" type="object" string="Submit to Amazon" class="btn-primary" invisible="state != 'draft'"/>
-                    <button name="action_check_status" type="object" string="Check Status" invisible="state in ('draft','completed','cancelled')"/>
-                    <button name="action_cancel" type="object" string="Cancel" invisible="state in ('completed','cancelled')"/>
+                    <button name="action_submit_to_amazon" type="object" string="Submit Feed" class="btn-primary" invisible="state not in ('draft', 'failed')" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_check_status" type="object" string="Queue Status Refresh" invisible="state in ('draft', 'queued', 'cancelled')" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_cancel" type="object" string="Cancel Draft" invisible="state != 'draft'" groups="sdlc_amazon_connector.group_amazon_manager"/>
                     <field name="state" widget="statusbar"/>
                 </header>
                 <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button class="oe_stat_button" type="object" name="action_view_shipments" icon="fa-truck"><field name="shipment_count" widget="statinfo" string="Shipments"/></button>
+                        <button class="oe_stat_button" type="object" name="action_view_pickings" icon="fa-exchange"><field name="picking_count" widget="statinfo" string="Pickings"/></button>
+                        <button class="oe_stat_button" type="object" name="action_view_stock_moves" icon="fa-arrows" invisible="not stock_move_count"><field name="stock_move_count" widget="statinfo" string="Stock Moves"/></button>
+                        <button class="oe_stat_button" type="object" name="action_view_reimbursements" icon="fa-money"><field name="reimbursement_count" widget="statinfo" string="Reimbursements"/></button>
+                        <button class="oe_stat_button" type="object" name="action_view_sync_logs" icon="fa-history" invisible="not sync_log_count"><field name="sync_log_count" widget="statinfo" string="Sync Logs"/></button>
+                    </div>
+                    <widget name="web_ribbon" title="Manual Review" bg_color="text-bg-warning" invisible="not manual_review_required"/>
                     <group>
-                        <group>
-                            <field name="name"/>
-                            <field name="instance_id"/>
-                            <field name="removal_order_id"/>
-                        </group>
-                        <group>
-                            <field name="order_type"/>
-                            <field name="ship_to_address" invisible="order_type != 'Return'"/>
-                        </group>
+                        <group><field name="name"/><field name="instance_id"/><field name="amazon_removal_order_id"/><field name="removal_type"/><field name="ship_to_partner_id" invisible="removal_type != 'return_to_address'"/><field name="shipping_notes"/></group>
+                        <group><field name="amazon_status"/><field name="previous_amazon_status"/><field name="requested_at"/><field name="completed_at"/><field name="last_synced_at"/><field name="stock_action_state"/></group>
                     </group>
-                    <field name="line_ids">
-                        <list editable="bottom">
-                            <field name="amazon_product_id"/>
-                            <field name="sku"/>
-                            <field name="fnsku"/>
-                            <field name="disposition"/>
-                            <field name="requested_quantity"/>
-                            <field name="shipped_quantity"/>
-                            <field name="cancelled_quantity"/>
-                        </list>
-                    </field>
+                    <group string="Amazon Feed">
+                        <group><field name="feed_document_id" readonly="1"/><field name="feed_id" readonly="1"/><field name="feed_processing_status" readonly="1"/></group>
+                        <group><field name="error_code" readonly="1"/><field name="error_message" readonly="1"/></group>
+                    </group>
+                    <group string="Shipment"><field name="carrier"/><field name="tracking_number"/><field name="shipment_date"/></group>
+                    <notebook>
+                        <page string="Lines">
+                            <field name="line_ids" readonly="state not in ('draft', 'failed')">
+                                <list editable="bottom">
+                                    <field name="amazon_product_id"/><field name="odoo_product_id"/>
+                                    <field name="sku"/><field name="fnsku"/><field name="disposition"/>
+                                    <field name="requested_quantity"/><field name="shipped_quantity"/>
+                                    <field name="cancelled_quantity"/><field name="disposed_quantity"/>
+                                    <field name="received_quantity"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Technical" groups="sdlc_amazon_connector.group_amazon_technical_admin"><field name="raw_response" widget="text"/></page>
+                    </notebook>
                 </sheet>
+                <chatter/>
             </form>
+        </field>
+    </record>
+
+    <record id="amazon_removal_shipment_list" model="ir.ui.view">
+        <field name="name">amazon.removal.shipment.list</field><field name="model">amazon.removal.shipment</field>
+        <field name="arch" type="xml">
+            <list><field name="removal_order_id"/><field name="shipment_date"/><field name="sku"/><field name="fnsku"/><field name="disposition"/><field name="shipped_quantity"/><field name="carrier"/><field name="tracking_number"/><field name="receipt_picking_id"/><field name="instance_id"/></list>
+        </field>
+    </record>
+    <record id="amazon_removal_shipment_form" model="ir.ui.view">
+        <field name="name">amazon.removal.shipment.form</field><field name="model">amazon.removal.shipment</field>
+        <field name="arch" type="xml">
+            <form><sheet><group><group><field name="order_id"/><field name="request_date"/><field name="shipment_date"/><field name="removal_order_type"/></group><group><field name="sku"/><field name="fnsku"/><field name="disposition"/><field name="shipped_quantity"/></group></group><group><field name="carrier"/><field name="tracking_number"/><field name="dispatch_move_id"/><field name="receipt_picking_id"/></group><field name="raw_response" groups="sdlc_amazon_connector.group_amazon_technical_admin"/></sheet><chatter/></form>
         </field>
     </record>
 </odoo>
