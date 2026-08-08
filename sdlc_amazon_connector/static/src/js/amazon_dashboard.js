@@ -214,8 +214,32 @@ class AmazonDashboard extends Component {
         this.state.optimizing = false;
     }
 
-    openOrders() { this.action.doAction("sdlc_amazon_connector.amazon_sale_order_action"); }
-    openProducts() { this.action.doAction("sdlc_amazon_connector.amazon_product_action"); }
+    openOrders() {
+        const domain = this.state.selectedInstance
+            ? [["instance_id", "=", this.state.selectedInstance]]
+            : [];
+        this.action.doAction({
+            type: "ir.actions.act_window",
+            name: "Amazon Orders",
+            res_model: "amazon.sale.order",
+            views: [[false, "list"], [false, "form"]],
+            domain,
+        });
+    }
+
+    openProducts() {
+        const domain = [["status", "=", "Active"]];
+        if (this.state.selectedInstance) {
+            domain.push(["instance_id", "=", this.state.selectedInstance]);
+        }
+        this.action.doAction({
+            type: "ir.actions.act_window",
+            name: "Active Amazon Products",
+            res_model: "amazon.product",
+            views: [[false, "list"], [false, "form"]],
+            domain,
+        });
+    }
     openAlerts() { this.action.doAction("sdlc_amazon_connector.amazon_alert_action"); }
     openDelivery() { this.action.doAction("sdlc_amazon_connector.amazon_delivery_all_action"); }
     openSyncLogs() { this.action.doAction("sdlc_amazon_connector.amazon_sync_report_action"); }
