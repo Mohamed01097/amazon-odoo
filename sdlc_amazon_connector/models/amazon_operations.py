@@ -1832,7 +1832,7 @@ class AmazonSmartAlertOperations(models.Model):
                         'critical_inventory_mismatch', '4_critical',
                         _('Critical FBA inventory mismatch: %s', line.sku),
                         _('Largest absolute difference is %s units.', maximum),
-                        _('Open the reconciliation line and review its suggested action; inventory is not adjusted automatically by monitoring.'),
+                        _('Open the reconciliation line and review the snapshot. Any stock transfer requires an explicit reviewed action and reason; monitoring never adjusts inventory.'),
                         source_model=line._name, source_id=line.id,
                         category='data',
                     )

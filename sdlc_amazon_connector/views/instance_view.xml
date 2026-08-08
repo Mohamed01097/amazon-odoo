@@ -36,7 +36,7 @@
                     <button name="action_import_orders" type="object" string="Import Orders"/>
                     <button name="action_sync_order_statuses" type="object" string="Sync Order Statuses"/>
                     <button name="action_export_stock" type="object" string="Export Stock"/>
-                    <button name="action_pull_stock" type="object" string="Run Inventory Audit"/>
+                    <button name="action_pull_stock" type="object" string="Reconcile FBA Inventory"/>
                     <button name="action_update_prices" type="object" string="Push Prices"/>
                     <button name="action_pull_prices" type="object" string="Pull Prices (Amazon→Odoo)"/>
                     <button name="action_export_all_products" type="object" string="Export Products"/>

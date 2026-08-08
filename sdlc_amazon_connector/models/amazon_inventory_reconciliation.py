@@ -1,6 +1,9 @@
 import json
 import logging
+import re
 from datetime import timedelta
+
+import requests
 
 from odoo import _, Command, api, fields, models
 from odoo.exceptions import AccessError, UserError, ValidationError
@@ -32,12 +35,12 @@ class AmazonInventoryReconciliationRun(models.Model):
         ('scheduled', 'Scheduled'),
     ], required=True, default='manual', readonly=True)
     mode = fields.Selection([
-        ('manual', 'Manual'),
-        ('automatic', 'Automatic'),
+        ('manual', 'Manual Review'),
+        ('automatic', 'Legacy Automatic (Disabled)'),
     ], required=True, default='manual', readonly=True,
        help=(
-           "Manual records suggestions only. Automatic may apply only exact, "
-           "quantity-balanced transfers between configured FBA locations."
+           "Inventory snapshots never change stock automatically. The legacy "
+           "automatic value is retained only for historical records."
        ))
     state = fields.Selection([
         ('queued', 'Queued'),
@@ -65,10 +68,19 @@ class AmazonInventoryReconciliationRun(models.Model):
         copy=False,
     )
     products_checked = fields.Integer(readonly=True)
+    amazon_records_read = fields.Integer(readonly=True)
+    page_count = fields.Integer(readonly=True)
     matched_count = fields.Integer(readonly=True)
+    issue_count = fields.Integer(readonly=True)
     mismatch_count = fields.Integer(readonly=True)
+    unmapped_count = fields.Integer(readonly=True)
+    not_returned_count = fields.Integer(readonly=True)
+    error_count = fields.Integer(readonly=True)
     critical_count = fields.Integer(readonly=True)
     pending_review_count = fields.Integer(readonly=True)
+    snapshot_complete = fields.Boolean(readonly=True, copy=False)
+    completed_at = fields.Datetime(readonly=True, copy=False)
+    retry_after_seconds = fields.Float(readonly=True, copy=False)
     transfer_count = fields.Integer(compute='_compute_transfer_count')
 
     _valid_retry_limits = models.Constraint(
@@ -83,11 +95,6 @@ class AmazonInventoryReconciliationRun(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        mode = self.env['ir.config_parameter'].sudo().get_param(
-            'amazon_connector.inventory_reconciliation_mode', 'manual',
-        )
-        if mode not in ('manual', 'automatic'):
-            mode = 'manual'
         for vals in vals_list:
             if vals.get('name', 'New') == 'New':
                 vals['name'] = (
@@ -95,7 +102,10 @@ class AmazonInventoryReconciliationRun(models.Model):
                         'amazon.inventory.reconciliation.run'
                     ) or 'New'
                 )
-            vals.setdefault('mode', mode)
+            # Reconciliation always starts in snapshot/manual-review mode.
+            # Keep the legacy selection value readable, but never create a new
+            # run that can apply stock automatically.
+            vals['mode'] = 'manual'
         return super().create(vals_list)
 
     def _lock_run(self):
@@ -106,6 +116,19 @@ class AmazonInventoryReconciliationRun(models.Model):
             [self.id],
         )
         self.invalidate_recordset()
+
+    def _lock_instance(self):
+        """Prevent simultaneous snapshots for the same seller instance."""
+        self.ensure_one()
+        self.env.cr.execute(
+            "SELECT pg_try_advisory_xact_lock(hashtext(%s), %s)",
+            ['amazon_fba_inventory_reconciliation', self.instance_id.id],
+        )
+        if not self.env.cr.fetchone()[0]:
+            raise UserError(_(
+                "Another FBA inventory reconciliation is already running for %s.",
+                self.instance_id.display_name,
+            ))
 
     @staticmethod
     def _json(value):
@@ -168,6 +191,20 @@ class AmazonInventoryReconciliationRun(models.Model):
                 'inbound_receiving': self._amazon_quantity(
                     details.get('inboundReceivingQuantity'), 'inboundReceivingQuantity',
                 ),
+                'total': self._amazon_quantity(
+                    summary.get('totalQuantity'), 'totalQuantity',
+                ),
+                'reserved_customer_orders': self._amazon_quantity(
+                    reserved.get('pendingCustomerOrderQuantity'),
+                    'pendingCustomerOrderQuantity',
+                ),
+                'reserved_fc_transfers': self._amazon_quantity(
+                    reserved.get('pendingTransshipmentQuantity'),
+                    'pendingTransshipmentQuantity',
+                ),
+                'reserved_fc_processing': self._amazon_quantity(
+                    reserved.get('fcProcessingQuantity'), 'fcProcessingQuantity',
+                ),
             }
             bucket = aggregated.setdefault(sku, {
                 'sellable': 0.0,
@@ -176,17 +213,41 @@ class AmazonInventoryReconciliationRun(models.Model):
                 'inbound_working': 0.0,
                 'inbound_shipped': 0.0,
                 'inbound_receiving': 0.0,
+                'total': 0.0,
+                'reserved_customer_orders': 0.0,
+                'reserved_fc_transfers': 0.0,
+                'reserved_fc_processing': 0.0,
+                'asins': set(),
+                'fnskus': set(),
+                'conditions': set(),
+                'last_updated_values': [],
                 'raw': [],
             })
             for key, quantity in values.items():
                 bucket[key] += quantity
+            if summary.get('asin'):
+                bucket['asins'].add(str(summary['asin']).strip())
+            if summary.get('fnSku'):
+                bucket['fnskus'].add(str(summary['fnSku']).strip())
+            if summary.get('condition'):
+                bucket['conditions'].add(str(summary['condition']).strip())
+            if summary.get('lastUpdatedTime'):
+                bucket['last_updated_values'].append(str(summary['lastUpdatedTime']).strip())
             bucket['raw'].append(summary)
+        for bucket in aggregated.values():
+            bucket['asin'] = ', '.join(sorted(bucket.pop('asins')))
+            bucket['fnsku'] = ', '.join(sorted(bucket.pop('fnskus')))
+            bucket['condition'] = ', '.join(sorted(bucket.pop('conditions')))
+            bucket['amazon_last_updated_raw'] = max(
+                bucket.pop('last_updated_values'), default='',
+            )
         return aggregated
 
     def _validate_locations(self):
         self.ensure_one()
         instance = self.instance_id
         locations = {
+            'received': instance.fba_received_location_id,
             'sellable': instance.fba_sellable_location_id,
             'reserved': instance.fba_reserved_location_id,
             'unsellable': instance.fba_unsellable_location_id,
@@ -194,16 +255,18 @@ class AmazonInventoryReconciliationRun(models.Model):
         }
         if any(not location for location in locations.values()):
             raise UserError(_(
-                "Configure Amazon Sellable, Reserved, Unsellable, and Transit locations first."
+                "Configure Amazon Received/Staging, Sellable, Reserved, Unsellable, "
+                "and Transit locations first."
             ))
         expected_usage = {
+            'received': 'internal',
             'sellable': 'internal',
             'reserved': 'internal',
             'unsellable': 'internal',
             'transit': 'transit',
         }
-        if len({location.id for location in locations.values()}) != 4:
-            raise UserError(_("The four Amazon inventory locations must be distinct."))
+        if len({location.id for location in locations.values()}) != 5:
+            raise UserError(_("The five Amazon inventory locations must be distinct."))
         for role, location in locations.items():
             if not location.active or location.usage != expected_usage[role]:
                 raise UserError(_("The configured Amazon %s location is invalid.", role.title()))
@@ -231,41 +294,21 @@ class AmazonInventoryReconciliationRun(models.Model):
         def zero(value):
             return float_is_zero(value, precision_rounding=rounding)
 
-        def equal(left, right):
-            return float_compare(left, right, precision_rounding=rounding) == 0
-
         if all(zero(value) for value in differences.values()):
             return differences, 'none', 'matched', 'normal'
-
-        total_difference = sum(differences.values())
-        if not zero(total_difference):
-            return differences, 'inventory_adjustment', 'pending_review', 'critical'
-
-        if (
-            differences['sellable'] < 0
-            and differences['reserved'] > 0
-            and equal(-differences['sellable'], differences['reserved'])
-            and zero(differences['unsellable'])
-            and zero(differences['transit'])
-        ):
-            return differences, 'sellable_to_reserved', 'pending_review', 'warning'
-        if (
-            differences['sellable'] < 0
-            and differences['unsellable'] > 0
-            and equal(-differences['sellable'], differences['unsellable'])
-            and zero(differences['reserved'])
-            and zero(differences['transit'])
-        ):
-            return differences, 'sellable_to_unsellable', 'pending_review', 'warning'
-        if (
-            differences['transit'] < 0
-            and differences['sellable'] > 0
-            and equal(-differences['transit'], differences['sellable'])
-            and zero(differences['reserved'])
-            and zero(differences['unsellable'])
-        ):
-            return differences, 'transit_to_sellable', 'pending_review', 'warning'
-        return differences, 'manual_review', 'pending_review', 'critical'
+        # getInventorySummaries is a point-in-time aggregate, not a disposition
+        # event stream. Equal and opposite differences are therefore evidence
+        # for review, never proof that a particular transfer occurred.
+        disposition_difference = any(
+            not zero(differences[key])
+            for key in ('sellable', 'reserved', 'unsellable')
+        )
+        return (
+            differences,
+            'manual_review',
+            'mismatch',
+            'critical' if disposition_difference else 'warning',
+        )
 
     def _prepare_lines(self, response):
         self.ensure_one()
@@ -286,6 +329,7 @@ class AmazonInventoryReconciliationRun(models.Model):
         all_skus = sorted(set(amazon_by_sku) | set(products_by_sku))
         commands = []
         for sku in all_skus:
+            amazon_returned = sku in amazon_by_sku
             summary = amazon_by_sku.get(sku, {})
             amazon_product = products_by_sku.get(sku)
             odoo_product = amazon_product.odoo_product_id if amazon_product else False
@@ -301,7 +345,25 @@ class AmazonInventoryReconciliationRun(models.Model):
                     + summary.get('inbound_receiving', 0.0)
                 ),
             }
-            if odoo_product:
+            if not amazon_returned:
+                # Amazon documents an unfiltered call as returning all summaries
+                # with available details, but does not guarantee that every
+                # mapped zero-quantity SKU appears. Absence is not zero.
+                odoo_values = (
+                    self._odoo_quantities(odoo_product, locations)
+                    if odoo_product and odoo_product.is_storable
+                    else dict.fromkeys(
+                        ('received', 'sellable', 'reserved', 'unsellable', 'transit'),
+                        0.0,
+                    )
+                )
+                differences = dict.fromkeys(
+                    ('sellable', 'reserved', 'unsellable', 'transit'), 0.0,
+                )
+                suggested = 'manual_review'
+                status = 'not_returned'
+                severity = 'warning'
+            elif odoo_product and odoo_product.is_storable:
                 odoo_values = self._odoo_quantities(odoo_product, locations)
                 rounding = odoo_product.uom_id.rounding or 0.01
                 differences, suggested, status, severity = self._classification(
@@ -309,25 +371,41 @@ class AmazonInventoryReconciliationRun(models.Model):
                 )
             else:
                 odoo_values = dict.fromkeys(
-                    ('sellable', 'reserved', 'unsellable', 'transit'), 0.0,
+                    ('received', 'sellable', 'reserved', 'unsellable', 'transit'), 0.0,
                 )
                 differences = {
                     key: amazon_values[key] for key in amazon_values
                 }
                 suggested = 'manual_review'
-                status = 'pending_review'
+                status = 'unmapped'
                 severity = 'critical'
             values = {
                 'sku': sku,
+                'amazon_returned': amazon_returned,
                 'amazon_product_id': amazon_product.id if amazon_product else False,
                 'odoo_product_id': odoo_product.id if odoo_product else False,
+                'asin': summary.get('asin', ''),
+                'fnsku': summary.get('fnsku', ''),
+                'amazon_condition': summary.get('condition', ''),
+                'amazon_last_updated_raw': summary.get('amazon_last_updated_raw', ''),
                 'amazon_sellable': amazon_values['sellable'],
                 'amazon_reserved': amazon_values['reserved'],
                 'amazon_unsellable': amazon_values['unsellable'],
+                'amazon_total': summary.get('total', 0.0),
+                'amazon_reserved_customer_orders': summary.get(
+                    'reserved_customer_orders', 0.0,
+                ),
+                'amazon_reserved_fc_transfers': summary.get(
+                    'reserved_fc_transfers', 0.0,
+                ),
+                'amazon_reserved_fc_processing': summary.get(
+                    'reserved_fc_processing', 0.0,
+                ),
                 'amazon_inbound': amazon_values['transit'],
                 'amazon_inbound_working': summary.get('inbound_working', 0.0),
                 'amazon_inbound_shipped': summary.get('inbound_shipped', 0.0),
                 'amazon_inbound_receiving': summary.get('inbound_receiving', 0.0),
+                'odoo_received': odoo_values['received'],
                 'odoo_sellable': odoo_values['sellable'],
                 'odoo_reserved': odoo_values['reserved'],
                 'odoo_unsellable': odoo_values['unsellable'],
@@ -341,8 +419,18 @@ class AmazonInventoryReconciliationRun(models.Model):
                 'severity': severity,
                 'raw_response': self._json(summary.get('raw', [])),
             }
+            if status == 'not_returned':
+                values['error_message'] = _(
+                    "Mapped FBA SKU was not returned by this complete Amazon snapshot. "
+                    "Amazon does not guarantee omitted SKUs represent zero inventory."
+                )
+            elif status == 'unmapped':
+                values['error_message'] = _(
+                    "UNMAPPED AMAZON SKU: link SKU %s to an inventory-tracked Odoo product "
+                    "and run reconciliation again.", sku,
+                )
             commands.append(Command.create(values))
-            if amazon_product:
+            if amazon_returned and amazon_product:
                 amazon_product.amazon_qty = amazon_values['sellable']
         return commands
 
@@ -352,24 +440,72 @@ class AmazonInventoryReconciliationRun(models.Model):
         self.write({
             'products_checked': len(lines),
             'matched_count': len(lines.filtered(lambda line: line.status == 'matched')),
-            'mismatch_count': len(lines.filtered(lambda line: line.status != 'matched')),
+            'issue_count': len(lines.filtered(lambda line: line.status != 'matched')),
+            'mismatch_count': len(lines.filtered(
+                lambda line: line.status in ('mismatch', 'pending_review')
+            )),
+            'unmapped_count': len(lines.filtered(lambda line: line.status == 'unmapped')),
+            'not_returned_count': len(lines.filtered(
+                lambda line: line.status == 'not_returned'
+            )),
+            'error_count': len(lines.filtered(lambda line: line.status in ('error', 'failed'))),
             'critical_count': len(lines.filtered(lambda line: line.severity == 'critical')),
             'pending_review_count': len(lines.filtered(
-                lambda line: line.status in ('pending_review', 'failed')
+                lambda line: line.status in (
+                    'mismatch', 'pending_review', 'unmapped', 'not_returned', 'error', 'failed',
+                )
             )),
         })
 
+    @staticmethod
+    def _retry_metadata(error):
+        """Return ``(retryable, retry_after_seconds)`` through wrapped causes."""
+        current = error
+        seen = set()
+        while current and id(current) not in seen:
+            seen.add(id(current))
+            response = getattr(current, 'response', None)
+            if response is not None:
+                status = getattr(response, 'status_code', None)
+                retry_after = (getattr(response, 'headers', {}) or {}).get('Retry-After')
+                try:
+                    retry_after = max(float(retry_after or 0.0), 0.0)
+                except (TypeError, ValueError):
+                    retry_after = 0.0
+                return status == 429 or (status is not None and status >= 500), retry_after
+            if isinstance(current, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+                return True, 0.0
+            current = getattr(current, '__cause__', None) or getattr(current, '__context__', None)
+        text = str(error)
+        retry_after_match = re.search(r'Retry-After:\s*([0-9]+(?:\.[0-9]+)?)', text, re.I)
+        retry_after = float(retry_after_match.group(1)) if retry_after_match else 0.0
+        retryable = bool(
+            re.search(
+                r'\b429\b|timeout|timed out|temporary|connection|already running|\b5\d\d\b',
+                text, re.I,
+            )
+        )
+        return retryable, retry_after
+
     def _schedule_retry(self, error_message):
         self.ensure_one()
+        retryable, retry_after_seconds = self._retry_metadata(error_message)
         retries = self.retry_count + 1
-        vals = {'retry_count': retries, 'last_error': str(error_message)[:10000]}
-        if retries >= self.max_retries:
-            vals.update(state='failed', next_run_at=False)
+        vals = {
+            'retry_count': retries,
+            'last_error': str(error_message)[:10000],
+            'retry_after_seconds': retry_after_seconds,
+            'snapshot_complete': False,
+            'completed_at': False,
+        }
+        if not retryable or retries >= self.max_retries:
+            vals.update(state='failed', next_run_at=False, error_count=1)
         else:
+            exponential_seconds = min(2 ** max(retries - 1, 0), 60) * 60
             vals.update(
                 state='queued',
                 next_run_at=fields.Datetime.now() + timedelta(
-                    minutes=min(2 ** max(retries - 1, 0), 60)
+                    seconds=max(exponential_seconds, retry_after_seconds),
                 ),
             )
         self.write(vals)
@@ -383,7 +519,16 @@ class AmazonInventoryReconciliationRun(models.Model):
                 self._lock_run()
                 if self.state == 'completed':
                     return False
-                self.write({'state': 'running', 'next_run_at': False, 'last_error': False})
+                self._lock_instance()
+                self.write({
+                    'state': 'running',
+                    'next_run_at': False,
+                    'last_error': False,
+                    'snapshot_complete': False,
+                    'completed_at': False,
+                    'retry_after_seconds': 0.0,
+                    'error_count': 0,
+                })
                 self.instance_id._check_required_fields()
                 access_token = self.instance_id._get_access_token_or_raise()
                 response = self.instance_id._api_call_safe(
@@ -393,40 +538,34 @@ class AmazonInventoryReconciliationRun(models.Model):
                     details=True,
                     error_msg="Failed to retrieve Amazon FBA inventory summaries",
                 )
+                if not isinstance(response, dict) or response.get('_snapshot_complete') is not True:
+                    raise ValidationError(_(
+                        "Amazon inventory pagination did not complete. No snapshot or "
+                        "reconciliation lines were accepted."
+                    ))
+                payload = response.get('payload') or {}
+                summaries = payload.get('inventorySummaries')
+                if not isinstance(summaries, list):
+                    raise ValidationError(_(
+                        "Amazon did not return a complete inventorySummaries list."
+                    ))
                 self.reconciliation_ids.unlink()
                 self.write({
                     'reconciliation_ids': self._prepare_lines(response),
                     'raw_response': self._json(response),
+                    'amazon_records_read': len(summaries),
+                    'page_count': int(response.get('_page_count') or len(response.get('_pages') or [])),
                     'amazon_request_ids': self._json(
                         response.get('_amazon_request_ids') or []
                     ),
                 })
-                if self.mode == 'automatic':
-                    candidates = self.reconciliation_ids.filtered(lambda line: (
-                        line.status == 'pending_review'
-                        and line.suggested_action in (
-                            'sellable_to_reserved',
-                            'sellable_to_unsellable',
-                            'transit_to_sellable',
-                        )
-                    ))
-                    for line in candidates:
-                        try:
-                            with self.env.cr.savepoint():
-                                line.sudo().with_context(
-                                    automatic_inventory_reconciliation=True,
-                                )._apply_suggested_action()
-                        except Exception as exc:
-                            _logger.warning(
-                                "Automatic Amazon inventory action failed for %s: %s",
-                                line.sku, exc,
-                            )
-                            line.sudo().write({
-                                'status': 'failed',
-                                'error_message': str(exc)[:5000],
-                            })
                 self._refresh_counts()
-                self.write({'state': 'completed'})
+                completed_at = fields.Datetime.now()
+                self.write({
+                    'state': 'completed',
+                    'snapshot_complete': True,
+                    'completed_at': completed_at,
+                })
                 self.instance_id.sudo().write({
                     'last_inventory_audit_at': fields.Datetime.now(),
                     'last_stock_sync': fields.Datetime.now(),
@@ -448,6 +587,8 @@ class AmazonInventoryReconciliationRun(models.Model):
                         'amazon_request_ids': response.get('_amazon_request_ids') or [],
                         'matched': self.matched_count,
                         'mismatches': self.mismatch_count,
+                        'unmapped': self.unmapped_count,
+                        'not_returned': self.not_returned_count,
                     },
                 )
             return True
@@ -561,6 +702,9 @@ class AmazonInventoryReconciliation(models.Model):
         'res.company', related='run_id.company_id', store=True,
         readonly=True, index=True,
     )
+    marketplace_id = fields.Char(
+        related='instance_id.marketplace_id', store=True, readonly=True, index=True,
+    )
     amazon_product_id = fields.Many2one(
         'amazon.product', ondelete='set null', index=True,
     )
@@ -569,9 +713,21 @@ class AmazonInventoryReconciliation(models.Model):
         check_company=True,
     )
     sku = fields.Char(string='SKU', required=True, index=True)
+    amazon_returned = fields.Boolean(readonly=True, index=True)
+    asin = fields.Char(string='ASIN', readonly=True)
+    fnsku = fields.Char(string='FNSKU', readonly=True)
+    amazon_condition = fields.Char(string='Amazon Condition', readonly=True)
+    amazon_last_updated_raw = fields.Char(
+        string='Amazon Last Updated', readonly=True,
+        help="Exact lastUpdatedTime value returned by Amazon.",
+    )
     amazon_sellable = fields.Float(readonly=True)
     amazon_reserved = fields.Float(readonly=True)
     amazon_unsellable = fields.Float(readonly=True)
+    amazon_total = fields.Float(readonly=True)
+    amazon_reserved_customer_orders = fields.Float(readonly=True)
+    amazon_reserved_fc_transfers = fields.Float(readonly=True)
+    amazon_reserved_fc_processing = fields.Float(readonly=True)
     amazon_inbound = fields.Float(
         readonly=True,
         help="Physical inbound: inboundShippedQuantity + inboundReceivingQuantity.",
@@ -582,6 +738,10 @@ class AmazonInventoryReconciliation(models.Model):
     )
     amazon_inbound_shipped = fields.Float(readonly=True)
     amazon_inbound_receiving = fields.Float(readonly=True)
+    odoo_received = fields.Float(
+        string='Odoo Received / Staging', readonly=True,
+        help="Physically received stock awaiting an Amazon disposition decision.",
+    )
     odoo_sellable = fields.Float(readonly=True)
     odoo_reserved = fields.Float(readonly=True)
     odoo_unsellable = fields.Float(readonly=True)
@@ -605,11 +765,41 @@ class AmazonInventoryReconciliation(models.Model):
     ], required=True, default='normal', readonly=True, index=True)
     status = fields.Selection([
         ('matched', 'Matched'),
+        ('mismatch', 'Mismatch'),
+        ('unmapped', 'Unmapped Amazon SKU'),
+        ('not_returned', 'Not Returned / Review'),
+        ('error', 'Error'),
         ('pending_review', 'Pending Review'),
         ('applied', 'Applied'),
         ('ignored', 'Ignored'),
         ('failed', 'Failed'),
     ], required=True, default='pending_review', copy=False, index=True)
+    adjustment_action = fields.Selection([
+        ('none', 'No Transfer Selected'),
+        ('received_to_sellable', 'Received / Staging → Sellable'),
+        ('received_to_reserved', 'Received / Staging → Reserved'),
+        ('received_to_unsellable', 'Received / Staging → Unsellable'),
+        ('sellable_to_reserved', 'Sellable → Reserved'),
+        ('sellable_to_unsellable', 'Sellable → Unsellable'),
+        ('reserved_to_sellable', 'Reserved → Sellable'),
+        ('reserved_to_unsellable', 'Reserved → Unsellable'),
+        ('unsellable_to_sellable', 'Unsellable → Sellable'),
+        ('unsellable_to_reserved', 'Unsellable → Reserved'),
+    ], string='Reviewed Transfer', default='none', copy=False, index=True)
+    adjustment_quantity = fields.Float(copy=False)
+    adjustment_reason = fields.Text(copy=False)
+    large_adjustment_confirmed = fields.Boolean(
+        string='Confirm Large Adjustment', copy=False,
+        help=(
+            "Required when the transfer is at least 100 units or more than half "
+            "of the currently available source stock."
+        ),
+    )
+    adjustment_reviewed = fields.Boolean(readonly=True, copy=False)
+    reviewed_at = fields.Datetime(readonly=True, copy=False)
+    reviewed_by_id = fields.Many2one(
+        'res.users', readonly=True, copy=False, ondelete='set null',
+    )
     applied_picking_id = fields.Many2one(
         'stock.picking', string='Applied Transfer', copy=False, readonly=True,
         ondelete='restrict', check_company=True,
@@ -644,37 +834,124 @@ class AmazonInventoryReconciliation(models.Model):
             "apply inventory reconciliation actions."
         ))
 
+    def write(self, vals):
+        review_inputs = {
+            'adjustment_action', 'adjustment_quantity', 'adjustment_reason',
+            'large_adjustment_confirmed',
+        }
+        if review_inputs.intersection(vals) and not self.env.context.get(
+            'keep_inventory_adjustment_review'
+        ):
+            vals = dict(vals, adjustment_reviewed=False, reviewed_at=False, reviewed_by_id=False)
+        return super().write(vals)
+
     def _movement(self):
         self.ensure_one()
         instance = self.instance_id
-        if self.suggested_action == 'sellable_to_reserved':
-            return (
-                instance.fba_sellable_location_id,
-                instance.fba_reserved_location_id,
-                self.difference_reserved,
-                'reconciliation_reserved',
-            )
-        if self.suggested_action == 'sellable_to_unsellable':
-            return (
-                instance.fba_sellable_location_id,
-                instance.fba_unsellable_location_id,
-                self.difference_unsellable,
-                'reconciliation_unsellable',
-            )
-        if self.suggested_action == 'transit_to_sellable':
-            return (
-                instance.fba_transit_location_id,
-                instance.fba_sellable_location_id,
-                self.difference_sellable,
-                'reconciliation_sellable',
-            )
-        if self.suggested_action == 'inventory_adjustment':
+        locations = {
+            'received': instance.fba_received_location_id,
+            'sellable': instance.fba_sellable_location_id,
+            'reserved': instance.fba_reserved_location_id,
+            'unsellable': instance.fba_unsellable_location_id,
+        }
+        roles = {
+            'received_to_sellable': ('received', 'sellable'),
+            'received_to_reserved': ('received', 'reserved'),
+            'received_to_unsellable': ('received', 'unsellable'),
+            'sellable_to_reserved': ('sellable', 'reserved'),
+            'sellable_to_unsellable': ('sellable', 'unsellable'),
+            'reserved_to_sellable': ('reserved', 'sellable'),
+            'reserved_to_unsellable': ('reserved', 'unsellable'),
+            'unsellable_to_sellable': ('unsellable', 'sellable'),
+            'unsellable_to_reserved': ('unsellable', 'reserved'),
+        }
+        if self.adjustment_action not in roles:
             raise UserError(_(
-                "This audit found a total-quantity difference. Review the physical cause "
-                "and use Odoo's standard Inventory Adjustment workflow; the connector "
-                "will not write stock quantities directly."
+                "Select a reviewed transfer between existing Amazon FBA inventory locations."
             ))
-        raise UserError(_("This difference requires manual review and has no safe transfer."))
+        source_role, destination_role = roles[self.adjustment_action]
+        return (
+            locations[source_role], locations[destination_role],
+            self.adjustment_quantity, 'reconciliation_disposition',
+            source_role, destination_role,
+        )
+
+    def _validate_adjustment(self):
+        self.ensure_one()
+        if self.run_id.state != 'completed' or not self.run_id.snapshot_complete:
+            raise UserError(_("Only a complete inventory snapshot can be adjusted."))
+        latest_run = self.env['amazon.inventory.reconciliation.run'].search([
+            ('instance_id', '=', self.instance_id.id),
+            ('state', '=', 'completed'),
+            ('snapshot_complete', '=', True),
+        ], order='completed_at desc, id desc', limit=1)
+        if latest_run and latest_run != self.run_id:
+            raise UserError(_(
+                "A newer complete inventory snapshot exists. Review that run instead."
+            ))
+        if self.status not in ('mismatch', 'pending_review'):
+            raise UserError(_("Only a mapped inventory mismatch can be adjusted."))
+        if not self.odoo_product_id or not self.odoo_product_id.is_storable:
+            raise UserError(_("The SKU must map to an inventory-tracked Odoo product."))
+        if not (self.adjustment_reason or '').strip():
+            raise UserError(_("Record the reason and evidence for this reconciliation transfer."))
+        source, destination, quantity, movement_type, source_role, destination_role = self._movement()
+        if not source or not destination or source == destination:
+            raise UserError(_("The configured reconciliation locations are invalid."))
+        if source.company_id != self.company_id or destination.company_id != self.company_id:
+            raise UserError(_("Reconciliation locations must belong to the audit company."))
+        rounding = self.odoo_product_id.uom_id.rounding or 0.01
+        if float_compare(quantity, 0.0, precision_rounding=rounding) <= 0:
+            raise UserError(_("The reviewed transfer quantity must be positive."))
+        differences = {
+            'sellable': self.difference_sellable,
+            'reserved': self.difference_reserved,
+            'unsellable': self.difference_unsellable,
+        }
+        destination_shortage = differences[destination_role]
+        if float_compare(destination_shortage, quantity, precision_rounding=rounding) < 0:
+            raise UserError(_(
+                "The reviewed quantity exceeds the %s difference in this snapshot.",
+                destination_role,
+            ))
+        if source_role != 'received':
+            source_excess = -differences[source_role]
+            if float_compare(source_excess, quantity, precision_rounding=rounding) < 0:
+                raise UserError(_(
+                    "The reviewed quantity exceeds the %s excess in this snapshot.",
+                    source_role,
+                ))
+        source_available = self.odoo_product_id.with_company(self.company_id).with_context(
+            location=source.id,
+        ).qty_available
+        if float_compare(source_available, quantity, precision_rounding=rounding) < 0:
+            raise UserError(_(
+                "Only %s %s is currently available in %s.",
+                source_available, self.odoo_product_id.uom_id.name, source.display_name,
+            ))
+        is_large = (
+            float_compare(quantity, 100.0, precision_rounding=rounding) >= 0
+            or float_compare(quantity, source_available * 0.5, precision_rounding=rounding) > 0
+        )
+        if is_large and not self.large_adjustment_confirmed:
+            raise UserError(_(
+                "This is a large reconciliation transfer (%s of %s available units). "
+                "Review it and enable Confirm Large Adjustment before continuing.",
+                quantity, source_available,
+            ))
+        return source, destination, quantity, movement_type
+
+    def action_mark_adjustment_reviewed(self):
+        self._check_apply_access()
+        for reconciliation in self:
+            reconciliation._validate_adjustment()
+            reconciliation.with_context(keep_inventory_adjustment_review=True).write({
+                'adjustment_reviewed': True,
+                'reviewed_at': fields.Datetime.now(),
+                'reviewed_by_id': self.env.user.id,
+                'error_message': False,
+            })
+        return True
 
     def _internal_picking_type(self, source, destination):
         self.ensure_one()
@@ -703,20 +980,13 @@ class AmazonInventoryReconciliation(models.Model):
                 [self.id],
             )
             self.invalidate_recordset()
-            if self.status != 'pending_review':
+            if self.status not in ('mismatch', 'pending_review'):
                 raise UserError(_("This reconciliation difference is no longer pending."))
             if self.applied_picking_id:
                 raise UserError(_("This reconciliation difference already has a transfer."))
-            if not self.odoo_product_id or not self.odoo_product_id.is_storable:
-                raise UserError(_("The SKU must map to an inventory-tracked Odoo product."))
-            source, destination, quantity, movement_type = self._movement()
-            if not source or not destination or source == destination:
-                raise UserError(_("The configured reconciliation locations are invalid."))
-            if source.company_id != self.company_id or destination.company_id != self.company_id:
-                raise UserError(_("Reconciliation locations must belong to the audit company."))
-            rounding = self.odoo_product_id.uom_id.rounding or 0.01
-            if float_compare(quantity, 0.0, precision_rounding=rounding) <= 0:
-                raise UserError(_("The suggested transfer quantity is not positive."))
+            if not self.adjustment_reviewed:
+                raise UserError(_("Review this transfer before applying it."))
+            source, destination, quantity, movement_type = self._validate_adjustment()
             picking_type = self._internal_picking_type(source, destination)
             picking = self.env['stock.picking'].sudo().with_company(self.company_id).create({
                 'picking_type_id': picking_type.id,
@@ -728,6 +998,10 @@ class AmazonInventoryReconciliation(models.Model):
                 'amazon_inventory_reconciliation_id': self.id,
                 'amazon_fba_movement_type': movement_type,
                 'move_type': 'one',
+                'note': _(
+                    "Reviewed Amazon FBA inventory reconciliation for %s.\nReason: %s",
+                    self.sku, self.adjustment_reason,
+                ),
                 'move_ids': [Command.create({
                     'product_id': self.odoo_product_id.id,
                     'product_uom_qty': quantity,
@@ -773,7 +1047,7 @@ class AmazonInventoryReconciliation(models.Model):
             'tag': 'display_notification',
             'params': {
                 'title': _('Inventory Reconciliation'),
-                'message': _("The suggested stock transfer was applied."),
+                'message': _("The reviewed stock transfer was applied."),
                 'type': 'success',
                 'sticky': False,
             },
@@ -782,13 +1056,14 @@ class AmazonInventoryReconciliation(models.Model):
     def action_ignore_difference(self):
         self._check_apply_access()
         for reconciliation in self:
-            if reconciliation.status not in ('pending_review', 'failed'):
+            if reconciliation.status not in (
+                'mismatch', 'pending_review', 'unmapped', 'not_returned', 'error', 'failed',
+            ):
                 raise UserError(_("Only a pending or failed difference can be ignored."))
             if reconciliation.applied_picking_id:
                 raise UserError(_("An applied reconciliation transfer cannot be ignored."))
             reconciliation.write({
                 'status': 'ignored',
-                'error_message': False,
             })
             reconciliation.run_id._refresh_counts()
         return True
@@ -869,8 +1144,10 @@ class StockPickingInventoryReconciliation(models.Model):
         ('reconciliation_reserved', 'Amazon Sellable to Reserved'),
         ('reconciliation_unsellable', 'Amazon Sellable to Unsellable'),
         ('reconciliation_sellable', 'Amazon Transit to Sellable'),
+        ('reconciliation_disposition', 'Reviewed Amazon FBA Reconciliation Transfer'),
     ], ondelete={
         'reconciliation_reserved': 'set null',
         'reconciliation_unsellable': 'set null',
         'reconciliation_sellable': 'set null',
+        'reconciliation_disposition': 'set null',
     })

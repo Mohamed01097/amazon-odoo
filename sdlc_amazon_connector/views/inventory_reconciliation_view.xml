@@ -9,11 +9,15 @@
                 <field name="instance_id"/>
                 <field name="run_id"/>
                 <filter name="pending" string="Pending Review"
-                        domain="[('status', 'in', ('pending_review', 'failed'))]"/>
+                        domain="[('status', 'in', ('mismatch', 'pending_review', 'unmapped', 'not_returned', 'error', 'failed'))]"/>
                 <filter name="mismatch" string="Differences"
                         domain="[('status', '!=', 'matched')]"/>
                 <filter name="critical" string="Critical"
                         domain="[('severity', '=', 'critical')]"/>
+                <filter name="unmapped" string="Unmapped SKU"
+                        domain="[('status', '=', 'unmapped')]"/>
+                <filter name="not_returned" string="Not Returned"
+                        domain="[('status', '=', 'not_returned')]"/>
                 <separator/>
                 <filter name="matched" string="Matched"
                         domain="[('status', '=', 'matched')]"/>
@@ -35,12 +39,15 @@
         <field name="arch" type="xml">
             <list string="Amazon Inventory Reconciliation"
                   decoration-success="status == 'matched'"
-                  decoration-warning="severity == 'warning' and status == 'pending_review'"
-                  decoration-danger="severity == 'critical' and status in ('pending_review', 'failed')"
+                  decoration-warning="severity == 'warning' and status not in ('matched', 'applied', 'ignored')"
+                  decoration-danger="severity == 'critical' and status not in ('matched', 'applied', 'ignored')"
                   create="0" delete="0">
                 <field name="run_date"/>
                 <field name="instance_id" optional="show"/>
                 <field name="sku"/>
+                <field name="marketplace_id" optional="hide"/>
+                <field name="asin" optional="hide"/>
+                <field name="fnsku" optional="hide"/>
                 <field name="odoo_product_id"/>
                 <field name="amazon_sellable" string="Amazon Sellable" optional="show"/>
                 <field name="odoo_sellable" string="Odoo Sellable" optional="show"/>
@@ -54,17 +61,14 @@
                 <field name="amazon_inbound" string="Amazon Physical Inbound" optional="show"/>
                 <field name="odoo_transit" string="Odoo Transit" optional="show"/>
                 <field name="difference_inbound" string="Inbound Diff" optional="show"/>
+                <field name="odoo_received" optional="hide"/>
                 <field name="suggested_action"/>
                 <field name="severity"/>
                 <field name="status"/>
-                <button name="action_apply_suggested_action" type="object"
-                        string="Apply Suggested Action" class="btn-primary"
-                        groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"
-                        invisible="status != 'pending_review' or suggested_action in ('none', 'inventory_adjustment', 'manual_review')"/>
                 <button name="action_ignore_difference" type="object"
                         string="Ignore Difference"
                         groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"
-                        invisible="status not in ('pending_review', 'failed')"/>
+                        invisible="status not in ('mismatch', 'pending_review', 'unmapped', 'not_returned', 'error', 'failed')"/>
             </list>
         </field>
     </record>
@@ -75,14 +79,18 @@
         <field name="arch" type="xml">
             <form string="Amazon Inventory Reconciliation" create="0" delete="0">
                 <header>
-                    <button name="action_apply_suggested_action" type="object"
-                            string="Apply Suggested Action" class="btn-primary"
+                    <button name="action_mark_adjustment_reviewed" type="object"
+                            string="Mark Transfer Reviewed" class="btn-secondary"
                             groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"
-                            invisible="status != 'pending_review' or suggested_action in ('none', 'inventory_adjustment', 'manual_review')"/>
+                            invisible="status not in ('mismatch', 'pending_review') or adjustment_reviewed"/>
+                    <button name="action_apply_suggested_action" type="object"
+                            string="Apply Reconciliation" class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"
+                            invisible="status not in ('mismatch', 'pending_review') or not adjustment_reviewed"/>
                     <button name="action_ignore_difference" type="object"
                             string="Ignore Difference"
                             groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"
-                            invisible="status not in ('pending_review', 'failed')"/>
+                            invisible="status not in ('mismatch', 'pending_review', 'unmapped', 'not_returned', 'error', 'failed')"/>
                     <field name="status" widget="statusbar"/>
                 </header>
                 <sheet>
@@ -99,6 +107,12 @@
                             <field name="run_date"/>
                             <field name="instance_id"/>
                             <field name="sku"/>
+                            <field name="marketplace_id"/>
+                            <field name="asin"/>
+                            <field name="fnsku"/>
+                            <field name="amazon_condition"/>
+                            <field name="amazon_last_updated_raw"/>
+                            <field name="amazon_returned"/>
                             <field name="amazon_product_id"/>
                             <field name="odoo_product_id"/>
                         </group>
@@ -140,6 +154,35 @@
                         <field name="amazon_inbound_working"/>
                         <field name="amazon_inbound_shipped"/>
                         <field name="amazon_inbound_receiving"/>
+                        <field name="amazon_total"/>
+                        <field name="odoo_received"/>
+                    </group>
+                    <group string="Amazon Reserved Breakdown">
+                        <field name="amazon_reserved_customer_orders"/>
+                        <field name="amazon_reserved_fc_transfers"/>
+                        <field name="amazon_reserved_fc_processing"/>
+                    </group>
+                    <group string="Controlled Reconciliation Transfer"
+                           groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager">
+                        <div class="alert alert-warning" role="alert" colspan="2">
+                            A snapshot does not prove a disposition event. Choose a transfer only
+                            after reviewing external evidence. Transit cannot be adjusted here.
+                        </div>
+                        <group>
+                            <field name="adjustment_action"
+                                   readonly="status not in ('mismatch', 'pending_review')"/>
+                            <field name="adjustment_quantity"
+                                   readonly="status not in ('mismatch', 'pending_review')"/>
+                            <field name="large_adjustment_confirmed"
+                                   readonly="status not in ('mismatch', 'pending_review')"/>
+                            <field name="adjustment_reason"
+                                   readonly="status not in ('mismatch', 'pending_review')"/>
+                        </group>
+                        <group>
+                            <field name="adjustment_reviewed"/>
+                            <field name="reviewed_at"/>
+                            <field name="reviewed_by_id"/>
+                        </group>
                     </group>
                     <field name="error_message" invisible="not error_message"/>
                     <notebook>
@@ -167,16 +210,21 @@
         <field name="arch" type="xml">
             <list string="Amazon Inventory Audits" create="0" delete="0"
                   decoration-danger="state == 'failed'"
-                  decoration-success="state == 'completed' and mismatch_count == 0"
-                  decoration-warning="state == 'completed' and mismatch_count &gt; 0">
+                  decoration-success="state == 'completed' and issue_count == 0"
+                  decoration-warning="state == 'completed' and issue_count &gt; 0">
                 <field name="name"/>
                 <field name="run_date"/>
                 <field name="instance_id"/>
                 <field name="trigger"/>
                 <field name="mode"/>
                 <field name="products_checked"/>
+                <field name="amazon_records_read"/>
                 <field name="matched_count"/>
+                <field name="issue_count"/>
                 <field name="mismatch_count"/>
+                <field name="unmapped_count"/>
+                <field name="not_returned_count"/>
+                <field name="error_count"/>
                 <field name="critical_count"/>
                 <field name="pending_review_count"/>
                 <field name="state"/>
@@ -195,7 +243,7 @@
                             groups="sdlc_amazon_connector.group_amazon_manager"/>
                     <button name="action_open_differences" type="object"
                             string="Open Differences" class="btn-primary"
-                            invisible="state != 'completed' or mismatch_count == 0"/>
+                            invisible="state != 'completed' or issue_count == 0"/>
                     <field name="state" widget="statusbar"/>
                 </header>
                 <sheet>
@@ -210,7 +258,7 @@
                         </button>
                         <button name="action_open_differences" type="object"
                                 class="oe_stat_button" icon="fa-exclamation-triangle">
-                            <field name="mismatch_count" widget="statinfo" string="Mismatch"/>
+                            <field name="issue_count" widget="statinfo" string="Issues"/>
                         </button>
                         <button name="action_open_differences" type="object"
                                 class="oe_stat_button" icon="fa-bolt">
@@ -237,29 +285,35 @@
                             <field name="run_date"/>
                             <field name="trigger"/>
                             <field name="mode"/>
+                            <field name="snapshot_complete"/>
+                            <field name="page_count"/>
+                            <field name="amazon_records_read"/>
+                            <field name="completed_at"/>
                         </group>
                         <group string="Background Job">
                             <field name="retry_count"/>
                             <field name="max_retries"/>
                             <field name="next_run_at"/>
+                            <field name="retry_after_seconds"/>
                             <field name="amazon_request_ids"
                                    groups="sdlc_amazon_connector.group_amazon_manager"/>
                         </group>
                     </group>
                     <div class="alert alert-info" role="alert">
-                        Amazon physical inbound equals inboundShippedQuantity plus
-                        inboundReceivingQuantity. inboundWorkingQuantity is displayed
-                        on each line but excluded from Transit because Amazon defines it
-                        as inventory notified, not necessarily shipped.
+                        Amazon inboundWorking, inboundShipped, and inboundReceiving are
+                        displayed separately. Physical inbound visibility uses shipped plus
+                        receiving for comparison with Odoo Transit, but never changes Transit.
+                        Missing mapped SKUs are marked Not Returned and are never treated as zero.
                     </div>
                     <field name="last_error" invisible="not last_error"/>
                     <notebook>
                         <page string="Reconciliation">
                             <field name="reconciliation_ids" readonly="1">
                                 <list decoration-success="status == 'matched'"
-                                      decoration-danger="severity == 'critical' and status in ('pending_review', 'failed')">
+                                      decoration-danger="severity == 'critical' and status not in ('matched', 'applied', 'ignored')">
                                     <field name="sku"/>
                                     <field name="odoo_product_id"/>
+                                    <field name="amazon_returned"/>
                                     <field name="difference_sellable" string="Sellable Diff"/>
                                     <field name="difference_reserved" string="Reserved Diff"/>
                                     <field name="difference_unsellable" string="Unsellable Diff"/>

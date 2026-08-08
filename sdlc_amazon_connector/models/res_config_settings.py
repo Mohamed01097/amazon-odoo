@@ -35,13 +35,12 @@ class ResConfigSettings(models.TransientModel):
         default=10,
     )
     amazon_inventory_reconciliation_mode = fields.Selection([
-        ('manual', 'Manual'),
-        ('automatic', 'Automatic'),
+        ('manual', 'Manual Review'),
+        ('automatic', 'Legacy Automatic (Disabled)'),
     ], string='Inventory Reconciliation Mode',
        config_parameter='amazon_connector.inventory_reconciliation_mode',
-       default='manual', required=True,
+       default='manual', required=True, readonly=True,
        help=(
-           'Manual only records suggested actions. Automatic may apply exact, '
-           'quantity-balanced transfers between configured Amazon locations; '
-           'total quantity differences always require manual review.'
+           'Reconciliation always fetches and compares only. Automatic stock '
+           'correction is disabled; the legacy value is retained for history.'
        ))

@@ -1235,19 +1235,30 @@ class AmazonAPI():
             pages.append(page)
             if page.get('_amazon_request_id'):
                 request_ids.append(page['_amazon_request_id'])
-            pagination = page.get('pagination') or {}
-            next_token = pagination.get('nextToken') if isinstance(pagination, dict) else None
+            pagination = page.get('pagination')
+            if pagination is not None and not isinstance(pagination, dict):
+                raise ValueError("Amazon returned invalid FBA inventory pagination metadata.")
+            next_token = (pagination or {}).get('nextToken')
             if not next_token:
                 break
             if next_token in seen_tokens:
                 raise ValueError("Amazon repeated an FBA inventory pagination token.")
             seen_tokens.add(next_token)
+            # getInventorySummaries defaults to 2 requests/second (burst 2).
+            # Keep pagination immediate enough for the 30-second token expiry
+            # while pacing subsequent pages at the documented steady rate.
+            time.sleep(0.5)
         else:
             raise ValueError("Amazon FBA inventory pagination exceeded 1000 pages.")
         return {
             'payload': {'inventorySummaries': summaries},
             '_pages': pages,
             '_amazon_request_ids': request_ids,
+            # Callers must require this marker before treating the collected
+            # pages as one complete inventory snapshot.  It is only set after
+            # Amazon returns a page without nextToken.
+            '_snapshot_complete': True,
+            '_page_count': len(pages),
         }
 
     # ══════════════════════════════════════════════════
