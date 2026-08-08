@@ -328,7 +328,7 @@
                                             </group>
                                         </group>
                                         <separator string="Amazon Physical Shipments"/>
-                                        <field name="physical_shipment_ids" readonly="1">
+                                        <field name="physical_shipment_ids">
                                             <list>
                                                 <field name="amazon_shipment_id"/>
                                                 <field name="shipment_confirmation_id"/>
@@ -338,6 +338,11 @@
                                                 <field name="dispatch_state"/>
                                                 <field name="picking_id"/>
                                                 <field name="picking_state"/>
+                                                <field name="transportation_generation_status" optional="show"/>
+                                                <field name="transportation_confirmation_status" optional="show"/>
+                                                <field name="selected_transportation_option_id" optional="show"/>
+                                                <field name="carrier_name" optional="hide"/>
+                                                <field name="tracking_number" optional="hide"/>
                                                 <field name="source_location_id" optional="hide"/>
                                                 <field name="transit_location_id" optional="hide"/>
                                                 <field name="dispatch_date" optional="show"/>
@@ -365,6 +370,31 @@
                                                             string="Open Picking"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"
                                                             invisible="not picking_id"/>
+                                                    <button name="action_generate_transportation_options"
+                                                            type="object"
+                                                            string="Generate Transportation Options"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="dispatch_state != 'dispatched' or transportation_generation_status in ('pending', 'in_progress')"/>
+                                                    <button name="action_refresh_transportation_options"
+                                                            type="object"
+                                                            string="Refresh Transportation Options"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="dispatch_state != 'dispatched'"/>
+                                                    <button name="action_confirm_transportation"
+                                                            type="object"
+                                                            string="Confirm Transportation"
+                                                            class="btn-primary"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="not selected_transportation_option_id or transportation_confirmation_status in ('pending', 'in_progress', 'success')"/>
+                                                    <button name="action_submit_tracking"
+                                                            type="object"
+                                                            string="Submit/Update Tracking"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="transportation_confirmation_status != 'success' or tracking_status in ('pending', 'in_progress')"/>
+                                                    <button name="action_refresh_physical_shipment_status"
+                                                            type="object"
+                                                            string="Refresh Shipment Status"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"/>
                                                     <field name="dispatch_state" widget="statusbar"
                                                            statusbar_visible="placement_confirmed,picking_created,ready_to_dispatch,dispatched"/>
                                                 </header>
@@ -386,6 +416,56 @@
                                                             <field name="dispatch_date"/>
                                                         </group>
                                                     </group>
+                                                    <separator string="Transportation &amp; Tracking"/>
+                                                    <group>
+                                                        <group string="Transportation">
+                                                            <field name="transportation_generation_operation_id" readonly="1"/>
+                                                            <field name="transportation_generation_status" readonly="1"/>
+                                                            <field name="transportation_confirmation_operation_id" readonly="1"/>
+                                                            <field name="transportation_confirmation_status" readonly="1"/>
+                                                            <field name="transportation_status" readonly="1"/>
+                                                            <field name="transportation_last_sync_at" readonly="1"/>
+                                                            <field name="selected_transportation_option_id" readonly="1"/>
+                                                            <field name="shipping_mode" readonly="1"/>
+                                                        </group>
+                                                        <group string="Carrier &amp; Tracking">
+                                                            <field name="carrier_type"/>
+                                                            <field name="carrier_name"/>
+                                                            <field name="carrier_code"/>
+                                                            <field name="tracking_number"/>
+                                                            <field name="pro_number"/>
+                                                            <field name="bill_of_lading_number"/>
+                                                            <field name="ship_date"/>
+                                                            <field name="estimated_arrival"/>
+                                                            <field name="tracking_operation_id" readonly="1"/>
+                                                            <field name="tracking_status" readonly="1"/>
+                                                            <field name="tracking_last_synced_at" readonly="1"/>
+                                                        </group>
+                                                    </group>
+                                                    <field name="transportation_option_ids" readonly="1">
+                                                        <list create="0" delete="0">
+                                                            <field name="selected"/>
+                                                            <field name="amazon_transportation_option_id"/>
+                                                            <field name="shipping_mode"/>
+                                                            <field name="shipping_solution"/>
+                                                            <field name="carrier_name"/>
+                                                            <field name="carrier_alpha_code"/>
+                                                            <field name="estimated_cost"/>
+                                                            <field name="currency_id"/>
+                                                            <field name="valid_until"/>
+                                                            <button name="action_select_transportation_option"
+                                                                    type="object"
+                                                                    string="Select"
+                                                                    groups="sdlc_amazon_connector.group_amazon_manager"
+                                                                    invisible="selected"/>
+                                                        </list>
+                                                    </field>
+                                                    <group groups="sdlc_amazon_connector.group_amazon_manager">
+                                                        <field name="transportation_error_code" readonly="1"/>
+                                                        <field name="transportation_error_message" readonly="1"/>
+                                                    </group>
+                                                    <field name="transportation_response" readonly="1" nolabel="1"
+                                                           groups="sdlc_amazon_connector.group_amazon_manager"/>
                                                     <field name="line_ids" readonly="1">
                                                         <list>
                                                             <field name="msku"/>

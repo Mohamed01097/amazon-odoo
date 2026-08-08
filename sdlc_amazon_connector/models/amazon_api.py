@@ -1369,6 +1369,43 @@ class AmazonAPI():
         resp = self._amazon_request(instance, access_token, 'PUT', url, body=body)
         return self._json_response_with_request_id(resp)
 
+    def generate_transportation_options(self, instance, access_token, plan_id, body):
+        """Start official v2024-03-20 transportation-option generation."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/transportationOptions"
+        resp = self._amazon_request(
+            instance, access_token, 'POST', url, body=body, max_retries=0,
+        )
+        return self._json_response_with_request_id(resp)
+
+    def list_transportation_options(self, instance, access_token, plan_id, page_size=20,
+                                    pagination_token=None, placement_option_id=None,
+                                    shipment_id=None):
+        """Return one official listTransportationOptions page."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/transportationOptions"
+        params = {'pageSize': page_size}
+        if pagination_token:
+            params['paginationToken'] = pagination_token
+        if placement_option_id:
+            params['placementOptionId'] = placement_option_id
+        if shipment_id:
+            params['shipmentId'] = shipment_id
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
+        return self._json_response_with_request_id(resp)
+
+    def confirm_transportation_options(self, instance, access_token, plan_id, body):
+        """Start official v2024-03-20 transportation confirmation."""
+        endpoint = self._get_endpoint(instance)
+        url = (
+            f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
+            "/transportationOptions/confirmation"
+        )
+        resp = self._amazon_request(
+            instance, access_token, 'POST', url, body=body, max_retries=0,
+        )
+        return self._json_response_with_request_id(resp)
+
     def list_shipment_items(self, instance, access_token, plan_id, shipment_id,
                             page_size=20, pagination_token=None):
         """Return one official listShipmentItems page."""

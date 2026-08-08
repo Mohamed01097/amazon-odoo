@@ -287,6 +287,26 @@ class AmazonInboundShipmentShipping(models.Model):
             raise UserError(_("Enter the shipment date."))
         self._prepare_tracking_details_payload()
 
+    def _selected_amazon_shipment_id(self):
+        """Return the single physical shipment ID for legacy plan-level buttons."""
+        self.ensure_one()
+        physical = self.physical_shipment_ids.filtered(
+            lambda item: item.placement_option_id.selected
+            and item.placement_option_id.status == 'ACCEPTED'
+        )
+        if not physical and self.physical_shipment_ids:
+            physical = self.physical_shipment_ids
+        if len(physical) == 1:
+            shipment_id = (physical.amazon_shipment_id or '').strip()
+        else:
+            shipment_id = (self.shipment_id or '').strip()
+        if not shipment_id or not AMAZON_SHIPMENT_ID_RE.fullmatch(shipment_id):
+            raise UserError(_(
+                "Select a single Amazon physical shipment. Transportation and tracking are "
+                "shipment-level operations."
+            ))
+        return shipment_id
+
     def _validate_reserved_pickings(self):
         self.ensure_one()
         pickings = self._active_fba_pickings()
@@ -491,7 +511,7 @@ class AmazonInboundShipmentShipping(models.Model):
                 self.instance_id,
                 access_token,
                 self.inbound_plan_id,
-                self.shipment_id,
+                self._selected_amazon_shipment_id(),
                 body,
                 error_msg=_("Failed to update Amazon inbound shipment tracking"),
             )
@@ -603,6 +623,60 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
     )
     dispatch_quantity = fields.Integer(compute='_compute_dispatch_quantity')
     dispatch_date = fields.Datetime(copy=False, readonly=True)
+    transportation_option_ids = fields.One2many(
+        'amazon.fba.transportation.option', 'physical_shipment_id',
+        string='Transportation Options',
+    )
+    selected_transportation_option_id = fields.Many2one(
+        'amazon.fba.transportation.option', string='Selected Transportation Option',
+        copy=False, check_company=True,
+    )
+    transportation_generation_operation_id = fields.Char(copy=False, readonly=True, index=True)
+    transportation_generation_status = fields.Selection([
+        ('pending', 'Pending'),
+        ('in_progress', 'In Progress'),
+        ('success', 'Success'),
+        ('failed', 'Failed'),
+    ], copy=False, readonly=True, index=True)
+    transportation_confirmation_operation_id = fields.Char(copy=False, readonly=True, index=True)
+    transportation_confirmation_status = fields.Selection([
+        ('pending', 'Pending'),
+        ('in_progress', 'In Progress'),
+        ('success', 'Success'),
+        ('failed', 'Failed'),
+    ], copy=False, readonly=True, index=True)
+    transportation_status = fields.Char(copy=False, readonly=True, index=True)
+    transportation_error_code = fields.Char(
+        copy=False, readonly=True, groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+    transportation_error_message = fields.Text(
+        copy=False, readonly=True, groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+    transportation_last_sync_at = fields.Datetime(copy=False, readonly=True)
+    transportation_response = fields.Text(
+        string='Sanitized Transportation Response', copy=False, readonly=True,
+        groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+    carrier_type = fields.Selection([
+        ('partnered', 'Amazon Partnered'),
+        ('non_partnered', 'Non-Partnered'),
+    ], string='Carrier Type', copy=False)
+    carrier_name = fields.Char(copy=False)
+    carrier_code = fields.Char(copy=False)
+    shipping_mode = fields.Char(copy=False, readonly=True)
+    tracking_number = fields.Char(copy=False)
+    pro_number = fields.Char(copy=False)
+    bill_of_lading_number = fields.Char(copy=False)
+    ship_date = fields.Date(copy=False)
+    estimated_arrival = fields.Date(copy=False)
+    tracking_operation_id = fields.Char(copy=False, readonly=True, index=True)
+    tracking_status = fields.Selection([
+        ('pending', 'Pending'),
+        ('in_progress', 'In Progress'),
+        ('success', 'Success'),
+        ('failed', 'Failed'),
+    ], copy=False, readonly=True, index=True)
+    tracking_last_synced_at = fields.Datetime(copy=False, readonly=True)
 
     @api.depends('picking_ids.state')
     def _compute_dispatch_picking(self):
@@ -650,6 +724,540 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
         if not self.line_ids:
             raise UserError(_("The Amazon physical shipment has no final placement items."))
         return inbound._validate_fba_stock_locations()
+
+    def _merge_transportation_response(self, key, value):
+        self.ensure_one()
+        history = {}
+        if self.transportation_response:
+            try:
+                history = json.loads(self.transportation_response)
+            except (TypeError, ValueError):
+                history = {'legacyResponse': self.transportation_response}
+        history[key] = AmazonAPI._sanitize_for_log(value)
+        return self.inbound_shipment_id._sanitized_json(history)
+
+    def _validate_transportation_preconditions(self):
+        self.ensure_one()
+        self._validate_dispatch_preconditions()
+        if self.dispatch_state != 'dispatched' or not self.picking_id or self.picking_id.state != 'done':
+            raise UserError(_(
+                "Transportation can start only after this physical shipment's dispatch picking is done."
+            ))
+        transit = self.instance_id.fba_transit_location_id
+        for line in self.line_ids:
+            product = line.amazon_product_id.odoo_product_id
+            if not product:
+                raise UserError(_("Physical shipment line %s has no mapped Odoo product.", line.msku))
+            qty = product.with_context(location=transit.id).qty_available
+            if product.uom_id.compare(qty, line.quantity) < 0:
+                raise UserError(_(
+                    "Amazon Transit does not contain the dispatched quantity for %s.",
+                    line.msku,
+                ))
+
+    def _prepare_contact_information(self):
+        self.ensure_one()
+        partner = self.instance_id.fba_ship_from_partner_id
+        if not partner:
+            return False
+        contact = {}
+        if (partner.email or '').strip():
+            contact['email'] = partner.email.strip()
+        if (partner.name or '').strip():
+            contact['name'] = partner.name.strip()
+        if (partner.phone or '').strip():
+            contact['phoneNumber'] = partner.phone.strip()
+        return contact or False
+
+    def _prepare_ready_to_ship_window(self):
+        self.ensure_one()
+        start = self.dispatch_date or fields.Datetime.now()
+        if isinstance(start, str):
+            start = fields.Datetime.from_string(start)
+        return {'start': start.replace(microsecond=0).isoformat() + 'Z'}
+
+    def _prepare_transportation_generation_payload(self):
+        self.ensure_one()
+        self._validate_transportation_preconditions()
+        config = {
+            'shipmentId': self.amazon_shipment_id.strip(),
+            'readyToShipWindow': self._prepare_ready_to_ship_window(),
+        }
+        contact = self._prepare_contact_information()
+        if contact:
+            config['contactInformation'] = contact
+        return {
+            'placementOptionId': self.placement_option_id.amazon_placement_option_id,
+            'shipmentTransportationConfigurations': [config],
+        }
+
+    def _enqueue_physical_job(self, operation_type, option=False):
+        self.ensure_one()
+        Job = self.env['amazon.inbound.operation.job'].sudo()
+        active = Job.search([
+            ('inbound_shipment_id', '=', self.inbound_shipment_id.id),
+            ('physical_shipment_id', '=', self.id),
+            ('operation_type', '=', operation_type),
+            ('state', 'in', ('pending', 'in_progress')),
+        ], limit=1)
+        if active:
+            return active, False
+        vals = {
+            'inbound_shipment_id': self.inbound_shipment_id.id,
+            'physical_shipment_id': self.id,
+            'operation_type': operation_type,
+            'state': 'pending',
+            'next_run_at': fields.Datetime.now(),
+        }
+        if option:
+            vals['transportation_option_id'] = option.id
+        return Job.create(vals), True
+
+    def action_generate_transportation_options(self):
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self._lock_dispatch()
+        if self.transportation_generation_status in ('pending', 'in_progress'):
+            raise UserError(_("Transportation option generation is already queued."))
+        self._prepare_transportation_generation_payload()
+        self.sudo().write({
+            'transportation_generation_status': 'pending',
+            'transportation_error_code': False,
+            'transportation_error_message': False,
+        })
+        _job, created = self._enqueue_physical_job('generate_transportation_options')
+        return self.instance_id._notify(
+            _("FBA Transportation Options"),
+            _("Transportation option generation was queued.")
+            if created else _("Transportation option generation is already queued."),
+            'success' if created else 'warning',
+        )
+
+    def action_refresh_transportation_options(self):
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self._validate_transportation_preconditions()
+        self._refresh_transportation_options()
+        return self.instance_id._notify(
+            _("FBA Transportation Options"),
+            _("Transportation options were refreshed."),
+            'success',
+        )
+
+    def action_confirm_transportation(self):
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self._lock_dispatch()
+        self._validate_transportation_preconditions()
+        option = self.selected_transportation_option_id
+        if not option:
+            raise UserError(_("Select one transportation option before confirmation."))
+        if option.physical_shipment_id != self:
+            raise UserError(_("The selected transportation option belongs to another physical shipment."))
+        if self.transportation_confirmation_status in ('pending', 'in_progress', 'success'):
+            raise UserError(_("Transportation confirmation is already queued or completed."))
+        self.sudo().write({
+            'transportation_confirmation_status': 'pending',
+            'transportation_error_code': False,
+            'transportation_error_message': False,
+        })
+        _job, created = self._enqueue_physical_job('confirm_transportation_options', option=option)
+        return self.instance_id._notify(
+            _("FBA Transportation Confirmation"),
+            _("Transportation confirmation was queued.")
+            if created else _("Transportation confirmation is already queued."),
+            'success' if created else 'warning',
+        )
+
+    def action_submit_tracking(self):
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self._lock_dispatch()
+        if self.transportation_confirmation_status != 'success':
+            raise UserError(_("Confirm transportation successfully before submitting tracking."))
+        self._prepare_physical_tracking_details_payload()
+        if self.tracking_status in ('pending', 'in_progress'):
+            raise UserError(_("Tracking submission is already queued."))
+        self.sudo().write({'tracking_status': 'pending'})
+        _job, created = self._enqueue_physical_job('submit_transportation_tracking')
+        return self.instance_id._notify(
+            _("FBA Tracking"),
+            _("Tracking submission was queued.") if created else _("Tracking submission is already queued."),
+            'success' if created else 'warning',
+        )
+
+    def action_refresh_physical_shipment_status(self):
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self._refresh_physical_shipment_status()
+        return self.instance_id._notify(
+            _("FBA Shipment Status"), _("Shipment status was refreshed."), 'success',
+        )
+
+    def _refresh_transportation_options(self):
+        self.ensure_one()
+        access_token = self.instance_id._get_access_token_or_raise()
+        options = []
+        token = None
+        for _page in range(100):
+            result = self.instance_id._api_call_safe(
+                AmazonAPI().list_transportation_options,
+                self.instance_id,
+                access_token,
+                self.inbound_shipment_id.inbound_plan_id,
+                20,
+                token,
+                self.placement_option_id.amazon_placement_option_id,
+                self.amazon_shipment_id,
+                error_msg=_("Failed to list Amazon transportation options"),
+            )
+            if not isinstance(result, dict):
+                result = {'unexpectedResponse': result}
+            options.extend(result.get('transportationOptions') or [])
+            self.sudo().write({
+                'transportation_response': self._merge_transportation_response(
+                    'listTransportationOptions', result,
+                ),
+                'transportation_last_sync_at': fields.Datetime.now(),
+            })
+            pagination = result.get('pagination') or {}
+            token = pagination.get('nextToken') or pagination.get('paginationToken')
+            if not token:
+                break
+        else:
+            raise UserError(_("Amazon transportation option pagination exceeded 100 pages."))
+        self._sync_transportation_options(options)
+        return options
+
+    def _sync_transportation_options(self, options):
+        self.ensure_one()
+        Option = self.env['amazon.fba.transportation.option'].sudo()
+        synced = Option
+        for raw in options:
+            if not isinstance(raw, dict):
+                continue
+            shipment_id = str(raw.get('shipmentId') or '').strip()
+            option_id = str(raw.get('transportationOptionId') or '').strip()
+            if shipment_id != self.amazon_shipment_id or not option_id:
+                continue
+            carrier = raw.get('carrier') or {}
+            quote = raw.get('quote') or {}
+            cost = quote.get('cost') or {}
+            appointment = raw.get('carrierAppointment') or {}
+            vals = {
+                'instance_id': self.instance_id.id,
+                'inbound_shipment_id': self.inbound_shipment_id.id,
+                'physical_shipment_id': self.id,
+                'amazon_transportation_option_id': option_id,
+                'shipment_id': shipment_id,
+                'shipping_mode': str(raw.get('shippingMode') or '').strip() or False,
+                'shipping_solution': str(raw.get('shippingSolution') or '').strip() or False,
+                'carrier_name': str(carrier.get('name') or '').strip() or False,
+                'carrier_alpha_code': str(carrier.get('alphaCode') or '').strip() or False,
+                'estimated_cost': cost.get('amount') or 0.0,
+                'currency_id': self._currency_from_code(cost.get('code')),
+                'valid_until': self._parse_amazon_datetime(quote.get('expiration')),
+                'appointment_start': self._parse_amazon_datetime(appointment.get('startTime')),
+                'appointment_end': self._parse_amazon_datetime(appointment.get('endTime')),
+                'preconditions': json.dumps(raw.get('preconditions') or []),
+                'raw_response': self.inbound_shipment_id._sanitized_json(raw),
+            }
+            existing = Option.search([
+                ('physical_shipment_id', '=', self.id),
+                ('amazon_transportation_option_id', '=', option_id),
+            ], limit=1)
+            if existing:
+                existing.write(vals)
+                synced |= existing
+            else:
+                synced |= Option.create(vals)
+        return synced
+
+    def _currency_from_code(self, code):
+        code = str(code or '').strip().upper()
+        if not code:
+            return False
+        return self.env['res.currency'].sudo().search([('name', '=', code)], limit=1).id or False
+
+    def _parse_amazon_datetime(self, value):
+        value = str(value or '').strip()
+        if not value:
+            return False
+        try:
+            return fields.Datetime.to_datetime(value.replace('Z', '+00:00')).replace(tzinfo=None)
+        except Exception:
+            return False
+
+    def _prepare_transportation_confirmation_payload(self):
+        self.ensure_one()
+        option = self.selected_transportation_option_id
+        if not option:
+            raise UserError(_("Select one transportation option before confirmation."))
+        selection = {
+            'shipmentId': self.amazon_shipment_id,
+            'transportationOptionId': option.amazon_transportation_option_id,
+        }
+        contact = self._prepare_contact_information()
+        if contact:
+            selection['contactInformation'] = contact
+        return {'transportationSelections': [selection]}
+
+    def _prepare_physical_tracking_details_payload(self):
+        self.ensure_one()
+        mode = (self.shipping_mode or self.selected_transportation_option_id.shipping_mode or '').upper()
+        if 'SMALL_PARCEL' in mode:
+            tracking_number = (self.tracking_number or '').strip()
+            if not tracking_number:
+                raise UserError(_("Enter the tracking number before submitting SPD tracking."))
+            packing = self.inbound_shipment_id.packing_option_ids.filtered('selected')
+            boxes = packing.box_ids
+            if not boxes:
+                raise UserError(_("Accepted packing boxes are required before submitting SPD tracking."))
+            return {
+                'trackingDetails': {
+                    'spdTrackingDetail': {
+                        'spdTrackingItems': [
+                            {
+                                'boxId': (box.amazon_box_id or '').strip(),
+                                'trackingId': tracking_number,
+                            }
+                            for box in boxes if (box.amazon_box_id or '').strip()
+                        ],
+                    },
+                },
+            }
+        freight_bill = (self.pro_number or self.tracking_number or '').strip()
+        if not freight_bill:
+            raise UserError(_("Enter the freight bill/PRO number before submitting LTL tracking."))
+        detail = {'freightBillNumber': [freight_bill]}
+        if (self.bill_of_lading_number or '').strip():
+            detail['billOfLadingNumber'] = self.bill_of_lading_number.strip()
+        return {'trackingDetails': {'ltlTrackingDetail': detail}}
+
+    def _refresh_physical_shipment_status(self):
+        self.ensure_one()
+        access_token = self.instance_id._get_access_token_or_raise()
+        result = self.instance_id._api_call_safe(
+            AmazonAPI().get_shipment,
+            self.instance_id,
+            access_token,
+            self.inbound_shipment_id.inbound_plan_id,
+            self.amazon_shipment_id,
+            error_msg=_("Failed to refresh Amazon physical shipment status"),
+        )
+        if not isinstance(result, dict):
+            result = {'unexpectedResponse': result}
+        if str(result.get('shipmentId') or '').strip() not in ('', self.amazon_shipment_id):
+            raise ValidationError(_("Amazon returned a different physical shipment."))
+        selected = result.get('selectedTransportationOptionId') or (
+            (result.get('acceptedTransportationSelection') or {}).get('transportationOptionId')
+            if isinstance(result.get('acceptedTransportationSelection'), dict) else False
+        )
+        vals = {
+            'status': str(result.get('status') or '').strip() or self.status,
+            'transportation_status': str(result.get('status') or '').strip() or self.transportation_status,
+            'shipment_confirmation_id': str(
+                result.get('shipmentConfirmationId') or ''
+            ).strip() or self.shipment_confirmation_id,
+            'transportation_last_sync_at': fields.Datetime.now(),
+            'transportation_response': self._merge_transportation_response('getShipment', result),
+        }
+        if selected:
+            option = self.transportation_option_ids.filtered(
+                lambda item: item.amazon_transportation_option_id == selected
+            )[:1]
+            if option:
+                vals['selected_transportation_option_id'] = option.id
+                vals['shipping_mode'] = option.shipping_mode
+                vals['carrier_name'] = option.carrier_name
+                vals['carrier_code'] = option.carrier_alpha_code
+                vals['carrier_type'] = (
+                    'partnered' if option.shipping_solution == 'AMAZON_PARTNERED_CARRIER'
+                    else 'non_partnered'
+                )
+                option.write({'selected': True})
+        self.sudo().write(vals)
+        return result
+
+    def _operation_problem_values(self, problems):
+        return self.inbound_shipment_id._operation_problem_values(problems)
+
+    def _process_transportation_job(self, job):
+        self.ensure_one()
+        if job.operation_type == 'refresh_transportation_options':
+            self._refresh_transportation_options()
+            return 'success'
+
+        if job.operation_type == 'generate_transportation_options':
+            if not job.operation_id:
+                body = self._prepare_transportation_generation_payload()
+                access_token = self.instance_id._get_access_token_or_raise()
+                result = self.instance_id._api_call_safe(
+                    AmazonAPI().generate_transportation_options,
+                    self.instance_id,
+                    access_token,
+                    self.inbound_shipment_id.inbound_plan_id,
+                    body,
+                    error_msg=_("Failed to generate Amazon transportation options"),
+                )
+                if not isinstance(result, dict):
+                    result = {'unexpectedResponse': result}
+                operation_id = str(result.get('operationId') or '').strip()
+                self.sudo().write({
+                    'transportation_generation_operation_id': operation_id or False,
+                    'transportation_generation_status': 'in_progress',
+                    'transportation_response': self._merge_transportation_response(
+                        'generateTransportationOptions', result,
+                    ),
+                    'transportation_last_sync_at': fields.Datetime.now(),
+                })
+                job.sudo().write({
+                    'operation_id': operation_id or False,
+                    'response_data': self.inbound_shipment_id._sanitized_json(result),
+                    'amazon_request_id': str(result.get('_amazon_request_id') or '').strip() or False,
+                })
+                if not OPERATION_ID_RE.fullmatch(operation_id):
+                    raise UserError(_("Amazon did not return a valid transportation operationId."))
+                return 'in_progress'
+            return self._poll_transportation_operation(
+                job, 'transportation_generation_status', refresh_options=True,
+            )
+
+        if job.operation_type == 'confirm_transportation_options':
+            if not job.operation_id:
+                body = self._prepare_transportation_confirmation_payload()
+                access_token = self.instance_id._get_access_token_or_raise()
+                result = self.instance_id._api_call_safe(
+                    AmazonAPI().confirm_transportation_options,
+                    self.instance_id,
+                    access_token,
+                    self.inbound_shipment_id.inbound_plan_id,
+                    body,
+                    error_msg=_("Failed to confirm Amazon transportation option"),
+                )
+                if not isinstance(result, dict):
+                    result = {'unexpectedResponse': result}
+                operation_id = str(result.get('operationId') or '').strip()
+                self.sudo().write({
+                    'transportation_confirmation_operation_id': operation_id or False,
+                    'transportation_confirmation_status': 'in_progress',
+                    'transportation_response': self._merge_transportation_response(
+                        'confirmTransportationOptions', result,
+                    ),
+                    'transportation_last_sync_at': fields.Datetime.now(),
+                })
+                job.sudo().write({
+                    'operation_id': operation_id or False,
+                    'response_data': self.inbound_shipment_id._sanitized_json(result),
+                    'amazon_request_id': str(result.get('_amazon_request_id') or '').strip() or False,
+                })
+                if not OPERATION_ID_RE.fullmatch(operation_id):
+                    raise UserError(_("Amazon did not return a valid transportation confirmation operationId."))
+                return 'in_progress'
+            return self._poll_transportation_operation(
+                job, 'transportation_confirmation_status', refresh_shipment=True,
+            )
+
+        if job.operation_type == 'submit_transportation_tracking':
+            if not job.operation_id:
+                body = self._prepare_physical_tracking_details_payload()
+                access_token = self.instance_id._get_access_token_or_raise()
+                result = self.instance_id._api_call_safe(
+                    AmazonAPI().update_shipment_tracking_details,
+                    self.instance_id,
+                    access_token,
+                    self.inbound_shipment_id.inbound_plan_id,
+                    self.amazon_shipment_id,
+                    body,
+                    error_msg=_("Failed to update Amazon inbound shipment tracking"),
+                )
+                if not isinstance(result, dict):
+                    result = {'unexpectedResponse': result}
+                operation_id = str(result.get('operationId') or '').strip()
+                self.sudo().write({
+                    'tracking_operation_id': operation_id or False,
+                    'tracking_status': 'in_progress',
+                    'transportation_response': self._merge_transportation_response(
+                        'updateShipmentTrackingDetails', result,
+                    ),
+                    'tracking_last_synced_at': fields.Datetime.now(),
+                })
+                job.sudo().write({
+                    'operation_id': operation_id or False,
+                    'response_data': self.inbound_shipment_id._sanitized_json(result),
+                    'amazon_request_id': str(result.get('_amazon_request_id') or '').strip() or False,
+                })
+                if not OPERATION_ID_RE.fullmatch(operation_id):
+                    raise UserError(_("Amazon did not return a valid tracking update operationId."))
+                return 'in_progress'
+            return self._poll_transportation_operation(
+                job, 'tracking_status', refresh_shipment=True,
+            )
+        raise UserError(_("Unsupported physical shipment operation: %s", job.operation_type))
+
+    def _poll_transportation_operation(self, job, status_field, refresh_options=False,
+                                       refresh_shipment=False):
+        self.ensure_one()
+        access_token = self.instance_id._get_access_token_or_raise()
+        result = self.instance_id._api_call_safe(
+            AmazonAPI().get_inbound_operation_status,
+            self.instance_id,
+            access_token,
+            job.operation_id,
+            error_msg=_("Failed to poll Amazon inbound operation"),
+        )
+        if not isinstance(result, dict):
+            result = {'unexpectedResponse': result}
+        raw_status = str(result.get('operationStatus') or '').strip()
+        normalized = raw_status.upper().replace('-', '_').replace(' ', '_')
+        error_code, error_message = self._operation_problem_values(
+            result.get('operationProblems')
+        )
+        self.sudo().write({
+            'transportation_response': self._merge_transportation_response(
+                'getInboundOperationStatus:%s' % job.operation_type, result,
+            ),
+            'transportation_last_sync_at': fields.Datetime.now(),
+        })
+        job.sudo().write({
+            'raw_operation_status': raw_status or False,
+            'amazon_request_id': str(result.get('_amazon_request_id') or '').strip() or False,
+            'response_data': self.inbound_shipment_id._sanitized_json(result),
+        })
+        if normalized == 'SUCCESS':
+            vals = {
+                status_field: 'success',
+                'transportation_error_code': False,
+                'transportation_error_message': False,
+            }
+            self.sudo().write(vals)
+            if refresh_options:
+                self._refresh_transportation_options()
+            if refresh_shipment:
+                self._refresh_physical_shipment_status()
+            return 'success'
+        if normalized == 'FAILED':
+            self.sudo().write({
+                status_field: 'failed',
+                'transportation_error_code': error_code or 'AMAZON_OPERATION_FAILED',
+                'transportation_error_message': error_message or _(
+                    "Amazon reported that the operation failed."
+                ),
+            })
+            return 'failed'
+        if normalized == 'IN_PROGRESS':
+            self.sudo().write({
+                status_field: 'in_progress',
+                'transportation_error_code': error_code,
+                'transportation_error_message': error_message,
+            })
+            return 'in_progress'
+        self.sudo().write({
+            'transportation_status': raw_status or False,
+            'transportation_error_code': error_code,
+            'transportation_error_message': error_message,
+        })
+        return 'in_progress'
 
     def _prepare_dispatch_move_commands(self, source, transit):
         self.ensure_one()
@@ -877,19 +1485,115 @@ class StockPickingAmazonInbound(models.Model):
         return result
 
 
+class AmazonFbaTransportationOption(models.Model):
+    _name = 'amazon.fba.transportation.option'
+    _description = 'Amazon FBA Transportation Option'
+    _order = 'physical_shipment_id, amazon_transportation_option_id, id'
+    _check_company_auto = True
+
+    instance_id = fields.Many2one(
+        'amazon.instance', required=True, ondelete='cascade', index=True,
+    )
+    company_id = fields.Many2one(
+        'res.company', related='instance_id.company_id', store=True, readonly=True, index=True,
+    )
+    inbound_shipment_id = fields.Many2one(
+        'amazon.inbound.shipment', required=True, ondelete='cascade', index=True,
+        check_company=True,
+    )
+    physical_shipment_id = fields.Many2one(
+        'amazon.fba.physical.shipment', required=True, ondelete='cascade', index=True,
+        check_company=True,
+    )
+    amazon_transportation_option_id = fields.Char(required=True, copy=False, index=True)
+    shipment_id = fields.Char(required=True, copy=False, index=True)
+    shipping_mode = fields.Char(copy=False, index=True)
+    shipping_solution = fields.Char(copy=False, index=True)
+    carrier_name = fields.Char(copy=False)
+    carrier_alpha_code = fields.Char(copy=False)
+    estimated_cost = fields.Monetary(currency_field='currency_id', copy=False)
+    currency_id = fields.Many2one('res.currency', ondelete='restrict')
+    appointment_start = fields.Datetime(copy=False)
+    appointment_end = fields.Datetime(copy=False)
+    valid_until = fields.Datetime(copy=False)
+    preconditions = fields.Text(copy=False)
+    status = fields.Char(copy=False, index=True)
+    selected = fields.Boolean(copy=False, index=True)
+    raw_response = fields.Text(
+        copy=False, readonly=True, groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+
+    _unique_physical_option = models.Constraint(
+        'UNIQUE (physical_shipment_id, amazon_transportation_option_id)',
+        'A transportation option can occur only once per physical Amazon shipment.',
+    )
+
+    @api.constrains('inbound_shipment_id', 'physical_shipment_id', 'shipment_id')
+    def _check_physical_scope(self):
+        for option in self:
+            if option.physical_shipment_id.inbound_shipment_id != option.inbound_shipment_id:
+                raise ValidationError(_("The transportation option must belong to the same inbound plan."))
+            if option.physical_shipment_id.amazon_shipment_id != option.shipment_id:
+                raise ValidationError(_("The transportation option shipmentId must match the physical shipment."))
+
+    def action_select_transportation_option(self):
+        self.ensure_one()
+        physical = self.physical_shipment_id
+        physical.inbound_shipment_id._check_inbound_manager_access()
+        if physical.transportation_confirmation_status in ('pending', 'in_progress', 'success'):
+            raise UserError(_("Transportation is already queued or confirmed for this physical shipment."))
+        (physical.transportation_option_ids - self).sudo().write({'selected': False})
+        self.sudo().write({'selected': True})
+        physical.sudo().write({
+            'selected_transportation_option_id': self.id,
+            'shipping_mode': self.shipping_mode,
+            'carrier_name': self.carrier_name,
+            'carrier_code': self.carrier_alpha_code,
+            'carrier_type': (
+                'partnered' if self.shipping_solution == 'AMAZON_PARTNERED_CARRIER'
+                else 'non_partnered'
+            ),
+        })
+        return physical.instance_id._notify(
+            _("FBA Transportation Option"),
+            _("Transportation option was selected locally. Confirm it separately to send it to Amazon."),
+            'success',
+        )
+
+
 class AmazonInboundOperationJobShipping(models.Model):
     _inherit = 'amazon.inbound.operation.job'
+
+    physical_shipment_id = fields.Many2one(
+        'amazon.fba.physical.shipment', ondelete='cascade', check_company=True,
+    )
+    transportation_option_id = fields.Many2one(
+        'amazon.fba.transportation.option', ondelete='set null', check_company=True,
+    )
 
     operation_type = fields.Selection(selection_add=[
         ('confirm_shipment', 'Confirm Shipment / Update Tracking'),
         ('refresh_shipment_status', 'Refresh Shipment Status'),
+        ('generate_transportation_options', 'Generate Transportation Options'),
+        ('refresh_transportation_options', 'Refresh Transportation Options'),
+        ('confirm_transportation_options', 'Confirm Transportation Options'),
+        ('submit_transportation_tracking', 'Submit Transportation Tracking'),
     ], ondelete={
         'confirm_shipment': 'cascade',
         'refresh_shipment_status': 'cascade',
+        'generate_transportation_options': 'cascade',
+        'refresh_transportation_options': 'cascade',
+        'confirm_transportation_options': 'cascade',
+        'submit_transportation_tracking': 'cascade',
     })
 
     def _process_operation(self):
         self.ensure_one()
+        if self.operation_type in (
+            'generate_transportation_options', 'refresh_transportation_options',
+            'confirm_transportation_options', 'submit_transportation_tracking',
+        ):
+            return self._process_physical_transportation_operation()
         if self.operation_type not in ('confirm_shipment', 'refresh_shipment_status'):
             return super()._process_operation()
         if self.state in ('done', 'failed'):
@@ -935,4 +1639,54 @@ class AmazonInboundOperationJobShipping(models.Model):
             self._schedule_retry(error_message=message)
             if self.state == 'failed' and self.operation_type == 'confirm_shipment':
                 shipment.write({'shipment_confirmation_status': 'failed'})
+            return False
+
+    def _process_physical_transportation_operation(self):
+        self.ensure_one()
+        if self.state in ('done', 'failed'):
+            return False
+        physical = self.physical_shipment_id.sudo()
+        if not physical:
+            self.write({'state': 'failed', 'last_error': _("Missing physical shipment.")})
+            return False
+        now = fields.Datetime.now()
+        vals = {'state': 'in_progress', 'next_run_at': False}
+        if not self.started_at:
+            vals['started_at'] = now
+        self.write(vals)
+        try:
+            status = physical._process_transportation_job(self)
+            if status == 'success':
+                self._mark_done()
+                return True
+            if status == 'failed':
+                self.write({
+                    'state': 'failed',
+                    'finished_at': fields.Datetime.now(),
+                    'next_run_at': False,
+                    'last_error': physical.transportation_error_message
+                    or _("Amazon transportation operation failed."),
+                })
+                return False
+            self._schedule_retry()
+            return False
+        except Exception as exc:
+            message = str(exc)
+            _logger.warning(
+                "Amazon physical shipment job %s (%s) failed: %s",
+                self.id, self.operation_type, message,
+            )
+            physical.write({
+                'transportation_error_code': 'BACKGROUND_JOB_FAILED',
+                'transportation_error_message': message,
+                'transportation_last_sync_at': fields.Datetime.now(),
+            })
+            self._schedule_retry(error_message=message)
+            if self.state == 'failed':
+                if self.operation_type == 'generate_transportation_options':
+                    physical.write({'transportation_generation_status': 'failed'})
+                elif self.operation_type == 'confirm_transportation_options':
+                    physical.write({'transportation_confirmation_status': 'failed'})
+                elif self.operation_type == 'submit_transportation_tracking':
+                    physical.write({'tracking_status': 'failed'})
             return False
