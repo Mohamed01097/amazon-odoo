@@ -209,20 +209,119 @@ class AmazonPhase7StockService(models.AbstractModel):
         return False
 
     @api.model
-    def apply_removal_shipment(self, shipment):
+    def _removal_source_location(self, instance, disposition):
+        normalized = (disposition or '').strip().lower()
+        if normalized == 'sellable':
+            return instance.fba_sellable_location_id
+        if normalized in ('unsellable', 'unfulfillable'):
+            return instance.fba_unsellable_location_id
+        return self.env['stock.location']
+
+    @api.model
+    def _tracked_quantity(self, product, location, company):
+        if not product or not location:
+            return 0.0
+        return product.sudo().with_company(company).with_context(location=location.id).qty_available
+
+    @api.model
+    def _removal_discrepancy(self, shipment, code, message):
+        shipment.write({
+            'stock_action_state': 'manual_review',
+            'discrepancy_code': code,
+            'discrepancy_message': message,
+        })
+        shipment.order_id.write({
+            'manual_review_required': True,
+            'stock_action_state': 'manual_review',
+            'discrepancy_code': code,
+            'discrepancy_message': message,
+        })
+        self.env['amazon.smart.alert'].phase7_alert(
+            shipment.instance_id,
+            'removal-shipment:%s:%s' % (shipment.id, code),
+            _("FBA removal shipment requires review"),
+            message,
+            source=shipment,
+            product=shipment.line_id.amazon_product_id,
+        )
+
+    @api.model
+    def apply_removal_shipment(self, shipment, reviewed=False):
+        """Record shipment evidence; move stock only after an explicit review.
+
+        Amazon inventory summaries can reflect the same physical departure
+        before the removal report is imported. Automatic report-driven moves
+        would then reduce FBA inventory twice. The import path is therefore
+        audit-only; the shipment button is the deliberate event-level path
+        when its documented disposition and current Odoo source stock agree.
+        """
         line = shipment.line_id
         order = shipment.order_id
+        if not reviewed:
+            shipment.stock_action_state = 'audit_only'
+            if order.stock_action_state != 'manual_review':
+                order.stock_action_state = 'audit_only'
+            return False
+
+        self.env.cr.execute(
+            'SELECT id FROM amazon_removal_shipment WHERE id = %s FOR UPDATE',
+            [shipment.id],
+        )
+        shipment.invalidate_recordset()
         quantity = max(shipment.shipped_quantity - shipment.dispatched_stock_quantity, 0.0)
         if not quantity:
             return shipment.dispatch_move_id.picking_id if shipment.dispatch_move_id else False
-        if not line.odoo_product_id:
-            order.write({'manual_review_required': True, 'stock_action_state': 'manual_review'})
+        if order.removal_type != 'return_to_address':
+            self._removal_discrepancy(
+                shipment, 'NOT_RETURN_TO_SELLER',
+                _("Only return-to-seller shipments can move to Removal Transit."),
+            )
             return False
-        source = (
-            order.instance_id.fba_sellable_location_id
-            if (shipment.disposition or line.disposition).strip().lower() == 'sellable'
-            else order.instance_id.fba_unsellable_location_id
+        if not line.odoo_product_id:
+            self._removal_discrepancy(
+                shipment, 'UNMAPPED_SKU',
+                _("Removal SKU %s is not mapped to an inventory product.", shipment.sku),
+            )
+            return False
+        if (
+            line.requested_quantity > 0
+            and line.odoo_product_id.uom_id.compare(
+                shipment.shipped_quantity, line.requested_quantity,
+            ) > 0
+        ):
+            self._removal_discrepancy(
+                shipment, 'REMOVAL_EXCEEDS_REQUESTED_QUANTITY',
+                _(
+                    "Amazon reports %s shipped units for a line that requested %s. "
+                    "No stock move was created.",
+                    shipment.shipped_quantity, line.requested_quantity,
+                ),
+            )
+            return False
+        source = self._removal_source_location(
+            order.instance_id, shipment.disposition or line.disposition,
         )
+        if not source:
+            self._removal_discrepancy(
+                shipment, 'UNKNOWN_SOURCE_DISPOSITION',
+                _(
+                    "Amazon disposition %s does not identify Sellable or Unsellable stock; "
+                    "use Inventory Reconciliation instead.",
+                    shipment.disposition or line.disposition or _('empty'),
+                ),
+            )
+            return False
+        available = self._tracked_quantity(line.odoo_product_id, source, order.company_id)
+        if line.odoo_product_id.uom_id.compare(available, quantity) < 0:
+            self._removal_discrepancy(
+                shipment, 'REMOVAL_EXCEEDS_TRACKED_STOCK',
+                _(
+                    "Amazon reports %s newly shipped units, but Odoo tracks only %s in %s. "
+                    "No stock move was created; the Amazon snapshot may already reflect this removal.",
+                    quantity, available, source.display_name,
+                ),
+            )
+            return False
         try:
             dispatch = self._create_picking(
                 order.instance_id, line.odoo_product_id, quantity,
@@ -230,26 +329,22 @@ class AmazonPhase7StockService(models.AbstractModel):
                 order.removal_order_id, 'removal_dispatch', True,
                 removal_order=order, removal_shipment=shipment,
             )
-            receipt = self._create_picking(
-                order.instance_id, line.odoo_product_id, quantity,
-                order.instance_id.fba_removal_transit_location_id,
-                order.instance_id.fba_source_location_id,
-                order.removal_order_id, 'removal_receipt', False,
-                removal_order=order, removal_shipment=shipment,
-            )
             shipment.write({
                 'dispatch_move_id': dispatch.move_ids.id,
-                'receipt_picking_id': receipt.id,
+                'dispatch_picking_ids': [Command.link(dispatch.id)],
                 'dispatched_stock_quantity': shipment.dispatched_stock_quantity + quantity,
+                'stock_action_state': 'in_transit',
+                'discrepancy_code': False,
+                'discrepancy_message': False,
             })
             line.write({
                 'dispatch_move_id': dispatch.move_ids.id,
-                'receipt_move_id': receipt.move_ids.id,
                 'dispatched_stock_quantity': line.dispatched_stock_quantity + quantity,
             })
             order.write({
-                'picking_ids': [Command.link(dispatch.id), Command.link(receipt.id)],
+                'picking_ids': [Command.link(dispatch.id)],
                 'stock_action_state': 'awaiting_receipt', 'state': 'awaiting_receipt',
+                'discrepancy_code': False, 'discrepancy_message': False,
             })
             return dispatch
         except Exception as exc:
@@ -265,39 +360,148 @@ class AmazonPhase7StockService(models.AbstractModel):
         order = line.order_id
         if order.removal_type != 'disposal' or delta <= 0:
             return False
-        if order.instance_id.adjustment_stock_policy != 'event_moves':
-            order.stock_action_state = 'informational'
-            return False
-        source = (
-            order.instance_id.fba_sellable_location_id
-            if line.disposition.strip().lower() == 'sellable'
-            else order.instance_id.fba_unsellable_location_id
-        )
-        unapplied = max(line.disposed_quantity - line.disposed_stock_quantity, 0.0)
-        if not unapplied:
-            return False
-        try:
-            picking = self._create_picking(
-                order.instance_id, line.odoo_product_id, unapplied, source,
-                order.instance_id.fba_disposal_location_id,
-                order.removal_order_id, 'removal_disposal', True,
-                removal_order=order,
-            )
-            line.write({
-                'disposal_move_id': picking.move_ids.id,
-                'disposed_stock_quantity': line.disposed_stock_quantity + unapplied,
-            })
-            order.write({
-                'picking_ids': [Command.link(picking.id)],
-                'stock_action_state': 'disposed',
-            })
-            return picking
-        except Exception as exc:
+        # Disposal detail is operational evidence. Inventory snapshots can
+        # already include the same decrease, so imports never create a second
+        # stock reduction. Reconciliation remains the stock authority.
+        if not line.odoo_product_id:
             order.write({
                 'manual_review_required': True, 'stock_action_state': 'manual_review',
-                'error_message': str(exc)[:5000],
+                'discrepancy_code': 'UNMAPPED_SKU',
+                'discrepancy_message': _("Disposal SKU %s is not mapped.", line.sku),
             })
             return False
+        if (
+            line.requested_quantity > 0
+            and line.odoo_product_id.uom_id.compare(
+                line.disposed_quantity, line.requested_quantity,
+            ) > 0
+        ):
+            line.write({
+                'discrepancy_code': 'DISPOSAL_EXCEEDS_REQUESTED_QUANTITY',
+                'discrepancy_message': _(
+                    "Amazon reports %s disposed units for a line that requested %s. "
+                    "No stock move was created.",
+                    line.disposed_quantity, line.requested_quantity,
+                ),
+            })
+            order.write({
+                'manual_review_required': True, 'stock_action_state': 'manual_review',
+                'discrepancy_code': line.discrepancy_code,
+                'discrepancy_message': line.discrepancy_message,
+            })
+            return False
+        source = self._removal_source_location(order.instance_id, line.disposition)
+        if not source:
+            line.write({
+                'discrepancy_code': 'UNKNOWN_SOURCE_DISPOSITION',
+                'discrepancy_message': _(
+                    "Amazon disposition %s cannot be mapped safely to an FBA location.",
+                    line.disposition or _('empty'),
+                ),
+            })
+            order.write({
+                'manual_review_required': True, 'stock_action_state': 'manual_review',
+                'discrepancy_code': line.discrepancy_code,
+                'discrepancy_message': line.discrepancy_message,
+            })
+            return False
+        available = self._tracked_quantity(line.odoo_product_id, source, order.company_id)
+        if line.odoo_product_id.uom_id.compare(available, line.disposed_quantity) < 0:
+            line.write({
+                'discrepancy_code': 'DISPOSAL_EXCEEDS_TRACKED_STOCK',
+                'discrepancy_message': _(
+                    "Amazon reports %s disposed units, but Odoo tracks only %s in %s. "
+                    "No stock move was created.",
+                    line.disposed_quantity, available, source.display_name,
+                ),
+            })
+            order.write({
+                'manual_review_required': True, 'stock_action_state': 'manual_review',
+                'discrepancy_code': line.discrepancy_code,
+                'discrepancy_message': line.discrepancy_message,
+            })
+            return False
+        order.stock_action_state = 'audit_only'
+        return False
+
+    @api.model
+    def create_removal_receipt(self, shipment):
+        shipment.ensure_one()
+        order = shipment.order_id
+        instance = order.instance_id
+        if order.removal_type != 'return_to_address':
+            raise UserError(_("Disposal orders never create customer warehouse receipts."))
+        package_shipments = shipment._package_shipments()
+        existing = package_shipments.mapped('receipt_picking_id')
+        if existing:
+            if len(existing) > 1:
+                raise UserError(_("This Amazon package is linked to conflicting Odoo receipts."))
+            if existing.state == 'cancel':
+                raise UserError(_("The existing customer receipt is cancelled; review it manually."))
+            package_shipments.filtered(lambda item: not item.receipt_picking_id).write({
+                'receipt_picking_id': existing.id,
+            })
+            return existing
+        if not instance.fba_removal_transit_location_id or not instance.fba_source_location_id:
+            raise UserError(_("Configure Removal Transit and the customer warehouse destination."))
+
+        quantities = {}
+        for item in package_shipments:
+            product = item.line_id.odoo_product_id
+            if not product or not product.is_storable:
+                raise UserError(_("Every shipment row must map to an inventory-tracked product."))
+            if product.company_id and product.company_id != order.company_id:
+                raise UserError(_("A shipment product belongs to another company."))
+            if item.shipped_quantity <= 0:
+                raise UserError(_("Amazon has not reported a positive shipped quantity."))
+            quantities[product] = quantities.get(product, 0.0) + item.shipped_quantity
+
+        source = instance.fba_removal_transit_location_id
+        destination = instance.fba_source_location_id
+        picking = self.env['stock.picking'].sudo().with_company(order.company_id).create({
+            'picking_type_id': self._internal_picking_type(
+                order.company_id, source, destination,
+            ).id,
+            'location_id': source.id,
+            'location_dest_id': destination.id,
+            'company_id': order.company_id.id,
+            'origin': '%s%s' % (
+                order.removal_order_id,
+                (' / %s' % shipment.tracking_number) if shipment.tracking_number else '',
+            ),
+            'amazon_instance_id': instance.id,
+            'amazon_fba_movement_type': 'removal_receipt',
+            'amazon_removal_order_id': order.id,
+            'amazon_removal_shipment_id': shipment.id,
+            'move_type': 'one',
+            'note': _(
+                "Warehouse verification is required. Amazon tracking or delivery status does not validate this receipt."
+            ),
+            'move_ids': [Command.create({
+                'product_id': product.id,
+                'product_uom_qty': quantity,
+                'product_uom': product.uom_id.id,
+                'location_id': source.id,
+                'location_dest_id': destination.id,
+                'company_id': order.company_id.id,
+                'origin': order.removal_order_id,
+            }) for product, quantity in quantities.items()],
+        })
+        picking.action_confirm()
+        package_shipments.write({
+            'receipt_picking_id': picking.id,
+            'stock_action_state': 'awaiting_receipt',
+        })
+        for line in package_shipments.mapped('line_id'):
+            move = picking.move_ids.filtered(lambda item: item.product_id == line.odoo_product_id)[:1]
+            if move:
+                line.receipt_move_id = move.id
+        order.write({
+            'picking_ids': [Command.link(picking.id)],
+            'state': 'awaiting_receipt',
+            'stock_action_state': 'awaiting_receipt',
+        })
+        return picking
 
     @api.model
     def apply_adjustment(self, event):
@@ -1142,10 +1346,12 @@ class AmazonPhase7Job(models.Model):
             'inventory_adjustments': 'last_fba_adjustment_sync_at',
             'reimbursements': 'last_fba_reimbursement_sync_at',
         }.get(self.operation_type)
-        # Never advance the incremental return cursor past rejected source rows.
-        # Valid rows remain committed and idempotent; the next run safely overlaps.
+        # Never advance an incremental return/removal cursor past rejected
+        # source rows. Valid rows remain committed and idempotent, so the next
+        # run can safely overlap and recover the rejected evidence.
         if cursor_field and not (
-            self.operation_type == 'customer_returns' and self.total_failed
+            self.operation_type in ('customer_returns', 'removal_status')
+            and self.total_failed
         ):
             self.instance_id.write({cursor_field: fields.Datetime.now()})
         self.write({
@@ -1305,14 +1511,29 @@ class AmazonPhase7Job(models.Model):
     def _fail_or_retry(self, exc):
         retry_count = self.retry_count + 1
         message = str(exc)[:10000]
-        retryable = any(token in message.lower() for token in (
+        cause = exc.__cause__ or exc
+        response = getattr(cause, 'response', None)
+        status_code = getattr(response, 'status_code', None)
+        retryable = status_code == 429 or (status_code and status_code >= 500) or any(
+            token in message.lower() for token in (
             '429', 'throttl', 'timeout', 'connection', 'temporar', '503', '500', '502', '504',
-        ))
+            )
+        )
         if retryable and retry_count < self.max_retries:
+            try:
+                retry_after = max(float(response.headers.get('Retry-After') or 0), 0.0)
+            except (AttributeError, TypeError, ValueError):
+                retry_after = 0.0
+            next_run_at = (
+                fields.Datetime.now() + timedelta(seconds=retry_after)
+                if retry_after
+                else fields.Datetime.now() + timedelta(minutes=min(2 ** retry_count, 60))
+            )
             self.write({
                 'state': 'pending', 'retry_count': retry_count,
-                'next_run_at': fields.Datetime.now() + timedelta(minutes=min(2 ** retry_count, 60)),
-                'last_error_code': 'RETRYABLE', 'last_error_message': message,
+                'next_run_at': next_run_at,
+                'last_error_code': str(status_code or 'RETRYABLE'),
+                'last_error_message': message,
             })
         else:
             self.write({
@@ -1464,22 +1685,60 @@ class StockPickingAmazonPhase7(models.Model):
         'inventory_destroyed': 'set null',
     })
 
-    def button_validate(self):
-        result = super().button_validate()
+    def _create_backorder_picking(self):
+        backorder = super()._create_backorder_picking()
+        if self.amazon_fba_movement_type == 'removal_receipt':
+            backorder.write({
+                'amazon_instance_id': self.amazon_instance_id.id,
+                'amazon_removal_order_id': self.amazon_removal_order_id.id,
+                'amazon_removal_shipment_id': self.amazon_removal_shipment_id.id,
+                'amazon_fba_movement_type': 'removal_receipt',
+            })
+            if self.amazon_removal_order_id:
+                self.amazon_removal_order_id.picking_ids = [Command.link(backorder.id)]
+        return backorder
+
+    def _removal_receipt_root(self):
+        self.ensure_one()
+        root = self
+        while root.backorder_id and root.backorder_id.amazon_fba_movement_type == 'removal_receipt':
+            root = root.backorder_id
+        return root
+
+    def _sync_removal_receipt_quantities(self):
         for picking in self.filtered(lambda rec: (
             rec.state == 'done' and rec.amazon_fba_movement_type == 'removal_receipt'
             and rec.amazon_removal_order_id
         )):
             order = picking.amazon_removal_order_id
-            shipment = picking.amazon_removal_shipment_id
-            received = sum(picking.move_ids.mapped('quantity'))
-            line = shipment.line_id if shipment else order.line_ids.filtered(
-                lambda item: item.odoo_product_id in picking.move_ids.product_id
-            )[:1]
-            if line:
+            root = picking._removal_receipt_root()
+            shipments = self.env['amazon.removal.shipment'].search([
+                ('receipt_picking_id', '=', root.id),
+            ], order='id')
+            received_by_product = {}
+            for move in picking.move_ids.filtered(lambda item: item.state == 'done'):
+                received_by_product[move.product_id.id] = (
+                    received_by_product.get(move.product_id.id, 0.0) + move.quantity
+                )
+            for shipment in shipments:
+                product = shipment.line_id.odoo_product_id
+                available = received_by_product.get(product.id, 0.0) if product else 0.0
+                remaining = max(shipment.shipped_quantity - shipment.received_quantity, 0.0)
+                allocated = min(available, remaining)
+                if allocated:
+                    shipment.received_quantity += allocated
+                    received_by_product[product.id] = available - allocated
+                shipment.stock_action_state = (
+                    'received'
+                    if shipment.shipped_quantity and shipment.received_quantity >= shipment.shipped_quantity
+                    else 'partially_received'
+                )
+            for line in shipments.mapped('line_id'):
                 line.received_quantity = min(
                     line.shipped_quantity,
-                    line.received_quantity + received,
+                    sum(order.shipment_ids.filtered(lambda item: item.line_id == line).mapped(
+                        'received_quantity'
+                    )),
                 )
             total_received = sum(order.line_ids.mapped('received_quantity'))
             total_shipped = sum(order.line_ids.mapped('shipped_quantity'))
@@ -1487,4 +1746,33 @@ class StockPickingAmazonPhase7(models.Model):
                 'stock_action_state': 'received' if total_received >= total_shipped else 'partially_received',
                 'state': 'completed' if total_shipped and total_received >= total_shipped else 'awaiting_receipt',
             })
+
+    def _action_done(self):
+        result = super()._action_done()
+        self._sync_removal_receipt_quantities()
+        return result
+
+    def button_validate(self):
+        removal_receipts = self.filtered(lambda rec: (
+            rec.state not in ('done', 'cancel')
+            and rec.amazon_fba_movement_type == 'removal_receipt'
+            and rec.amazon_removal_order_id
+        ))
+        for picking in removal_receipts:
+            quantities = {}
+            for move in picking.move_ids.filtered(lambda item: item.state != 'cancel'):
+                quantities[move.product_id] = quantities.get(move.product_id, 0.0) + move.quantity
+            for product, quantity in quantities.items():
+                if product.uom_id.compare(quantity, 0.0) <= 0:
+                    continue
+                physical = product.sudo().with_company(picking.company_id).with_context(
+                    location=picking.location_id.id,
+                ).qty_available
+                if product.uom_id.compare(physical, quantity) < 0:
+                    raise UserError(_(
+                        "Only %s %s is physically recorded in Removal Transit for %s. "
+                        "Reconcile the Amazon departure before validating %s received units.",
+                        physical, product.uom_id.name, product.display_name, quantity,
+                    ))
+        result = super().button_validate()
         return result

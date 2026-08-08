@@ -3,7 +3,7 @@ import json
 import logging
 
 from odoo import _, api, fields, models
-from odoo.exceptions import UserError, ValidationError
+from odoo.exceptions import AccessError, UserError, ValidationError
 
 _logger = logging.getLogger(__name__)
 
@@ -31,6 +31,9 @@ class AmazonRemovalOrder(models.Model):
         'res.company', related='instance_id.company_id', store=True,
         readonly=True, index=True,
     )
+    marketplace_id = fields.Char(
+        related='instance_id.marketplace_id', store=True, readonly=True, index=True,
+    )
     removal_order_id = fields.Char('Amazon Removal Order ID', copy=False, index=True, tracking=True)
     amazon_removal_order_id = fields.Char(
         related='removal_order_id', readonly=False, store=True,
@@ -56,8 +59,10 @@ class AmazonRemovalOrder(models.Model):
         ('manual_review', 'Manual Review'),
     ], default='draft', required=True, index=True, tracking=True)
     amazon_status = fields.Char(index=True, tracking=True)
+    amazon_order_type_raw = fields.Char(readonly=True, index=True)
     previous_amazon_status = fields.Char(readonly=True)
     requested_at = fields.Datetime(index=True)
+    last_updated_at = fields.Datetime(index=True)
     completed_at = fields.Datetime(index=True)
     last_synced_at = fields.Datetime(readonly=True)
     ship_to_partner_id = fields.Many2one(
@@ -79,12 +84,15 @@ class AmazonRemovalOrder(models.Model):
     feed_result_document_id = fields.Char(copy=False)
     error_code = fields.Char(copy=False, index=True)
     error_message = fields.Text(copy=False)
+    discrepancy_code = fields.Char(copy=False, readonly=True, index=True)
+    discrepancy_message = fields.Text(copy=False, readonly=True)
     raw_response = fields.Text(groups='sdlc_amazon_connector.group_amazon_technical_admin')
     stock_action_state = fields.Selection([
         ('pending', 'Pending'), ('dispatched', 'Dispatched'),
         ('awaiting_receipt', 'Awaiting Receipt'), ('partially_received', 'Partially Received'),
         ('received', 'Received'), ('disposed', 'Disposed'),
-        ('informational', 'Informational'), ('manual_review', 'Manual Review'),
+        ('informational', 'Informational'), ('audit_only', 'Reconciliation / Audit Only'),
+        ('manual_review', 'Manual Review'),
     ], default='pending', required=True, index=True, tracking=True)
     line_ids = fields.One2many('amazon.removal.order.line', 'order_id', copy=False)
     line_count = fields.Integer(compute='_compute_line_count')
@@ -311,7 +319,11 @@ class AmazonRemovalOrder(models.Model):
         values = {
             'instance_id': instance.id, 'name': removal_id,
             'removal_order_id': removal_id, 'removal_type': removal_type,
+            'amazon_order_type_raw': raw_type,
             'requested_at': self.env['amazon.phase7.stock.service'].datetime(row.get('request-date')),
+            'last_updated_at': self.env['amazon.phase7.stock.service'].datetime(
+                row.get('last-updated-date')
+            ),
             'last_synced_at': fields.Datetime.now(), 'amazon_status': raw_status,
             'raw_response': json.dumps(row, default=str, sort_keys=True),
         }
@@ -357,6 +369,8 @@ class AmazonRemovalOrderLine(models.Model):
     disposed_quantity = fields.Float(default=0.0, readonly=True)
     in_process_quantity = fields.Float(default=0.0, readonly=True)
     received_quantity = fields.Float(default=0.0, readonly=True)
+    last_shipped_delta = fields.Float(default=0.0, readonly=True, copy=False)
+    last_disposed_delta = fields.Float(default=0.0, readonly=True, copy=False)
     dispatched_stock_quantity = fields.Float(default=0.0, readonly=True, copy=False)
     disposed_stock_quantity = fields.Float(default=0.0, readonly=True, copy=False)
     dispatch_move_id = fields.Many2one('stock.move', ondelete='restrict', copy=False)
@@ -364,6 +378,11 @@ class AmazonRemovalOrderLine(models.Model):
     receipt_move_id = fields.Many2one('stock.move', ondelete='restrict', copy=False)
     raw_report_reference = fields.Char()
     raw_response = fields.Text(groups='sdlc_amazon_connector.group_amazon_technical_admin')
+    mapping_status = fields.Selection([
+        ('mapped', 'Mapped'), ('unmapped', 'Unmapped SKU'),
+    ], compute='_compute_mapping_status', store=True, readonly=True, index=True)
+    discrepancy_code = fields.Char(copy=False, readonly=True, index=True)
+    discrepancy_message = fields.Text(copy=False, readonly=True)
 
     _line_unique = models.Constraint(
         'UNIQUE(order_id, line_key)', 'This Amazon removal-order line was already imported.',
@@ -373,6 +392,11 @@ class AmazonRemovalOrderLine(models.Model):
         'cancelled_quantity >= 0 AND disposed_quantity >= 0 AND received_quantity >= 0)',
         'Removal-order quantities cannot be negative.',
     )
+
+    @api.depends('odoo_product_id')
+    def _compute_mapping_status(self):
+        for line in self:
+            line.mapping_status = 'mapped' if line.odoo_product_id else 'unmapped'
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -394,16 +418,25 @@ class AmazonRemovalOrderLine(models.Model):
             order.instance_id, row.get('sku'), row.get('fnsku'), False
         )
         number = self.env['amazon.phase7.stock.service'].number
+        old_shipped = line.shipped_quantity if line else 0.0
         old_disposed = line.disposed_quantity if line else 0.0
+        reported_shipped = number(row.get('shipped-quantity'))
+        shipment_observed = sum(order.shipment_ids.filtered(
+            lambda item: item.line_id == line
+        ).mapped('shipped_quantity')) if line else 0.0
+        new_shipped = max(reported_shipped, shipment_observed)
+        new_disposed = number(row.get('disposed-quantity'))
         values = {
             'order_id': order.id, 'line_key': key, 'sku': row.get('sku') or '',
             'fnsku': row.get('fnsku') or '', 'disposition': row.get('disposition') or 'Unknown',
             'fulfillment_center_id': row.get('fulfillment-center-id') or '',
             'requested_quantity': number(row.get('requested-quantity')),
-            'shipped_quantity': number(row.get('shipped-quantity')),
+            'shipped_quantity': new_shipped,
             'cancelled_quantity': number(row.get('cancelled-quantity')),
-            'disposed_quantity': number(row.get('disposed-quantity')),
+            'disposed_quantity': new_disposed,
             'in_process_quantity': number(row.get('in-process-quantity')),
+            'last_shipped_delta': max(new_shipped - old_shipped, 0.0),
+            'last_disposed_delta': max(new_disposed - old_disposed, 0.0),
             'raw_report_reference': raw_report_reference,
             'raw_response': json.dumps(row, default=str, sort_keys=True),
             **product_values,
@@ -413,10 +446,38 @@ class AmazonRemovalOrderLine(models.Model):
             line.write(values)
         else:
             line = self.create(values)
-        if line.disposed_quantity > old_disposed:
+        if new_shipped < old_shipped or new_disposed < old_disposed:
+            line.write({
+                'discrepancy_code': 'AMAZON_QUANTITY_DECREASED',
+                'discrepancy_message': _(
+                    "Amazon reduced a cumulative removal quantity. No reverse stock move was created."
+                ),
+            })
+            order.write({
+                'manual_review_required': True,
+                'stock_action_state': 'manual_review',
+                'discrepancy_code': 'AMAZON_QUANTITY_DECREASED',
+                'discrepancy_message': line.discrepancy_message,
+            })
+        elif not line.odoo_product_id:
+            line.write({
+                'discrepancy_code': 'UNMAPPED_SKU',
+                'discrepancy_message': _(
+                    "Amazon removal SKU %s is not mapped for this instance.", line.sku
+                ),
+            })
+            order.write({
+                'manual_review_required': True,
+                'stock_action_state': 'manual_review',
+                'discrepancy_code': 'UNMAPPED_SKU',
+                'discrepancy_message': line.discrepancy_message,
+            })
+        elif line.disposed_quantity > old_disposed:
             self.env['amazon.phase7.stock.service'].apply_disposal(
                 line, line.disposed_quantity - old_disposed
             )
+        elif order.stock_action_state not in ('manual_review', 'awaiting_receipt', 'received'):
+            order.stock_action_state = 'audit_only'
         return line
 
 
@@ -441,20 +502,105 @@ class AmazonRemovalShipment(models.Model):
     fnsku = fields.Char(index=True)
     disposition = fields.Char(index=True)
     shipped_quantity = fields.Float()
+    previous_shipped_quantity = fields.Float(default=0.0, readonly=True, copy=False)
+    shipped_delta_quantity = fields.Float(default=0.0, readonly=True, copy=False)
+    received_quantity = fields.Float(default=0.0, readonly=True, copy=False)
     carrier = fields.Char(index=True)
     tracking_number = fields.Char(index=True)
     package_reference = fields.Char(index=True)
     removal_order_type = fields.Char()
-    line_id = fields.Many2one('amazon.removal.order.line', ondelete='set null')
-    dispatch_move_id = fields.Many2one('stock.move', ondelete='restrict', copy=False)
-    receipt_picking_id = fields.Many2one('stock.picking', ondelete='restrict', copy=False)
+    line_id = fields.Many2one(
+        'amazon.removal.order.line', ondelete='set null', check_company=True,
+    )
+    dispatch_move_id = fields.Many2one(
+        'stock.move', ondelete='restrict', copy=False, check_company=True,
+    )
+    receipt_picking_id = fields.Many2one(
+        'stock.picking', ondelete='restrict', copy=False, check_company=True,
+    )
+    dispatch_picking_ids = fields.Many2many(
+        'stock.picking', 'amazon_removal_shipment_dispatch_picking_rel',
+        'shipment_id', 'picking_id', string='Removal Transit Transfers', copy=False,
+    )
     dispatched_stock_quantity = fields.Float(default=0.0, readonly=True, copy=False)
+    stock_action_state = fields.Selection([
+        ('audit_only', 'Reconciliation / Audit Only'),
+        ('in_transit', 'Moved to Removal Transit'),
+        ('awaiting_receipt', 'Awaiting Warehouse Receipt'),
+        ('partially_received', 'Partially Received'),
+        ('received', 'Received'),
+        ('manual_review', 'Manual Review'),
+    ], default='audit_only', required=True, readonly=True, index=True, tracking=True)
+    discrepancy_code = fields.Char(copy=False, readonly=True, index=True)
+    discrepancy_message = fields.Text(copy=False, readonly=True)
     raw_report_reference = fields.Char()
     raw_response = fields.Text(groups='sdlc_amazon_connector.group_amazon_technical_admin')
 
     _shipment_unique = models.Constraint(
         'UNIQUE(instance_id, shipment_key)', 'This Amazon removal shipment was already imported.',
     )
+
+    def _check_stock_action_access(self):
+        if (
+            self.env.su
+            or self.env.user.has_group('sdlc_amazon_connector.group_amazon_manager')
+            or self.env.user.has_group('stock.group_stock_manager')
+        ):
+            return
+        raise AccessError(_(
+            "Only an Amazon Connector Manager or Inventory Administrator can process removal stock."
+        ))
+
+    def _package_shipments(self):
+        self.ensure_one()
+        if not self.tracking_number:
+            return self
+        return self.search([
+            ('order_id', '=', self.order_id.id),
+            ('tracking_number', '=', self.tracking_number),
+            ('carrier', '=', self.carrier),
+            ('shipment_date', '=', self.shipment_date),
+        ], order='id')
+
+    def action_move_to_removal_transit(self):
+        self.ensure_one()
+        self._check_stock_action_access()
+        moved = self.env['amazon.phase7.stock.service'].apply_removal_shipment(
+            self, reviewed=True,
+        )
+        if not moved:
+            return self.order_id.instance_id._notify(
+                _("Removal Transit"),
+                self.discrepancy_message or _("No unprocessed shipment quantity was available."),
+                'warning',
+            )
+        return self.order_id.instance_id._notify(
+            _("Removal Transit"), _("The reviewed shipment delta was moved to Removal Transit.")
+        )
+
+    def action_create_receipt(self):
+        self.ensure_one()
+        self._check_stock_action_access()
+        picking = self.env['amazon.phase7.stock.service'].create_removal_receipt(self)
+        return {
+            'type': 'ir.actions.act_window',
+            'name': _("Amazon Removal Receipt"),
+            'res_model': 'stock.picking',
+            'view_mode': 'form',
+            'res_id': picking.id,
+        }
+
+    def action_view_receipt(self):
+        self.ensure_one()
+        if not self.receipt_picking_id:
+            raise UserError(_("No customer warehouse receipt has been created."))
+        return {
+            'type': 'ir.actions.act_window',
+            'name': _("Amazon Removal Receipt"),
+            'res_model': 'stock.picking',
+            'view_mode': 'form',
+            'res_id': self.receipt_picking_id.id,
+        }
 
     @api.model
     def import_row(self, instance, row, raw_report_reference=False):
@@ -471,7 +617,7 @@ class AmazonRemovalShipment(models.Model):
         components = [
             instance.id, removal_id, row.get('shipment-date'), row.get('sku'),
             row.get('fnsku'), row.get('disposition'), row.get('carrier'),
-            row.get('tracking-number') or ('qty:%s' % (row.get('shipped-quantity') or '')),
+            row.get('tracking-number'), row.get('removal-order-type'),
         ]
         key = hashlib.sha256('|'.join(str(value or '') for value in components).encode()).hexdigest()
         shipment = self.search([('instance_id', '=', instance.id), ('shipment_key', '=', key)], limit=1)
@@ -479,13 +625,17 @@ class AmazonRemovalShipment(models.Model):
             item.sku == (row.get('sku') or '') and item.fnsku == (row.get('fnsku') or '')
             and item.disposition.lower() == (row.get('disposition') or '').lower()
         ))[:1]
+        old_shipped = shipment.shipped_quantity if shipment else 0.0
+        new_shipped = self.env['amazon.phase7.stock.service'].number(row.get('shipped-quantity'))
         values = {
             'shipment_key': key, 'order_id': order.id,
             'request_date': self.env['amazon.phase7.stock.service'].datetime(row.get('request-date')),
             'shipment_date': self.env['amazon.phase7.stock.service'].datetime(row.get('shipment-date')),
             'sku': row.get('sku') or '', 'fnsku': row.get('fnsku') or '',
             'disposition': row.get('disposition') or '',
-            'shipped_quantity': self.env['amazon.phase7.stock.service'].number(row.get('shipped-quantity')),
+            'previous_shipped_quantity': old_shipped,
+            'shipped_quantity': new_shipped,
+            'shipped_delta_quantity': max(new_shipped - old_shipped, 0.0),
             'carrier': row.get('carrier') or '', 'tracking_number': row.get('tracking-number') or '',
             'package_reference': row.get('tracking-number') or '',
             'removal_order_type': row.get('removal-order-type') or '',
@@ -497,11 +647,82 @@ class AmazonRemovalShipment(models.Model):
             shipment.write(values)
         else:
             shipment = self.create(values)
-        if line and order.removal_type == 'return_to_address':
+        shipment_total = 0.0
+        if line:
+            shipment_total = sum(order.shipment_ids.filtered(
+                lambda item: item.line_id == line
+            ).mapped('shipped_quantity'))
+            if shipment_total > line.shipped_quantity:
+                line.write({
+                    'last_shipped_delta': shipment_total - line.shipped_quantity,
+                    'shipped_quantity': shipment_total,
+                })
+        if new_shipped < old_shipped:
+            shipment.write({
+                'stock_action_state': 'manual_review',
+                'discrepancy_code': 'AMAZON_SHIPPED_QUANTITY_DECREASED',
+                'discrepancy_message': _(
+                    "Amazon reduced the cumulative shipped quantity. No reverse move was created."
+                ),
+            })
+            order.write({
+                'manual_review_required': True,
+                'stock_action_state': 'manual_review',
+                'discrepancy_code': 'AMAZON_SHIPPED_QUANTITY_DECREASED',
+                'discrepancy_message': shipment.discrepancy_message,
+            })
+        elif (
+            line and line.requested_quantity > 0
+            and line.odoo_product_id
+            and line.odoo_product_id.uom_id.compare(
+                shipment_total, line.requested_quantity,
+            ) > 0
+        ):
+            self.env['amazon.phase7.stock.service']._removal_discrepancy(
+                shipment,
+                'REMOVAL_EXCEEDS_REQUESTED_QUANTITY',
+                _(
+                    "Amazon shipment rows total %s for a line that requested %s. "
+                    "No stock move was created.",
+                    shipment_total, line.requested_quantity,
+                ),
+            )
+        elif not line or not line.odoo_product_id:
+            shipment.write({
+                'stock_action_state': 'manual_review',
+                'discrepancy_code': 'UNMAPPED_SKU',
+                'discrepancy_message': _(
+                    "Amazon removal shipment SKU %s is not mapped to an order line and product.",
+                    shipment.sku,
+                ),
+            })
+            order.write({
+                'manual_review_required': True,
+                'stock_action_state': 'manual_review',
+                'discrepancy_code': 'UNMAPPED_SKU',
+                'discrepancy_message': shipment.discrepancy_message,
+            })
+        elif order.removal_type == 'return_to_address':
             self.env['amazon.phase7.stock.service'].apply_removal_shipment(shipment)
-        order.write({
-            'carrier': shipment.carrier, 'tracking_number': shipment.tracking_number,
-            'shipment_date': shipment.shipment_date, 'state': 'awaiting_receipt',
-            'stock_action_state': 'awaiting_receipt', 'last_synced_at': fields.Datetime.now(),
-        })
+            order.write({
+                'carrier': shipment.carrier,
+                'tracking_number': shipment.tracking_number,
+                'shipment_date': shipment.shipment_date,
+                'state': 'awaiting_receipt',
+                'stock_action_state': 'audit_only',
+                'last_synced_at': fields.Datetime.now(),
+            })
+        else:
+            shipment.write({
+                'stock_action_state': 'manual_review',
+                'discrepancy_code': 'UNEXPECTED_REMOVAL_SHIPMENT_TYPE',
+                'discrepancy_message': _(
+                    "Amazon shipment detail is only authoritative for return-to-seller removals."
+                ),
+            })
+            order.write({
+                'manual_review_required': True,
+                'stock_action_state': 'manual_review',
+                'last_synced_at': fields.Datetime.now(),
+            })
         return shipment

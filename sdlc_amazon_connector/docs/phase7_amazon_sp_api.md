@@ -51,6 +51,9 @@ No later release note replaced the Phase 7 reports or removal feed below.
   `disposition`, `requested-quantity`, `cancelled-quantity`,
   `disposed-quantity`, `shipped-quantity`, `in-process-quantity`,
   `removal-fee`, and `currency`.
+- The order ID is the stable order identity. Quantities in a repeated order
+  line are treated as cumulative observations; decreases are review-only and
+  never produce an automatic reverse stock move.
 
 ### `GET_FBA_FULFILLMENT_REMOVAL_SHIPMENT_DETAIL_DATA`
 
@@ -61,6 +64,13 @@ No later release note replaced the Phase 7 reports or removal feed below.
   `tracking-number`, and `removal-order-type`.
 - Amazon documents that cancelled/disposed units are not shipment rows. Their
   quantities come from the removal-order detail report.
+- The report exposes no removal shipment/package ID. The connector therefore
+  uses a deterministic composite of order, shipment date, SKU/FNSKU,
+  disposition, carrier, tracking number, and removal-order type. Shipped
+  quantity is deliberately excluded so a cumulative `4 → 10` observation
+  updates one shipment instead of creating a duplicate. If Amazon emits two
+  otherwise identical rows without tracking, this source cannot distinguish
+  the packages; those rows remain one auditable shipment observation.
 
 `GET_FBA_RECOMMENDED_REMOVAL_DATA` is explicitly not used for removal status.
 It contains recommendations, not the authoritative removal lifecycle.
@@ -102,8 +112,11 @@ It contains recommendations, not the authoritative removal lifecycle.
   `AddressFieldOne`, `AddressFieldTwo`, `AddressFieldThree`, `AddressCity`,
   `AddressCountryCode`, `AddressStateOrRegion`, `AddressPostalCode`,
   `ContactPhoneNumber`, and `ShippingNotes`.
-- `RemovalDisposition` is `Return` or `Disposal`. Addresses are emitted only
-  for Return, use configured partner data, and use ISO country codes.
+- The current feed table names `RemovalDisposition` but does not enumerate its
+  accepted values on that page. The connector retains the current Amazon flat
+  file template values `Return` and `Disposal`; addresses are emitted only for
+  Return, use configured partner data, and use ISO country codes. A feed-level
+  row rejection remains visible and is never treated as order acceptance.
 
 The connector creates an input feed document, uploads it, creates the feed,
 stores both IDs, and polls `getFeed`. `IN_QUEUE` and `IN_PROGRESS` are
@@ -160,7 +173,20 @@ persisted date window.
   and sent to manual review.
 - Customer-return rows are always inventory-audit only; the legacy return event
   movement option is disabled. Adjustment policies remain separate.
+- Removal-order and disposal report imports are also inventory-audit only.
+  They never reduce Sellable/Unsellable automatically, preventing the same
+  Amazon snapshot change from being applied a second time. For a mapped
+  shipment with an exact Sellable/Unsellable disposition, a manager can
+  explicitly move the unprocessed cumulative delta to Removal Transit; source
+  availability and duplicate processing are locked and checked first.
 - Customer warehouse receipts are never validated from Amazon shipment data.
+- A removal receipt is created in a non-done state from Removal Transit to the
+  configured customer warehouse. Tracking `Delivered` does not validate it;
+  standard warehouse validation records actual quantity, including partial
+  receipts, and validation is blocked if Removal Transit lacks physical stock.
+- Disposal events never create a customer receipt and do not independently
+  create a disposal stock move. Reviewed Inventory Reconciliation remains the
+  inventory authority for that Amazon-side decrease.
 - No `account.move`, payment, journal entry, fee, payout, or bank
   reconciliation is created in Phase 7.
 - Connector code never creates or writes `stock.quant`; all stock effects use

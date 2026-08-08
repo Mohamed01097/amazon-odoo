@@ -17,7 +17,7 @@
                 <field name="name"/><field name="amazon_removal_order_id"/><field name="removal_type"/>
                 <field name="amazon_status"/><field name="state"/><field name="total_requested_quantity"/>
                 <field name="total_shipped_quantity"/><field name="total_disposed_quantity"/>
-                <field name="total_received_quantity"/><field name="tracking_number"/><field name="instance_id"/>
+                <field name="total_received_quantity"/><field name="tracking_number"/><field name="instance_id"/><field name="marketplace_id" optional="hide"/>
             </list>
         </field>
     </record>
@@ -42,8 +42,8 @@
                     </div>
                     <widget name="web_ribbon" title="Manual Review" bg_color="text-bg-warning" invisible="not manual_review_required"/>
                     <group>
-                        <group><field name="name"/><field name="instance_id"/><field name="amazon_removal_order_id"/><field name="removal_type"/><field name="ship_to_partner_id" invisible="removal_type != 'return_to_address'"/><field name="shipping_notes"/></group>
-                        <group><field name="amazon_status"/><field name="previous_amazon_status"/><field name="requested_at"/><field name="completed_at"/><field name="last_synced_at"/><field name="stock_action_state"/></group>
+                        <group><field name="name"/><field name="instance_id"/><field name="marketplace_id"/><field name="amazon_removal_order_id"/><field name="removal_type"/><field name="amazon_order_type_raw"/><field name="ship_to_partner_id" invisible="removal_type != 'return_to_address'"/><field name="shipping_notes"/></group>
+                        <group><field name="amazon_status"/><field name="previous_amazon_status"/><field name="requested_at"/><field name="last_updated_at"/><field name="completed_at"/><field name="last_synced_at"/><field name="stock_action_state"/></group>
                     </group>
                     <group string="Amazon Feed">
                         <group><field name="feed_document_id" readonly="1"/><field name="feed_id" readonly="1"/><field name="feed_processing_status" readonly="1"/></group>
@@ -58,9 +58,13 @@
                                     <field name="sku"/><field name="fnsku"/><field name="disposition"/>
                                     <field name="requested_quantity"/><field name="shipped_quantity"/>
                                     <field name="cancelled_quantity"/><field name="disposed_quantity"/>
-                                    <field name="received_quantity"/>
+                                    <field name="received_quantity"/><field name="last_shipped_delta" optional="hide"/><field name="last_disposed_delta" optional="hide"/>
+                                    <field name="mapping_status"/><field name="discrepancy_code" optional="hide"/>
                                 </list>
                             </field>
+                        </page>
+                        <page string="Review" invisible="not discrepancy_code and not error_message">
+                            <group><field name="discrepancy_code"/><field name="discrepancy_message"/><field name="error_code"/><field name="error_message"/></group>
                         </page>
                         <page string="Technical" groups="sdlc_amazon_connector.group_amazon_technical_admin"><field name="raw_response" widget="text"/></page>
                     </notebook>
@@ -73,13 +77,27 @@
     <record id="amazon_removal_shipment_list" model="ir.ui.view">
         <field name="name">amazon.removal.shipment.list</field><field name="model">amazon.removal.shipment</field>
         <field name="arch" type="xml">
-            <list><field name="removal_order_id"/><field name="shipment_date"/><field name="sku"/><field name="fnsku"/><field name="disposition"/><field name="shipped_quantity"/><field name="carrier"/><field name="tracking_number"/><field name="receipt_picking_id"/><field name="instance_id"/></list>
+            <list decoration-warning="stock_action_state == 'manual_review'"><field name="removal_order_id"/><field name="shipment_date"/><field name="sku"/><field name="fnsku"/><field name="disposition"/><field name="shipped_quantity"/><field name="shipped_delta_quantity"/><field name="dispatched_stock_quantity"/><field name="received_quantity"/><field name="carrier"/><field name="tracking_number"/><field name="stock_action_state"/><field name="receipt_picking_id"/><field name="instance_id"/></list>
         </field>
     </record>
     <record id="amazon_removal_shipment_form" model="ir.ui.view">
         <field name="name">amazon.removal.shipment.form</field><field name="model">amazon.removal.shipment</field>
         <field name="arch" type="xml">
-            <form><sheet><group><group><field name="order_id"/><field name="request_date"/><field name="shipment_date"/><field name="removal_order_type"/></group><group><field name="sku"/><field name="fnsku"/><field name="disposition"/><field name="shipped_quantity"/></group></group><group><field name="carrier"/><field name="tracking_number"/><field name="dispatch_move_id"/><field name="receipt_picking_id"/></group><field name="raw_response" groups="sdlc_amazon_connector.group_amazon_technical_admin"/></sheet><chatter/></form>
+            <form>
+                <header>
+                    <button name="action_move_to_removal_transit" type="object" string="Move Reviewed Delta to Removal Transit" class="btn-primary" invisible="order_id.removal_type != 'return_to_address' or shipped_quantity &lt;= dispatched_stock_quantity or stock_action_state == 'manual_review'" groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"/>
+                    <button name="action_create_receipt" type="object" string="Create Receipt" class="btn-primary" invisible="order_id.removal_type != 'return_to_address' or shipped_quantity &lt;= 0 or receipt_picking_id" groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"/>
+                    <button name="action_view_receipt" type="object" string="Open Receipt" invisible="not receipt_picking_id" groups="sdlc_amazon_connector.group_amazon_user,stock.group_stock_user"/>
+                    <field name="stock_action_state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group><group><field name="order_id"/><field name="request_date"/><field name="shipment_date"/><field name="removal_order_type"/></group><group><field name="sku"/><field name="fnsku"/><field name="disposition"/><field name="previous_shipped_quantity"/><field name="shipped_quantity"/><field name="shipped_delta_quantity"/><field name="dispatched_stock_quantity"/><field name="received_quantity"/></group></group>
+                    <group string="Package / Tracking"><field name="carrier"/><field name="tracking_number"/><field name="dispatch_move_id"/><field name="dispatch_picking_ids" widget="many2many_tags"/><field name="receipt_picking_id"/></group>
+                    <group string="Review" invisible="not discrepancy_code"><field name="discrepancy_code"/><field name="discrepancy_message"/></group>
+                    <field name="raw_response" groups="sdlc_amazon_connector.group_amazon_technical_admin"/>
+                </sheet>
+                <chatter/>
+            </form>
         </field>
     </record>
 </odoo>

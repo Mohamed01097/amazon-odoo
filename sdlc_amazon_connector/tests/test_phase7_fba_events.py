@@ -217,8 +217,14 @@ class TestAmazonPhase7(TransactionCase):
             'fnsku': 'P7-FNSKU', 'disposition': 'Sellable',
             'shipped_quantity': 3, 'line_id': order.line_ids.id,
         })
-        self.env['amazon.phase7.stock.service'].apply_removal_shipment(shipment)
+        self.assertFalse(
+            self.env['amazon.phase7.stock.service'].apply_removal_shipment(shipment)
+        )
+        self.assertEqual(shipment.stock_action_state, 'audit_only')
+        shipment.action_move_to_removal_transit()
+        receipt_action = shipment.action_create_receipt()
         self.assertEqual(shipment.dispatch_move_id.state, 'done')
+        self.assertEqual(shipment.receipt_picking_id.id, receipt_action['res_id'])
         self.assertNotEqual(shipment.receipt_picking_id.state, 'done')
         self.assertEqual(order.total_received_quantity, 0)
 
@@ -237,16 +243,22 @@ class TestAmazonPhase7(TransactionCase):
 
     def test_12_disposal_confirmed(self):
         order = self._removal('disposal', '12')
-        self.instance.adjustment_stock_policy = 'event_moves'
         self._put_stock(self.instance.fba_sellable_location_id, 3)
+        before = self.product.with_context(
+            location=self.instance.fba_sellable_location_id.id,
+        ).qty_available
         self.env['amazon.removal.order'].import_detail_row(self.instance, {
             'order-id': order.removal_order_id, 'order-type': 'Disposal', 'order-status': 'Completed',
             'request-date': '2026-08-01', 'sku': 'P7-SKU', 'fnsku': 'P7-FNSKU',
             'disposition': 'Sellable', 'requested-quantity': '3', 'shipped-quantity': '0',
             'cancelled-quantity': '0', 'disposed-quantity': '3', 'in-process-quantity': '0',
         })
-        self.assertEqual(order.line_ids.disposal_move_id.state, 'done')
-        self.assertEqual(order.stock_action_state, 'disposed')
+        self.assertFalse(order.line_ids.disposal_move_id)
+        self.assertFalse(order.picking_ids)
+        self.assertEqual(order.stock_action_state, 'audit_only')
+        self.assertEqual(self.product.with_context(
+            location=self.instance.fba_sellable_location_id.id,
+        ).qty_available, before)
 
     def _adjustment_row(self, reason, quantity, reference):
         return {

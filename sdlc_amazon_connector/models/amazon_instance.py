@@ -2045,9 +2045,9 @@ class AmazonInstance(models.Model):
         """Queue authoritative removal-order and shipment-detail reports."""
         self.ensure_one()
         self._check_required_fields()
-        today = fields.Date.today()
+        date_from, date_to = self._phase7_window('last_fba_removal_sync_at')
         job = self.env['amazon.phase7.job'].enqueue(
-            self, 'removal_status', date_from=today - timedelta(days=30), date_to=today,
+            self, 'removal_status', date_from=date_from, date_to=date_to,
         )
         return self._notify(_("Removal Orders"), _("Import job %s was queued.", job.display_name))
 

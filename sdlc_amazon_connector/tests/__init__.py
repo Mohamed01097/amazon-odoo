@@ -8,3 +8,4 @@ from . import test_inventory_reconciliation_phase6
 from . import test_operations_phase65
 from . import test_phase7_fba_events
 from . import test_fba_customer_returns
+from . import test_fba_removal_disposal
