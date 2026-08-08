@@ -281,7 +281,7 @@ class AmazonAPI():
 
     def _amazon_request(self, instance, access_token, method, path, params=None,
                         data=None, json_data=None, headers=None, body=None,
-                        raw_body=None, extra_headers=None):
+                        raw_body=None, extra_headers=None, max_retries=MAX_RETRIES):
         """Make an LWA token-authenticated SP-API request.
 
         Amazon SP-API no longer needs IAM credentials or AWS Signature V4 for
@@ -314,7 +314,7 @@ class AmazonAPI():
         # Retry with exponential backoff for transient failures
         last_exc = None
         response = None
-        for attempt in range(MAX_RETRIES + 1):
+        for attempt in range(max_retries + 1):
             try:
                 payload_for_log = json_data if json_data is not None else data
                 kwargs = {
@@ -337,7 +337,7 @@ class AmazonAPI():
                 )
 
                 # Retryable server errors (429, 5xx)
-                if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
+                if response.status_code in RETRYABLE_STATUS_CODES and attempt < max_retries:
                     wait = RETRY_BACKOFF_BASE * (2 ** attempt)
                     # Respect Retry-After header if present
                     retry_after = response.headers.get('Retry-After')
@@ -362,7 +362,7 @@ class AmazonAPI():
                     wait = min(wait, MAX_RETRY_SLEEP)
                     _logger.warning(
                         "Amazon %s %s returned %s — retrying in %.1fs (attempt %d/%d)",
-                        method, url, response.status_code, wait, attempt + 1, MAX_RETRIES,
+                        method, url, response.status_code, wait, attempt + 1, max_retries,
                     )
                     time.sleep(wait)
                     continue
@@ -382,12 +382,12 @@ class AmazonAPI():
                     params=params, payload=payload_for_log if 'payload_for_log' in locals() else None,
                     response=None, elapsed=elapsed, error=exc,
                 )
-                if attempt < MAX_RETRIES:
+                if attempt < max_retries:
                     wait = RETRY_BACKOFF_BASE * (2 ** attempt)
                     wait += random.uniform(0.0, min(wait * 0.25, 2.0))
                     _logger.warning(
                         "Amazon %s %s network error: %s — retrying in %.1fs (attempt %d/%d)",
-                        method, url, exc, wait, attempt + 1, MAX_RETRIES,
+                        method, url, exc, wait, attempt + 1, max_retries,
                     )
                     time.sleep(wait)
                     continue
@@ -1257,7 +1257,11 @@ class AmazonAPI():
     def create_inbound_plan(self, instance, access_token, body):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans"
-        resp = self._amazon_request(instance, access_token, 'POST', url, body=body)
+        # Amazon documents no idempotency key for createInboundPlan. Retrying an
+        # ambiguous timeout/5xx can therefore create a second inbound plan.
+        resp = self._amazon_request(
+            instance, access_token, 'POST', url, body=body, max_retries=0,
+        )
         return self._json_response_with_request_id(resp)
 
     def get_inbound_operation_status(self, instance, access_token, operation_id):

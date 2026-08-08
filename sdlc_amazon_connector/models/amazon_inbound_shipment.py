@@ -71,6 +71,11 @@ class AmazonInboundShipment(models.Model):
         'Create Amazon Request ID', copy=False,
         groups='sdlc_amazon_connector.group_amazon_manager',
     )
+    create_retry_after_at = fields.Datetime(
+        'Create Retry After', copy=False,
+        groups='sdlc_amazon_connector.group_amazon_manager',
+        help="Earliest safe manual retry time after Amazon returns HTTP 429.",
+    )
     last_operation_request_id = fields.Char(
         'Last Operation Amazon Request ID', copy=False,
         groups='sdlc_amazon_connector.group_amazon_manager',
@@ -467,6 +472,7 @@ class AmazonInboundShipment(models.Model):
         vals = {
             'create_operation_response': response_text,
             'create_operation_request_id': request_id or False,
+            'create_retry_after_at': False,
             'create_operation_error_code': False,
             'create_operation_error_message': False,
         }
@@ -597,6 +603,13 @@ class AmazonInboundShipment(models.Model):
             self.create_operation_id,
             error_msg=_("Failed to check inbound plan creation operation"),
         )
+        response_operation_id = str((result or {}).get('operationId') or '').strip()
+        if response_operation_id != self.create_operation_id:
+            raise UserError(_(
+                "Amazon returned operationId %(returned)s while polling stored operationId %(stored)s.",
+                returned=response_operation_id or _("(missing)"),
+                stored=self.create_operation_id,
+            ))
         plan_result = None
         raw_status = str((result or {}).get('operationStatus') or '').strip().upper()
         if raw_status == 'SUCCESS' and self.inbound_plan_id:
@@ -635,6 +648,20 @@ class AmazonInboundShipment(models.Model):
             raise UserError(_(
                 "Amazon Operation ID %s is already stored. Check or review that operation before any retry.",
                 self.create_operation_id,
+            ))
+        if self.create_operation_error_code == 'CREATE_OUTCOME_UNKNOWN':
+            raise UserError(_(
+                "The previous Create Inbound Plan request outcome is unknown. Review Amazon before any "
+                "manual retry to avoid creating a duplicate inbound plan."
+            ))
+        if (
+            self.create_operation_error_code == 'CREATE_RATE_LIMITED'
+            and self.create_retry_after_at
+            and self.create_retry_after_at > fields.Datetime.now()
+        ):
+            raise UserError(_(
+                "Amazon's rate limit is still active. Retry Create Inbound Plan after %s.",
+                fields.Datetime.to_string(self.create_retry_after_at),
             ))
         if self.state not in ('draft', 'failed'):
             raise UserError(_("An inbound plan can only be created from Draft or a retryable Failed state."))

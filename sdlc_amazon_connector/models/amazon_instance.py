@@ -2076,10 +2076,30 @@ class AmazonInstance(models.Model):
         except UserError as exc:
             # A notification is returned instead of raising after the external call so
             # the diagnostic remains durable and cannot be lost to an RPC rollback.
+            cause = exc.__cause__
+            response = getattr(cause, 'response', None)
+            status_code = response.status_code if response is not None else None
+            error_code = 'CREATE_REQUEST_FAILED'
+            retry_after_at = False
+            request_id = AmazonAPI._amazon_request_id(response)
+            if isinstance(cause, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+                error_code = 'CREATE_OUTCOME_UNKNOWN'
+            elif status_code and status_code >= 500:
+                error_code = 'CREATE_OUTCOME_UNKNOWN'
+            elif status_code == 429:
+                error_code = 'CREATE_RATE_LIMITED'
+                try:
+                    retry_after_seconds = max(float(response.headers.get('Retry-After') or 0), 0)
+                except (TypeError, ValueError):
+                    retry_after_seconds = 0
+                if retry_after_seconds:
+                    retry_after_at = fields.Datetime.now() + timedelta(seconds=retry_after_seconds)
             shipment.sudo().write({
                 'create_operation_status': 'failed',
-                'create_operation_error_code': 'CREATE_REQUEST_FAILED',
+                'create_operation_error_code': error_code,
                 'create_operation_error_message': str(exc),
+                'create_operation_request_id': request_id or False,
+                'create_retry_after_at': retry_after_at,
                 'state': 'failed',
             })
             return self._notify(

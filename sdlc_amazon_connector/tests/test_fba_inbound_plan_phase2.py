@@ -1,4 +1,7 @@
+import json
 from unittest.mock import patch
+
+import requests
 
 from odoo import api
 from odoo.exceptions import UserError, ValidationError
@@ -297,3 +300,246 @@ class TestFbaInboundPlanPhase2(TransactionCase):
         self.assertEqual(args[2], 'GET')
         self.assertTrue(args[3].endswith('/inbound/fba/2024-03-20/operations/%s' % OPERATION_ID))
         self.assertEqual(result['_amazon_request_id'], 'phase2-wrapper-request-id')
+
+    def test_13_multiple_products_are_preserved_in_payload(self):
+        second_product = self.env['product.product'].sudo().with_company(self.company).create({
+            'name': 'Phase 2 Product B',
+            'default_code': 'P2-MSKU-002',
+            'company_id': self.company.id,
+        })
+        second_amazon_product = self.env['amazon.product'].sudo().create({
+            'name': 'Phase 2 Amazon Product B',
+            'instance_id': self.instance.id,
+            'sku': 'P2-MSKU-002',
+            'odoo_product_id': second_product.id,
+        })
+        self.env['amazon.inbound.shipment.line'].sudo().create({
+            'shipment_id': self.shipment.id,
+            'amazon_product_id': second_amazon_product.id,
+            'odoo_product_id': second_product.id,
+            'sku': second_amazon_product.sku,
+            'planned_quantity': 5,
+            'prep_owner': 'SELLER',
+            'label_owner': 'SELLER',
+        })
+
+        payload = self.shipment._prepare_create_inbound_plan_payload()
+
+        self.assertEqual(payload['items'], [
+            {
+                'msku': 'P2-MSKU-001', 'quantity': 12,
+                'prepOwner': 'SELLER', 'labelOwner': 'SELLER',
+            },
+            {
+                'msku': 'P2-MSKU-002', 'quantity': 5,
+                'prepOwner': 'SELLER', 'labelOwner': 'SELLER',
+            },
+        ])
+
+    def test_14_unmapped_product_is_blocked_before_api(self):
+        self.amazon_product.odoo_product_id = False
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'create_inbound_plan', autospec=True) as create_mock,
+        ):
+            with self.assertRaisesRegex(UserError, 'not mapped to an Odoo product'):
+                self.shipment.action_create_shipment_plan()
+        create_mock.assert_not_called()
+
+    def test_15_missing_marketplace_is_blocked_before_api(self):
+        self.instance.marketplace_id = False
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'create_inbound_plan', autospec=True) as create_mock,
+        ):
+            with self.assertRaisesRegex(UserError, 'Marketplace ID'):
+                self.shipment.action_create_shipment_plan()
+        create_mock.assert_not_called()
+
+    def test_16_cross_instance_product_is_blocked_before_api(self):
+        other_instance = self.env['amazon.instance'].sudo().create({
+            'name': 'Phase 2 Other Instance',
+            'company_id': self.company.id,
+            'marketplace_id': 'ARBP9OOSHTCHU',
+            'fba_ship_from_partner_id': self.ship_from.id,
+        })
+        other_amazon_product = self.env['amazon.product'].sudo().create({
+            'name': 'Phase 2 Other Amazon Product',
+            'instance_id': other_instance.id,
+            'sku': 'P2-OTHER-001',
+            'odoo_product_id': self.odoo_product.id,
+        })
+        with patch.object(AmazonAPI, 'create_inbound_plan', autospec=True) as create_mock:
+            with self.assertRaisesRegex(ValidationError, "must belong to the shipment's Amazon instance"):
+                self.line.amazon_product_id = other_amazon_product
+        create_mock.assert_not_called()
+
+    def test_17_pending_operation_blocks_duplicate_without_plan_id(self):
+        self.shipment.write({
+            'create_operation_id': OPERATION_ID,
+            'create_operation_status': 'in_progress',
+            'state': 'planning',
+        })
+        with patch.object(AmazonAPI, 'create_inbound_plan', autospec=True) as create_mock:
+            action = self.shipment.action_create_shipment_plan()
+
+        self.assertEqual(action['params']['type'], 'warning')
+        self.assertEqual(self.shipment.create_operation_id, OPERATION_ID)
+        self.assertFalse(self.shipment.inbound_plan_id)
+        self.assertEqual(len(self.shipment.operation_job_ids), 1)
+        create_mock.assert_not_called()
+
+    def test_18_full_mock_lifecycle_has_zero_stock_side_effect(self):
+        Picking = self.env['stock.picking'].sudo()
+        Move = self.env['stock.move'].sudo()
+        Quant = self.env['stock.quant'].sudo()
+        before = {
+            'pickings': Picking.search_count([]),
+            'moves': Move.search_count([]),
+            'product_quants': {
+                quant.location_id.id: (quant.quantity, quant.reserved_quantity)
+                for quant in Quant.search([('product_id', '=', self.odoo_product.id)])
+            },
+        }
+        self._start_plan()
+        in_progress = {
+            'operation': 'createInboundPlan',
+            'operationId': OPERATION_ID,
+            'operationStatus': 'IN_PROGRESS',
+            'operationProblems': [],
+        }
+        success = dict(in_progress, operationStatus='SUCCESS')
+        plan = {'inboundPlanId': PLAN_ID, 'status': 'ACTIVE'}
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(
+                AmazonAPI, 'get_inbound_operation_status', autospec=True,
+                side_effect=[in_progress, success],
+            ),
+            patch.object(AmazonAPI, 'get_inbound_plan', autospec=True, return_value=plan),
+        ):
+            self.shipment.action_check_create_operation_status()
+            self.shipment.action_check_create_operation_status()
+
+        after_product_quants = {
+            quant.location_id.id: (quant.quantity, quant.reserved_quantity)
+            for quant in Quant.search([('product_id', '=', self.odoo_product.id)])
+        }
+        self.assertEqual(self.shipment.state, 'plan_created')
+        self.assertEqual(Picking.search_count([]), before['pickings'])
+        self.assertEqual(Move.search_count([]), before['moves'])
+        self.assertEqual(after_product_quants, before['product_quants'])
+
+    def test_19_async_failure_retains_request_id_and_diagnostics(self):
+        self._start_plan()
+        failed = {
+            'operation': 'createInboundPlan',
+            'operationId': OPERATION_ID,
+            'operationStatus': 'FAILED',
+            'operationProblems': [{
+                'severity': 'ERROR',
+                'code': 'InvalidItem',
+                'message': 'The item cannot be planned.',
+            }],
+            '_amazon_request_id': 'phase2-failed-request-id',
+        }
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=failed),
+        ):
+            self.shipment.action_check_create_operation_status()
+
+        self.assertEqual(self.shipment.last_operation_request_id, 'phase2-failed-request-id')
+        self.assertEqual(self.shipment.create_operation_error_code, 'InvalidItem')
+        self.assertIn('cannot be planned', self.shipment.create_operation_error_message)
+        self.assertEqual(self.shipment.create_operation_id, OPERATION_ID)
+        self.assertEqual(self.shipment.inbound_plan_id, PLAN_ID)
+
+    def test_20_timeout_create_is_not_retried_or_resubmittable(self):
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(
+                AmazonAPI, 'create_inbound_plan', autospec=True,
+                side_effect=requests.exceptions.Timeout('temporary create timeout'),
+            ) as create_mock,
+        ):
+            action = self.shipment.action_create_shipment_plan()
+            self.assertEqual(action['params']['type'], 'danger')
+            self.assertEqual(self.shipment.create_operation_error_code, 'CREATE_OUTCOME_UNKNOWN')
+            with self.assertRaisesRegex(UserError, 'outcome is unknown'):
+                self.shipment.action_create_shipment_plan()
+        self.assertEqual(create_mock.call_count, 1)
+        self.assertFalse(self.shipment.create_operation_id)
+        self.assertFalse(self.shipment.inbound_plan_id)
+
+    def test_21_create_transport_does_not_retry_timeout(self):
+        api_client = AmazonAPI()
+        with (
+            patch('odoo.addons.sdlc_amazon_connector.models.amazon_api.requests.request',
+                  side_effect=requests.exceptions.Timeout('ambiguous timeout')) as request_mock,
+            patch.object(api_client, '_log_amazon_request'),
+            patch('odoo.addons.sdlc_amazon_connector.models.amazon_api.time.sleep') as sleep_mock,
+        ):
+            with self.assertRaises(requests.exceptions.Timeout):
+                api_client.create_inbound_plan(self.instance, 'test-token', {'items': []})
+
+        self.assertEqual(request_mock.call_count, 1)
+        sleep_mock.assert_not_called()
+
+    def test_22_http_429_retry_after_is_deferred_without_resubmission(self):
+        response = requests.Response()
+        response.status_code = 429
+        response.headers.update({
+            'Retry-After': '120',
+            'x-amzn-RequestId': 'phase2-throttle-request-id',
+        })
+        response._content = json.dumps({
+            'errors': [{'code': 'QuotaExceeded', 'message': 'Rate exceeded'}],
+        }).encode()
+        response.url = 'https://sellingpartnerapi-eu.amazon.com/inbound/fba/2024-03-20/inboundPlans'
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch('odoo.addons.sdlc_amazon_connector.models.amazon_api.requests.request',
+                  return_value=response) as request_mock,
+            patch.object(AmazonAPI, '_log_amazon_request'),
+            patch('odoo.addons.sdlc_amazon_connector.models.amazon_api.time.sleep') as sleep_mock,
+        ):
+            action = self.shipment.action_create_shipment_plan()
+            self.assertEqual(action['params']['type'], 'danger')
+            self.assertEqual(self.shipment.create_operation_error_code, 'CREATE_RATE_LIMITED')
+            self.assertTrue(self.shipment.create_retry_after_at)
+            with self.assertRaisesRegex(UserError, 'rate limit'):
+                self.shipment.action_create_shipment_plan()
+
+        self.assertEqual(request_mock.call_count, 1)
+        sleep_mock.assert_not_called()
+        self.assertEqual(self.shipment.create_operation_request_id, 'phase2-throttle-request-id')
+
+    def test_23_poll_response_operation_id_must_match(self):
+        self._start_plan()
+        mismatched = {
+            'operation': 'createInboundPlan',
+            'operationId': '9999abcd-1234-abcd-5678-1234abcd5678',
+            'operationStatus': 'SUCCESS',
+            'operationProblems': [],
+        }
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=mismatched),
+            patch.object(AmazonAPI, 'get_inbound_plan', autospec=True) as get_plan_mock,
+        ):
+            action = self.shipment.action_check_create_operation_status()
+
+        self.assertEqual(action['params']['type'], 'danger')
+        self.assertEqual(self.shipment.create_operation_status, 'pending')
+        self.assertEqual(self.shipment.state, 'planning')
+        self.assertEqual(self.shipment.create_operation_id, OPERATION_ID)
+        self.assertEqual(self.shipment.create_operation_error_code, 'POLL_REQUEST_FAILED')
+        get_plan_mock.assert_not_called()
+
+    def test_24_invalid_state_blocks_create_before_api(self):
+        self.shipment.state = 'plan_created'
+        with patch.object(AmazonAPI, 'create_inbound_plan', autospec=True) as create_mock:
+            with self.assertRaisesRegex(UserError, 'Draft or a retryable Failed state'):
+                self.shipment.action_create_shipment_plan()
+        create_mock.assert_not_called()

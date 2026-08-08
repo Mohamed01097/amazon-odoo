@@ -137,6 +137,7 @@
                             <field name="create_operation_id" readonly="1"/>
                             <field name="create_operation_status" readonly="1"/>
                             <field name="raw_create_operation_status" readonly="1"/>
+                            <field name="create_retry_after_at" readonly="1"/>
                             <field name="last_operation_check_at" readonly="1"/>
                             <field name="create_operation_error_code" readonly="1"
                                    groups="sdlc_amazon_connector.group_amazon_manager"/>
