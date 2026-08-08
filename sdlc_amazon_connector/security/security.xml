@@ -187,6 +187,20 @@
         <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
     </record>
 
+    <record id="rule_amazon_fba_physical_shipment_company" model="ir.rule">
+        <field name="name">Amazon FBA physical shipments by company</field>
+        <field name="model_id" ref="model_amazon_fba_physical_shipment"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+
+    <record id="rule_amazon_fba_physical_shipment_line_company" model="ir.rule">
+        <field name="name">Amazon FBA physical shipment items by company</field>
+        <field name="model_id" ref="model_amazon_fba_physical_shipment_line"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+
     <record id="rule_amazon_fba_inventory_discrepancy_company" model="ir.rule">
         <field name="name">Amazon FBA inventory discrepancies by company</field>
         <field name="model_id" ref="model_amazon_fba_inventory_discrepancy"/>

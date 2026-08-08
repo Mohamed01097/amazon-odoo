@@ -13,7 +13,7 @@ _logger = logging.getLogger(__name__)
 AMAZON_SHIPMENT_ID_RE = INBOUND_PLAN_ID_RE
 AMAZON_FREIGHT_BILL_RE = re.compile(r'^[A-Za-z0-9._ -]{1,64}$')
 PHASE4_STATES = {
-    'placement_confirmed', 'picking_created', 'ready_to_ship',
+    'placement_confirmed', 'picking_created', 'ready_to_ship', 'dispatched',
     'shipment_confirmed', 'waiting_receiving', 'partially_received',
     'received', 'closed',
 }
@@ -24,12 +24,14 @@ class AmazonInboundShipmentShipping(models.Model):
 
     state = fields.Selection(selection_add=[
         ('picking_created', 'Picking Created'),
-        ('ready_to_ship', 'Ready to Ship'),
+        ('ready_to_ship', 'Ready to Dispatch'),
+        ('dispatched', 'Dispatched'),
         ('shipment_confirmed', 'Shipment Confirmed'),
         ('waiting_receiving', 'Waiting for Amazon Receiving'),
     ], ondelete={
         'picking_created': 'set default',
         'ready_to_ship': 'set default',
+        'dispatched': 'set default',
         'shipment_confirmed': 'set default',
         'waiting_receiving': 'set default',
     })
@@ -90,35 +92,28 @@ class AmazonInboundShipmentShipping(models.Model):
         self.ensure_one()
         return self.picking_ids.filtered(lambda picking: picking.state != 'cancel')
 
-    def _selected_amazon_shipment_id(self):
-        """Resolve the one Amazon shipment supported by this Phase 4 transfer."""
-        self.ensure_one()
-        selected = self.placement_option_ids.filtered('selected')
-        if len(selected) != 1 or selected.status != 'ACCEPTED':
-            raise UserError(_(
-                "Refresh placement options and confirm exactly one Amazon placement option first."
-            ))
-        try:
-            shipment_ids = json.loads(selected.amazon_shipment_ids or '[]')
-        except (TypeError, ValueError) as exc:
-            raise UserError(_("The selected placement option has invalid shipment identifiers.")) from exc
-        shipment_ids = [str(value or '').strip() for value in shipment_ids if value]
-        if len(shipment_ids) != 1:
-            raise UserError(_(
-                "Phase 4 can create one aggregate transfer only when Amazon returns one shipment. "
-                "The selected placement returned %s shipments; shipment-split picking allocation is required first.",
-                len(shipment_ids),
-            ))
-        shipment_id = shipment_ids[0]
-        if not AMAZON_SHIPMENT_ID_RE.fullmatch(shipment_id):
-            raise UserError(_("Amazon returned an invalid shipmentId on the selected placement option."))
-        if self.shipment_id and self.shipment_id != shipment_id:
-            raise ValidationError(_(
-                "The stored Amazon Shipment ID does not match the confirmed placement option."
-            ))
-        if not self.shipment_id:
-            self.sudo().write({'shipment_id': shipment_id})
-        return shipment_id
+    def _update_dispatch_state(self):
+        """Aggregate physical-shipment dispatch without changing later Amazon states."""
+        for inbound in self:
+            if inbound.state in (
+                'shipment_confirmed', 'waiting_receiving', 'partially_received',
+                'received', 'closed', 'cancelled',
+            ):
+                continue
+            physical_shipments = inbound.physical_shipment_ids
+            if not physical_shipments:
+                continue
+            states = set(physical_shipments.mapped('dispatch_state'))
+            if states == {'dispatched'}:
+                state = 'dispatched'
+            elif states <= {'ready_to_dispatch', 'dispatched'}:
+                state = 'ready_to_ship'
+            elif states != {'placement_confirmed'}:
+                state = 'picking_created'
+            else:
+                state = 'placement_confirmed'
+            if inbound.state != state:
+                inbound.sudo().write({'state': state})
 
     def _validate_fba_stock_locations(self):
         self.ensure_one()
@@ -153,109 +148,64 @@ class AmazonInboundShipmentShipping(models.Model):
             raise UserError(_("No Internal Transfer operation type exists for the shipment company."))
         return picking_type
 
-    def _prepare_fba_move_commands(self, source, transit):
-        self.ensure_one()
-        commands = []
-        errors = []
-        if not self.line_ids:
-            errors.append(_("The inbound shipment has no planned items."))
-        for position, line in enumerate(self.line_ids, start=1):
-            line_errors = []
-            mapped_product = line.amazon_product_id.odoo_product_id
-            product = line.odoo_product_id or mapped_product
-            if not product:
-                errors.append(_("Line %s has no mapped Odoo product.", position))
-                continue
-            if line.odoo_product_id and mapped_product and line.odoo_product_id != mapped_product:
-                line_errors.append(_(
-                    "Line %s Odoo product no longer matches its Amazon Product mapping.", position
-                ))
-            if product.company_id and product.company_id != self.company_id:
-                line_errors.append(_("Line %s product belongs to another company.", position))
-            if product.type != 'consu' or not product.is_storable:
-                line_errors.append(_("Line %s product must be an inventory-tracked Goods product.", position))
-            if line.planned_quantity <= 0:
-                line_errors.append(_("Line %s must have a positive planned quantity.", position))
-            if line_errors:
-                errors.extend(line_errors)
-                continue
-            commands.append(Command.create({
-                'product_id': product.id,
-                'product_uom_qty': line.planned_quantity,
-                'product_uom': product.uom_id.id,
-                'location_id': source.id,
-                'location_dest_id': transit.id,
-                'company_id': self.company_id.id,
-                'origin': self.name,
-            }))
-        if errors:
-            raise UserError(_("Cannot create the FBA picking:\n%s", "\n".join(errors)))
-        return commands
-
     def action_create_picking(self):
         self.ensure_one()
         self._check_inbound_manager_access()
         self._lock_phase4_workflow()
-        if self.state != 'placement_confirmed':
-            raise UserError(_("A picking can only be created after placement is confirmed."))
-        if self._active_fba_pickings():
-            raise UserError(_("An active internal picking already exists for this inbound shipment."))
-
-        self._selected_amazon_shipment_id()
-        source, transit = self._validate_fba_stock_locations()
-        picking_type = self._get_internal_picking_type(source)
-        move_commands = self._prepare_fba_move_commands(source, transit)
-        picking = self.env['stock.picking'].create({
-            'picking_type_id': picking_type.id,
-            'location_id': source.id,
-            'location_dest_id': transit.id,
-            'company_id': self.company_id.id,
-            'origin': self.name,
-            'amazon_instance_id': self.instance_id.id,
-            'amazon_inbound_shipment_id': self.id,
-            'amazon_fba_movement_type': 'outbound_to_transit',
-            'move_type': 'one',
-            'move_ids': move_commands,
-        })
-        self.sudo().write({
-            'state': 'picking_created',
-            'picking_id': picking.id,
-        })
-        picking.action_confirm()
-        picking.action_assign()
-        missing = picking.move_ids.filtered(
-            lambda move: move.state != 'assigned'
-            or move.product_uom.compare(move.quantity, move.product_uom_qty) < 0
+        if self.state not in ('placement_confirmed', 'picking_created', 'ready_to_ship', 'dispatched'):
+            raise UserError(_("Dispatch pickings can only be created after placement is confirmed."))
+        physical_shipments = self.physical_shipment_ids.filtered(
+            lambda physical: physical.placement_option_id.selected
+            and physical.placement_option_id.status == 'ACCEPTED'
         )
-        if missing:
-            details = ", ".join(
-                "%s (%s/%s)" % (move.product_id.display_name, move.quantity, move.product_uom_qty)
-                for move in missing
-            )
-            picking.action_cancel()
-            picking.unlink()
-            self.sudo().write({
-                'state': 'placement_confirmed',
-                'picking_id': False,
-            })
+        if not physical_shipments:
             raise UserError(_(
-                "Insufficient stock in %s. Standard reservation could not reserve: %s.",
-                source.display_name, details,
+                "No confirmed Amazon physical shipments are available. Refresh the confirmed "
+                "placement result first."
             ))
-        if any(not move.move_line_ids for move in picking.move_ids):
-            picking.action_cancel()
-            picking.unlink()
-            self.sudo().write({'state': 'placement_confirmed', 'picking_id': False})
-            raise UserError(_("Odoo did not create the required reserved stock move lines."))
-        self.sudo().write({'state': 'ready_to_ship'})
+
+        # A pre-existing single-shipment Phase 4 picking is linked rather than duplicated.
+        legacy_pickings = self._active_fba_pickings().filtered(
+            lambda picking: not picking.amazon_fba_physical_shipment_id
+        )
+        if legacy_pickings:
+            if len(physical_shipments) != 1 or len(legacy_pickings) != 1:
+                raise UserError(_(
+                    "Existing aggregate picking(s) cannot be allocated safely across the Amazon "
+                    "shipment splits. Cancel them or link them manually before dispatch."
+                ))
+            physical_shipments._link_compatible_legacy_picking(legacy_pickings)
+
+        created = self.env['stock.picking']
+        for physical in physical_shipments:
+            picking, was_created = physical._create_dispatch_picking()
+            if was_created:
+                created |= picking
+        self._update_dispatch_state()
+        active = physical_shipments.mapped('picking_ids').filtered(lambda p: p.state != 'cancel')
+        self.sudo().write({'picking_id': active.id if len(active) == 1 else False})
+        if not created:
+            return self.action_open_picking()
+        unreserved = created.filtered(lambda picking: picking.state != 'assigned')
+        if unreserved:
+            return self.instance_id._notify(
+                _("FBA Dispatch Picking"),
+                _(
+                    "%s dispatch picking(s) were created. Some quantities are not fully reserved; "
+                    "use standard Odoo availability checks after stock is replenished.",
+                    len(created),
+                ),
+                'warning',
+            )
         return self.instance_id._notify(
-            _("FBA Internal Picking"),
-            _("Internal picking %s was created and fully reserved.", picking.name),
+            _("FBA Dispatch Picking"),
+            _("%s dispatch picking(s) were created and reserved.", len(created)),
             'success',
         )
 
     def action_open_picking(self):
         self.ensure_one()
+        self._check_inbound_manager_access()
         pickings = self._active_fba_pickings()
         if not pickings:
             raise UserError(_("No active internal picking is linked to this shipment."))
@@ -629,6 +579,236 @@ class AmazonInboundShipmentShipping(models.Model):
         return super().action_check_status()
 
 
+class AmazonFbaPhysicalShipmentDispatch(models.Model):
+    _inherit = 'amazon.fba.physical.shipment'
+
+    picking_ids = fields.One2many(
+        'stock.picking', 'amazon_fba_physical_shipment_id', string='Dispatch Pickings',
+    )
+    picking_id = fields.Many2one(
+        'stock.picking', string='Dispatch Picking', compute='_compute_dispatch_picking',
+    )
+    picking_state = fields.Char(string='Picking State', compute='_compute_dispatch_picking')
+    dispatch_state = fields.Selection([
+        ('placement_confirmed', 'Placement Confirmed'),
+        ('picking_created', 'Picking Created'),
+        ('ready_to_dispatch', 'Ready to Dispatch'),
+        ('dispatched', 'Dispatched'),
+    ], default='placement_confirmed', required=True, copy=False, index=True)
+    source_location_id = fields.Many2one(
+        related='instance_id.fba_source_location_id', string='Source Location', readonly=True,
+    )
+    transit_location_id = fields.Many2one(
+        related='instance_id.fba_transit_location_id', string='Transit Location', readonly=True,
+    )
+    dispatch_quantity = fields.Integer(compute='_compute_dispatch_quantity')
+    dispatch_date = fields.Datetime(copy=False, readonly=True)
+
+    @api.depends('picking_ids.state')
+    def _compute_dispatch_picking(self):
+        for physical in self:
+            picking = physical.picking_ids.filtered(
+                lambda picking: picking.state != 'cancel'
+            )[:1]
+            physical.picking_id = picking
+            physical.picking_state = picking.state or False
+
+    @api.depends('line_ids.quantity')
+    def _compute_dispatch_quantity(self):
+        for physical in self:
+            physical.dispatch_quantity = sum(physical.line_ids.mapped('quantity'))
+
+    def _lock_dispatch(self):
+        self.ensure_one()
+        self.env.cr.execute(
+            "SELECT id FROM amazon_fba_physical_shipment WHERE id = %s FOR UPDATE",
+            [self.id],
+        )
+        self.invalidate_recordset()
+
+    def _validate_dispatch_preconditions(self):
+        self.ensure_one()
+        inbound = self.inbound_shipment_id
+        if not inbound.inbound_plan_id or not INBOUND_PLAN_ID_RE.fullmatch(inbound.inbound_plan_id):
+            raise UserError(_("The inbound plan does not have a valid Amazon inboundPlanId."))
+        if inbound.create_operation_status != 'success':
+            raise UserError(_("The inbound plan must be created successfully before dispatch."))
+        if inbound.packing_confirmation_status != 'success':
+            raise UserError(_("Packing must be confirmed successfully before dispatch."))
+        if inbound.placement_confirmation_status != 'success':
+            raise UserError(_("Placement must be confirmed successfully before dispatch."))
+        if not self.placement_option_id.selected or self.placement_option_id.status != 'ACCEPTED':
+            raise UserError(_("The physical shipment must belong to the accepted placement option."))
+        if not self.amazon_shipment_id or not AMAZON_SHIPMENT_ID_RE.fullmatch(
+            self.amazon_shipment_id.strip()
+        ):
+            raise UserError(_("The Amazon physical shipment does not have a valid shipmentId."))
+        if not (self.shipment_confirmation_id or '').strip():
+            raise UserError(_(
+                "Amazon has not returned the shipmentConfirmationId for this physical shipment."
+            ))
+        if not self.line_ids:
+            raise UserError(_("The Amazon physical shipment has no final placement items."))
+        return inbound._validate_fba_stock_locations()
+
+    def _prepare_dispatch_move_commands(self, source, transit):
+        self.ensure_one()
+        commands = []
+        errors = []
+        for position, line in enumerate(self.line_ids, start=1):
+            line_errors = []
+            amazon_product = line.amazon_product_id
+            product = amazon_product.odoo_product_id
+            if not amazon_product or not product:
+                errors.append(_("Line %s (%s) has no mapped Odoo product.", position, line.msku))
+                continue
+            if amazon_product.instance_id != self.instance_id:
+                line_errors.append(_("Line %s product mapping belongs to another Amazon instance.", position))
+            if (amazon_product.sku or '').strip() != (line.msku or '').strip():
+                line_errors.append(_("Line %s MSKU no longer matches its Amazon Product mapping.", position))
+            if product.company_id and product.company_id != self.company_id:
+                line_errors.append(_("Line %s product belongs to another company.", position))
+            if product.type != 'consu' or not product.is_storable:
+                line_errors.append(_("Line %s product must be an inventory-tracked Goods product.", position))
+            if line.quantity <= 0:
+                line_errors.append(_("Line %s must have a positive final shipment quantity.", position))
+            if line_errors:
+                errors.extend(line_errors)
+                continue
+            commands.append(Command.create({
+                'product_id': product.id,
+                'product_uom_qty': line.quantity,
+                'product_uom': product.uom_id.id,
+                'location_id': source.id,
+                'location_dest_id': transit.id,
+                'company_id': self.company_id.id,
+                'origin': self.shipment_confirmation_id,
+            }))
+        if errors:
+            raise UserError(_("Cannot create the FBA dispatch picking:\n%s", "\n".join(errors)))
+        return commands
+
+    def _expected_product_quantities(self):
+        self.ensure_one()
+        quantities = {}
+        for line in self.line_ids:
+            product = line.amazon_product_id.odoo_product_id
+            if product:
+                quantities[product.id] = quantities.get(product.id, 0) + line.quantity
+        return quantities
+
+    def _link_compatible_legacy_picking(self, picking):
+        self.ensure_one()
+        picking.ensure_one()
+        source, transit = self._validate_dispatch_preconditions()
+        actual = {}
+        for move in picking.move_ids.filtered(lambda move: move.state != 'cancel'):
+            actual[move.product_id.id] = actual.get(move.product_id.id, 0) + move.product_uom._compute_quantity(
+                move.product_uom_qty, move.product_id.uom_id,
+            )
+        if (
+            picking.company_id != self.company_id
+            or picking.location_id != source
+            or picking.location_dest_id != transit
+            or actual != self._expected_product_quantities()
+        ):
+            raise UserError(_(
+                "The existing aggregate picking does not match this physical shipment's final "
+                "Amazon quantity distribution and cannot be linked safely."
+            ))
+        picking.write({'amazon_fba_physical_shipment_id': self.id})
+        self._sync_dispatch_state_from_picking(picking)
+
+    def _sync_dispatch_state_from_picking(self, picking=False):
+        for physical in self:
+            active = picking if picking and picking.amazon_fba_physical_shipment_id == physical else (
+                physical.picking_ids.filtered(lambda item: item.state != 'cancel')[:1]
+            )
+            vals = {}
+            if not active:
+                vals['dispatch_state'] = 'placement_confirmed'
+            elif active.state == 'done':
+                vals.update({
+                    'dispatch_state': 'dispatched',
+                    'dispatch_date': active.date_done or fields.Datetime.now(),
+                })
+            elif active.state == 'assigned' and all(
+                move.product_uom.compare(move.quantity, move.product_uom_qty) >= 0
+                for move in active.move_ids.filtered(lambda move: move.state != 'cancel')
+            ):
+                vals['dispatch_state'] = 'ready_to_dispatch'
+            else:
+                vals['dispatch_state'] = 'picking_created'
+            physical.sudo().write(vals)
+        self.mapped('inbound_shipment_id')._update_dispatch_state()
+
+    def _create_dispatch_picking(self):
+        self.ensure_one()
+        self._lock_dispatch()
+        active = self.picking_ids.filtered(lambda picking: picking.state != 'cancel')
+        if active:
+            if len(active) > 1:
+                raise UserError(_("More than one active dispatch picking is linked to this shipment."))
+            return active, False
+        source, transit = self._validate_dispatch_preconditions()
+        picking_type = self.inbound_shipment_id._get_internal_picking_type(source)
+        picking = self.env['stock.picking'].with_company(self.company_id).create({
+            'picking_type_id': picking_type.id,
+            'location_id': source.id,
+            'location_dest_id': transit.id,
+            'company_id': self.company_id.id,
+            'origin': "%s / %s" % (
+                self.inbound_shipment_id.name, self.shipment_confirmation_id,
+            ),
+            'amazon_instance_id': self.instance_id.id,
+            'amazon_inbound_shipment_id': self.inbound_shipment_id.id,
+            'amazon_fba_physical_shipment_id': self.id,
+            'amazon_fba_movement_type': 'outbound_to_transit',
+            'move_type': 'one',
+            'move_ids': self._prepare_dispatch_move_commands(source, transit),
+        })
+        picking.action_confirm()
+        picking.action_assign()
+        self._sync_dispatch_state_from_picking(picking)
+        return picking, True
+
+    def action_create_dispatch_picking(self):
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        picking, created = self._create_dispatch_picking()
+        if not created:
+            return self.action_open_dispatch_picking()
+        if picking.state != 'assigned':
+            return self.instance_id._notify(
+                _("FBA Dispatch Picking"),
+                _(
+                    "Dispatch picking %s was created, but stock is not fully reserved. "
+                    "Replenish stock and use Check Availability before validation.", picking.name,
+                ),
+                'warning',
+            )
+        return self.instance_id._notify(
+            _("FBA Dispatch Picking"),
+            _("Dispatch picking %s was created and reserved.", picking.name),
+            'success',
+        )
+
+    def action_open_dispatch_picking(self):
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        picking = self.picking_id
+        if not picking:
+            raise UserError(_("No active dispatch picking is linked to this physical shipment."))
+        return {
+            'type': 'ir.actions.act_window',
+            'name': _("FBA Dispatch Picking"),
+            'res_model': 'stock.picking',
+            'view_mode': 'form',
+            'res_id': picking.id,
+            'context': {'create': False},
+        }
+
+
 class StockPickingAmazonInbound(models.Model):
     _inherit = 'stock.picking'
 
@@ -636,6 +816,65 @@ class StockPickingAmazonInbound(models.Model):
         'amazon.inbound.shipment', string='Amazon Inbound Shipment', copy=False,
         ondelete='restrict', index=True, check_company=True,
     )
+    amazon_fba_physical_shipment_id = fields.Many2one(
+        'amazon.fba.physical.shipment', string='Amazon Physical Shipment', copy=False,
+        ondelete='restrict', index=True, check_company=True,
+    )
+    amazon_shipment_id = fields.Char(
+        related='amazon_fba_physical_shipment_id.amazon_shipment_id',
+        string='Amazon Shipment ID', readonly=True,
+    )
+    amazon_shipment_confirmation_id = fields.Char(
+        related='amazon_fba_physical_shipment_id.shipment_confirmation_id',
+        string='Amazon Shipment Confirmation ID', readonly=True,
+    )
+
+    _unique_active_physical_dispatch = models.UniqueIndex(
+        '(amazon_fba_physical_shipment_id) WHERE '
+        "amazon_fba_physical_shipment_id IS NOT NULL AND state != 'cancel'",
+        'Only one active dispatch picking can be linked to an Amazon physical shipment.',
+    )
+
+    def action_assign(self):
+        result = super().action_assign()
+        dispatch_pickings = self.filtered(
+            lambda picking: picking.amazon_fba_physical_shipment_id
+            and picking.amazon_fba_movement_type == 'outbound_to_transit'
+        )
+        if dispatch_pickings:
+            dispatch_pickings.mapped(
+                'amazon_fba_physical_shipment_id'
+            )._sync_dispatch_state_from_picking()
+        return result
+
+    def action_cancel(self):
+        physical_shipments = self.mapped('amazon_fba_physical_shipment_id')
+        result = super().action_cancel()
+        if physical_shipments:
+            physical_shipments._sync_dispatch_state_from_picking()
+        return result
+
+    def button_validate(self):
+        dispatch_pickings = self.filtered(
+            lambda picking: picking.amazon_fba_physical_shipment_id
+            and picking.amazon_fba_movement_type == 'outbound_to_transit'
+            and picking.state not in ('done', 'cancel')
+        )
+        for picking in dispatch_pickings:
+            incomplete = picking.move_ids.filtered(
+                lambda move: move.state != 'cancel'
+                and move.product_uom.compare(move.quantity, move.product_uom_qty) < 0
+            )
+            if incomplete:
+                raise UserError(_(
+                    "Dispatch picking %s cannot be validated until its full Amazon shipment "
+                    "quantity is available and reserved.", picking.name,
+                ))
+        result = super().button_validate()
+        completed = dispatch_pickings.filtered(lambda picking: picking.state == 'done')
+        if completed:
+            completed.mapped('amazon_fba_physical_shipment_id')._sync_dispatch_state_from_picking()
+        return result
 
 
 class AmazonInboundOperationJobShipping(models.Model):

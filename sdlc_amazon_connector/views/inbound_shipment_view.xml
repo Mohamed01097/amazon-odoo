@@ -78,10 +78,10 @@
 
                     <button name="action_create_picking"
                             type="object"
-                            string="Create Picking"
+                            string="Create Dispatch Picking"
                             class="btn-primary"
                             groups="sdlc_amazon_connector.group_amazon_manager"
-                            invisible="state != 'placement_confirmed'"/>
+                            invisible="state not in ('placement_confirmed', 'picking_created', 'ready_to_ship')"/>
                     <button name="action_open_picking"
                             type="object"
                             string="Open Picking"
@@ -114,7 +114,7 @@
                             string="Cancel"
                             invisible="state != 'draft' or inbound_plan_id or create_operation_id"/>
                     <field name="state" widget="statusbar"
-                           statusbar_visible="draft,planning,plan_created,packing_generated,packing_confirmed,placement_generated,placement_confirmed,picking_created,ready_to_ship,shipment_confirmed,waiting_receiving,partially_received,received,closed,failed"/>
+                           statusbar_visible="draft,planning,plan_created,packing_generated,packing_confirmed,placement_generated,placement_confirmed,picking_created,ready_to_ship,dispatched,shipment_confirmed,waiting_receiving,partially_received,received,closed,failed"/>
                     <field name="packing_options_expired" invisible="True"/>
                     <field name="placement_options_expired" invisible="True"/>
                     <field name="shipment_confirmation_status" invisible="True"/>
@@ -334,15 +334,57 @@
                                                 <field name="shipment_confirmation_id"/>
                                                 <field name="destination_fc"/>
                                                 <field name="status"/>
+                                                <field name="dispatch_quantity" sum="Total"/>
+                                                <field name="dispatch_state"/>
+                                                <field name="picking_id"/>
+                                                <field name="picking_state"/>
+                                                <field name="source_location_id" optional="hide"/>
+                                                <field name="transit_location_id" optional="hide"/>
+                                                <field name="dispatch_date" optional="show"/>
+                                                <button name="action_create_dispatch_picking"
+                                                        type="object"
+                                                        string="Create Dispatch Picking"
+                                                        groups="sdlc_amazon_connector.group_amazon_manager"
+                                                        invisible="picking_id"/>
+                                                <button name="action_open_dispatch_picking"
+                                                        type="object"
+                                                        string="Open Picking"
+                                                        groups="sdlc_amazon_connector.group_amazon_manager"
+                                                        invisible="not picking_id"/>
                                             </list>
                                             <form string="Amazon FBA Physical Shipment">
+                                                <header>
+                                                    <button name="action_create_dispatch_picking"
+                                                            type="object"
+                                                            string="Create Dispatch Picking"
+                                                            class="btn-primary"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="picking_id"/>
+                                                    <button name="action_open_dispatch_picking"
+                                                            type="object"
+                                                            string="Open Picking"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="not picking_id"/>
+                                                    <field name="dispatch_state" widget="statusbar"
+                                                           statusbar_visible="placement_confirmed,picking_created,ready_to_dispatch,dispatched"/>
+                                                </header>
                                                 <sheet>
                                                     <group>
-                                                        <field name="amazon_shipment_id"/>
-                                                        <field name="shipment_confirmation_id"/>
-                                                        <field name="amazon_reference_id"/>
-                                                        <field name="destination_fc"/>
-                                                        <field name="status"/>
+                                                        <group string="Amazon Shipment">
+                                                            <field name="amazon_shipment_id"/>
+                                                            <field name="shipment_confirmation_id"/>
+                                                            <field name="amazon_reference_id"/>
+                                                            <field name="destination_fc"/>
+                                                            <field name="status"/>
+                                                        </group>
+                                                        <group string="Local Dispatch">
+                                                            <field name="picking_id"/>
+                                                            <field name="picking_state"/>
+                                                            <field name="source_location_id"/>
+                                                            <field name="transit_location_id"/>
+                                                            <field name="dispatch_quantity"/>
+                                                            <field name="dispatch_date"/>
+                                                        </group>
                                                     </group>
                                                     <field name="line_ids" readonly="1">
                                                         <list>
@@ -386,6 +428,8 @@
                                     <field name="location_id"/>
                                     <field name="location_dest_id"/>
                                     <field name="amazon_fba_movement_type" optional="show"/>
+                                    <field name="amazon_fba_physical_shipment_id" optional="show"/>
+                                    <field name="amazon_shipment_id" optional="show"/>
                                     <field name="scheduled_date"/>
                                 </list>
                             </field>
@@ -505,6 +549,31 @@
                     </notebook>
                 </sheet>
             </form>
+        </field>
+    </record>
+
+    <record id="stock_picking_form_amazon_fba_dispatch" model="ir.ui.view">
+        <field name="name">stock.picking.form.amazon.fba.dispatch</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form"/>
+        <field name="arch" type="xml">
+            <field name="origin" position="after">
+                <field name="amazon_instance_id"
+                       readonly="1"
+                       invisible="not amazon_fba_physical_shipment_id"/>
+                <field name="amazon_inbound_shipment_id"
+                       readonly="1"
+                       invisible="not amazon_fba_physical_shipment_id"/>
+                <field name="amazon_fba_physical_shipment_id"
+                       readonly="1"
+                       invisible="not amazon_fba_physical_shipment_id"/>
+                <field name="amazon_shipment_id"
+                       readonly="1"
+                       invisible="not amazon_fba_physical_shipment_id"/>
+                <field name="amazon_shipment_confirmation_id"
+                       readonly="1"
+                       invisible="not amazon_fba_physical_shipment_id"/>
+            </field>
         </field>
     </record>
 </odoo>
