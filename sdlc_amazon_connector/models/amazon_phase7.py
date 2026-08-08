@@ -195,43 +195,18 @@ class AmazonPhase7StockService(models.AbstractModel):
 
     @api.model
     def apply_return(self, event):
-        instance = event.instance_id
+        """Keep return reports inventory-informational.
+
+        The FBA customer-return report proves that Amazon received a returned
+        unit and reports its disposition, but applying that row as stock in
+        addition to the FBA Inventory snapshot can count one unit twice.
+        Inventory changes therefore remain in the reviewed reconciliation flow.
+        """
         if event.inventory_reflected:
             event.stock_action_state = 'already_reflected'
             return False
-        if instance.return_stock_policy == 'informational':
-            event.stock_action_state = 'informational'
-            return False
-        if instance.return_stock_policy == 'audit_only':
-            event.stock_action_state = 'audit_only'
-            return False
-        if event.linked_stock_move_id:
-            event.stock_action_state = 'moved'
-            return event.linked_stock_move_id.picking_id
-        destination = (
-            instance.fba_sellable_location_id
-            if event.operational_disposition == 'sellable'
-            else instance.fba_unsellable_location_id
-        )
-        try:
-            picking = self._create_picking(
-                instance, event.odoo_product_id, event.quantity,
-                instance.fba_return_source_location_id, destination,
-                event.event_key, 'return_sellable' if event.operational_disposition == 'sellable' else 'return_unsellable',
-                True,
-            )
-            event.write({
-                'linked_stock_move_id': picking.move_ids.id,
-                'stock_action_state': 'moved',
-            })
-            return picking
-        except Exception as exc:
-            event.write({
-                'manual_review_required': True, 'stock_action_state': 'manual_review',
-                'review_reason': str(exc)[:5000],
-            })
-            _logger.warning("Return stock action %s requires review: %s", event.event_key, exc)
-            return False
+        event.stock_action_state = 'audit_only'
+        return False
 
     @api.model
     def apply_removal_shipment(self, shipment):
@@ -888,6 +863,11 @@ class AmazonPhase7Job(models.Model):
     last_activity_at = fields.Datetime(default=fields.Datetime.now, readonly=True, index=True)
     last_error_code = fields.Char(copy=False, readonly=True, index=True)
     last_error_message = fields.Text(copy=False, readonly=True)
+    row_error_log = fields.Text(
+        copy=False, readonly=True,
+        groups='sdlc_amazon_connector.group_amazon_manager',
+        help="Rejected report rows, without customer comments or credentials.",
+    )
     amazon_request_id = fields.Char(copy=False, readonly=True)
     responsible_user_id = fields.Many2one('res.users', default=lambda self: self.env.user, index=True)
 
@@ -1012,6 +992,7 @@ class AmazonPhase7Job(models.Model):
                 raise UserError(_("Amazon did not return a reportId."))
             self.write({
                 'amazon_report_id': report_id, 'report_kind': report_kind,
+                'amazon_request_id': response.get('_amazon_request_id') or self.amazon_request_id,
                 'stage': 'poll', 'state': 'waiting_amazon',
                 'next_run_at': fields.Datetime.now() + timedelta(minutes=2),
             })
@@ -1026,6 +1007,8 @@ class AmazonPhase7Job(models.Model):
                 error_msg=_("Failed to poll Amazon report %s", self.amazon_report_id),
             )
             status = response.get('processingStatus') or ''
+            if response.get('_amazon_request_id'):
+                self.amazon_request_id = response['_amazon_request_id']
             if status in ('IN_QUEUE', 'IN_PROGRESS'):
                 return self._wait(status)
             if status == 'CANCELLED':
@@ -1044,6 +1027,8 @@ class AmazonPhase7Job(models.Model):
                 api.get_report_document, self.instance_id, token, self.amazon_report_document_id,
                 error_msg=_("Failed to retrieve Amazon report document metadata"),
             )
+            if metadata.get('_amazon_request_id'):
+                self.amazon_request_id = metadata['_amazon_request_id']
             raw = api.download_report_document(
                 metadata.get('url'), compression=metadata.get('compressionAlgorithm'),
                 encryption=metadata.get('encryptionDetails'), instance=self.instance_id,
@@ -1059,19 +1044,30 @@ class AmazonPhase7Job(models.Model):
             rows = json.loads(self.raw_document or '[]')
             batch = rows[self.cursor_index:self.cursor_index + self.batch_size]
             success = failed = 0
-            for row in batch:
+            row_errors = []
+            for offset, row in enumerate(batch, start=self.cursor_index + 2):
                 try:
                     with self.env.cr.savepoint():
                         self._process_report_row(row)
                     success += 1
                 except Exception as exc:
                     failed += 1
+                    row_errors.append(
+                        "Row %s (order=%s, sku=%s): %s" % (
+                            offset,
+                            str(row.get('order-id') or '')[:80],
+                            str(row.get('sku') or row.get('fnsku') or row.get('asin') or '')[:80],
+                            str(exc)[:1000],
+                        )
+                    )
                     _logger.exception("Phase 7 row failed for job %s: %s", self.id, exc)
             cursor = self.cursor_index + len(batch)
+            error_log = '\n'.join(filter(None, [self.row_error_log, *row_errors]))[-10000:] or False
             self.write({
                 'cursor_index': cursor,
                 'total_processed': self.total_processed + success,
                 'total_failed': self.total_failed + failed,
+                'row_error_log': error_log,
                 'last_activity_at': fields.Datetime.now(),
             })
             if cursor < len(rows):
@@ -1083,7 +1079,13 @@ class AmazonPhase7Job(models.Model):
     @staticmethod
     def _parse_rows(raw):
         normalized = (raw or '').lstrip('\ufeff').replace('\r\n', '\n').replace('\r', ' ')
-        return list(csv.DictReader(io.StringIO(normalized), delimiter='\t', quoting=csv.QUOTE_NONE))
+        if not normalized.strip():
+            return []
+        reader = csv.DictReader(
+            io.StringIO(normalized), delimiter='\t', quoting=csv.QUOTE_NONE,
+            restkey='_extra_fields', restval='',
+        )
+        return [row for row in reader if any(value not in (None, '') for value in row.values())]
 
     def _process_report_row(self, row):
         if self.report_kind == 'returns':
@@ -1129,9 +1131,10 @@ class AmazonPhase7Job(models.Model):
             return False
         source = self._source()
         if source and source._name == 'amazon.return.report':
+            warning = self.row_error_log if self.total_failed else False
             source.write({
-                'state': 'downloaded', 'amazon_report_document_id': self.amazon_report_document_id,
-                'imported_at': fields.Datetime.now(), 'last_error': False,
+                'state': 'processed', 'amazon_report_document_id': self.amazon_report_document_id,
+                'imported_at': fields.Datetime.now(), 'last_error': warning,
             })
         cursor_field = {
             'customer_returns': 'last_fba_return_sync_at',
@@ -1139,10 +1142,16 @@ class AmazonPhase7Job(models.Model):
             'inventory_adjustments': 'last_fba_adjustment_sync_at',
             'reimbursements': 'last_fba_reimbursement_sync_at',
         }.get(self.operation_type)
-        if cursor_field:
+        # Never advance the incremental return cursor past rejected source rows.
+        # Valid rows remain committed and idempotent; the next run safely overlaps.
+        if cursor_field and not (
+            self.operation_type == 'customer_returns' and self.total_failed
+        ):
             self.instance_id.write({cursor_field: fields.Datetime.now()})
         self.write({
             'state': 'done', 'stage': 'done', 'finished_at': fields.Datetime.now(),
+            'last_error_code': 'ROW_ERRORS' if self.total_failed else False,
+            'last_error_message': self.row_error_log if self.total_failed else False,
             'next_run_at': False, 'raw_document': False,
         })
         return True

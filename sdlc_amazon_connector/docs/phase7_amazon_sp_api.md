@@ -1,6 +1,6 @@
 # Phase 7 Amazon SP-API contract
 
-Reviewed: **2026-08-08**. Amazon behavior in Phase 7 is based only on the
+Reviewed: **2026-08-09**. Amazon behavior in Phase 7 is based only on the
 official Amazon Selling Partner API documentation linked below.
 
 ## Official sources reviewed
@@ -26,13 +26,21 @@ No later release note replaced the Phase 7 reports or removal feed below.
 
 - FBA sellers; requested report; daily data; tab-delimited flat file.
 - Roles: **Amazon Fulfillment** or **Pricing**.
+- Amazon does not list a marketplace restriction for this report (unlike
+  neighboring reports that explicitly list regions). Egypt is therefore not
+  separately named; unsupported-marketplace responses remain permanent
+  configuration errors rather than retryable failures.
 - Official columns consumed: `return-date`, `order-id`, `sku`, `asin`,
   `fnsku`, `product-name`, `quantity`, `fulfillment-center-id`,
   `detailed-disposition`, `reason`, `status`, `license-plate-number`, and
   `customer-comments`.
 - The report does not expose a customer-return event ID or order-item ID.
   Connector idempotency therefore hashes documented stable columns and never
-  uses row position.
+  uses row position. An exact duplicate physical event with every documented
+  identity component equal cannot be distinguished by this source.
+- The report is physical/logistical evidence, not a refund source and not an
+  inventory-adjustment command. Return rows never create stock movements;
+  reviewed FBA Inventory Reconciliation remains the inventory source of truth.
 
 ### `GET_FBA_FULFILLMENT_REMOVAL_ORDER_DETAIL_DATA`
 
@@ -112,7 +120,10 @@ Reports use `createReport`, durable polling with `getReport`,
 and `IN_PROGRESS` are non-terminal; `DONE`, `CANCELLED`, and `FATAL` are
 terminal. Amazon documents that `CANCELLED` can mean no data, which the
 connector treats as an empty successful interval. Report metadata is retained
-for 90 days.
+for 90 days. Generated report-document retention varies by report type under
+Amazon's policy effective 2024-05-30, so documents are downloaded immediately;
+the FBA report-type page does not publish a separate customer-return history
+limit.
 
 Amazon does not publish a report-specific maximum request interval for the
 customer-return, removal-detail, removal-shipment, or reimbursement reports.
@@ -147,7 +158,8 @@ persisted date window.
   or reimbursements.
 - Unknown statuses, reason codes, and dispositions are stored as raw strings
   and sent to manual review.
-- Return and adjustment stock policies default to Informational Only.
+- Customer-return rows are always inventory-audit only; the legacy return event
+  movement option is disabled. Adjustment policies remain separate.
 - Customer warehouse receipts are never validated from Amazon shipment data.
 - No `account.move`, payment, journal entry, fee, payout, or bank
   reconciliation is created in Phase 7.

@@ -230,7 +230,7 @@ class AmazonInstance(models.Model):
     fba_return_source_location_id = fields.Many2one(
         'stock.location', string='FBA Customer Return Source', check_company=True,
         domain="[('active', '=', True), ('usage', '=', 'customer'), ('company_id', '=', company_id)]",
-        help="Virtual source used only when a configured customer-return event creates a stock move.",
+        help="Legacy virtual location retained for compatibility. Current FBA return imports never create stock moves.",
     )
     fba_removal_transit_location_id = fields.Many2one(
         'stock.location', string='FBA Removal Transit Location', check_company=True,
@@ -248,9 +248,10 @@ class AmazonInstance(models.Model):
     )
     return_stock_policy = fields.Selection([
         ('informational', 'Informational Only'),
-        ('event_moves', 'Create Moves from Return Events'),
+        ('event_moves', 'Legacy Event Moves (Disabled)'),
         ('audit_only', 'Reconcile through Inventory Audit Only'),
-    ], default='informational', required=True)
+    ], default='audit_only', required=True,
+        help="FBA customer-return rows never modify stock. Inventory disposition is applied only through reviewed FBA Inventory Reconciliation.")
     adjustment_stock_policy = fields.Selection([
         ('informational', 'Informational Only'),
         ('event_moves', 'Create Moves from Trusted Events'),
@@ -1919,30 +1920,11 @@ class AmazonInstance(models.Model):
     # ══════════════════════════════════════════════════
 
     def _download_return_report(self, report_rec):
+        """Compatibility entry point: always queue the durable Reports API job."""
         self.ensure_one()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        rows = self._api_call_safe(
-            api.fetch_fba_returns_report, self, access_token,
-            error_msg="Failed to fetch FBA returns report"
-        )
-        report_rec.line_ids.unlink()
-        for row in rows:
-            self.env['amazon.return.report.line'].create({
-                'report_id': report_rec.id,
-                'amazon_order_id': row.get('order-id', ''),
-                'sku': row.get('sku', ''),
-                'asin': row.get('asin', ''),
-                'fnsku': row.get('fnsku', ''),
-                'product_name': row.get('product-name', ''),
-                'quantity': int(row.get('quantity', 1) or 1),
-                'fulfillment_center_id': row.get('fulfillment-center-id', ''),
-                'return_date': row.get('return-date', ''),
-                'return_reason': row.get('reason', ''),
-                'status': row.get('status', ''),
-            })
-        report_rec.state = 'downloaded'
+        if report_rec.instance_id != self:
+            raise UserError(_("The return import belongs to another Amazon instance."))
+        return report_rec.action_download_report()
 
     # ══════════════════════════════════════════════════
     # FBA Inventory Reports

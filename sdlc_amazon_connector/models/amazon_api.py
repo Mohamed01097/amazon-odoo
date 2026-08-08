@@ -502,19 +502,19 @@ class AmazonAPI():
         if report_options:
             body["reportOptions"] = report_options
         resp = self._amazon_request(instance, access_token, 'POST', url, body=body)
-        return resp.json()
+        return self._json_response_with_request_id(resp)
 
     def get_report(self, instance, access_token, report_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/reports/2021-06-30/reports/{report_id}"
         resp = self._amazon_request(instance, access_token, 'GET', url)
-        return resp.json()
+        return self._json_response_with_request_id(resp)
 
     def get_report_document(self, instance, access_token, document_id):
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/reports/2021-06-30/documents/{document_id}"
         resp = self._amazon_request(instance, access_token, 'GET', url)
-        return resp.json()
+        return self._json_response_with_request_id(resp)
 
     def download_report_document(self, document_url, compression=None, encryption=None, instance=None):
         """Download a report from a pre-signed S3 URL and return decoded text.

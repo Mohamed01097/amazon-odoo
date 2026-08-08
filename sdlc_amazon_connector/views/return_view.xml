@@ -4,10 +4,38 @@
         <field name="res_model">amazon.return.report</field>
         <field name="view_mode">list,form</field>
     </record>
+
+    <record id="amazon_customer_return_search" model="ir.ui.view">
+        <field name="name">amazon.return.report.line.search</field>
+        <field name="model">amazon.return.report.line</field>
+        <field name="arch" type="xml">
+            <search string="FBA Customer Returns">
+                <field name="amazon_order_id"/>
+                <field name="sku"/>
+                <field name="amazon_product_id"/>
+                <field name="odoo_product_id"/>
+                <field name="return_reason"/>
+                <field name="detailed_disposition"/>
+                <field name="instance_id"/>
+                <filter name="return_date" string="Return Date" date="return_date"/>
+                <separator/>
+                <filter name="unmapped" string="Unmapped" domain="[('product_mapping_status', '=', 'unmapped')]"/>
+                <filter name="order_not_found" string="Order Not Found" domain="[('order_link_status', '=', 'order_not_found')]"/>
+                <filter name="manual_review" string="Manual Review" domain="[('manual_review_required', '=', True)]"/>
+                <group>
+                    <filter name="group_instance" string="Instance" context="{'group_by': 'instance_id'}"/>
+                    <filter name="group_product" string="Product" context="{'group_by': 'odoo_product_id'}"/>
+                    <filter name="group_reason" string="Reason" context="{'group_by': 'return_reason'}"/>
+                    <filter name="group_disposition" string="Disposition" context="{'group_by': 'detailed_disposition'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
     <record id="amazon_customer_return_action" model="ir.actions.act_window">
         <field name="name">Customer Returns</field>
         <field name="res_model">amazon.return.report.line</field>
         <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="amazon_customer_return_search"/>
     </record>
 
     <record id="amazon_return_list" model="ir.ui.view">
@@ -57,8 +85,9 @@
         <field name="arch" type="xml">
             <list string="FBA Customer Returns" decoration-warning="manual_review_required">
                 <field name="return_date"/><field name="amazon_order_id"/><field name="sku"/>
-                <field name="fnsku"/><field name="quantity"/><field name="detailed_disposition"/>
+                <field name="odoo_product_id"/><field name="quantity"/><field name="detailed_disposition"/>
                 <field name="return_reason"/><field name="status"/><field name="operational_disposition"/>
+                <field name="product_mapping_status"/><field name="order_link_status"/>
                 <field name="stock_action_state"/><field name="instance_id"/>
             </list>
         </field>
@@ -70,6 +99,7 @@
             <form string="FBA Customer Return">
                 <header><field name="state" widget="statusbar"/></header>
                 <sheet>
+                    <widget name="web_ribbon" title="Manual Review" bg_color="text-bg-warning" invisible="not manual_review_required"/>
                     <div class="oe_button_box" name="button_box">
                         <button class="oe_stat_button" type="object" name="action_view_amazon_order" icon="fa-shopping-cart" invisible="not amazon_order_count"><field name="amazon_order_count" widget="statinfo" string="Amazon Order"/></button>
                         <button class="oe_stat_button" type="object" name="action_view_sale_order" icon="fa-file-text-o" invisible="not sale_order_count"><field name="sale_order_count" widget="statinfo" string="Sale Order"/></button>
@@ -78,13 +108,16 @@
                         <button class="oe_stat_button" type="object" name="action_view_sync_logs" icon="fa-history" invisible="not sync_log_count"><field name="sync_log_count" widget="statinfo" string="Sync Logs"/></button>
                     </div>
                     <group>
-                        <group><field name="instance_id"/><field name="amazon_order_id"/><field name="amazon_order_item_id"/><field name="order_id"/><field name="linked_sale_order_id"/></group>
+                        <group><field name="instance_id"/><field name="company_id" groups="base.group_multi_company"/><field name="marketplace_id"/><field name="amazon_order_id"/><field name="order_id"/><field name="amazon_order_line_id"/><field name="linked_sale_order_id"/><field name="linked_sale_order_line_id"/></group>
                         <group><field name="return_date"/><field name="status"/><field name="detailed_disposition"/><field name="operational_disposition"/><field name="return_reason"/></group>
                     </group>
                     <group>
-                        <group><field name="sku"/><field name="fnsku"/><field name="asin"/><field name="amazon_product_id"/><field name="odoo_product_id"/><field name="quantity"/></group>
-                        <group><field name="fulfillment_center_id"/><field name="license_plate_number"/><field name="stock_action_state"/><field name="linked_stock_move_id"/><field name="inventory_reflected"/><field name="manual_review_required"/></group>
+                        <group><field name="sku"/><field name="fnsku"/><field name="asin"/><field name="amazon_product_id"/><field name="odoo_product_id"/><field name="product_mapping_status"/><field name="quantity"/></group>
+                        <group><field name="fulfillment_center_id"/><field name="license_plate_number"/><field name="order_link_status"/><field name="stock_action_state"/><field name="linked_stock_move_id" invisible="not linked_stock_move_id"/><field name="inventory_reflected" invisible="not inventory_reflected"/><field name="manual_review_required"/></group>
                     </group>
+                    <div class="alert alert-info" role="alert">
+                        Return events are informational inventory evidence. Stock changes are reviewed and applied only through FBA Inventory Reconciliation.
+                    </div>
                     <field name="review_reason" invisible="not review_reason"/>
                     <field name="customer_comments" groups="sdlc_amazon_connector.group_amazon_manager"/>
                     <field name="raw_response" widget="text" groups="sdlc_amazon_connector.group_amazon_technical_admin"/>
