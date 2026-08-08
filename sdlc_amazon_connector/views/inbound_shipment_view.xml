@@ -343,6 +343,13 @@
                                                 <field name="selected_transportation_option_id" optional="show"/>
                                                 <field name="carrier_name" optional="hide"/>
                                                 <field name="tracking_number" optional="hide"/>
+                                                <field name="receiving_state" optional="show"/>
+                                                <field name="receiving_dispatched_quantity" string="Dispatched Qty" optional="show"/>
+                                                <field name="amazon_received_quantity" optional="show"/>
+                                                <field name="processed_received_quantity" optional="show"/>
+                                                <field name="remaining_in_transit_quantity" optional="show"/>
+                                                <field name="receiving_difference" optional="show"/>
+                                                <field name="last_receiving_sync_at" optional="show"/>
                                                 <field name="source_location_id" optional="hide"/>
                                                 <field name="transit_location_id" optional="hide"/>
                                                 <field name="dispatch_date" optional="show"/>
@@ -395,17 +402,33 @@
                                                             type="object"
                                                             string="Refresh Shipment Status"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"/>
+                                                    <button name="action_sync_receiving"
+                                                            type="object"
+                                                            string="Refresh Amazon Receiving"
+                                                            class="btn-primary"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="dispatch_state != 'dispatched' or receiving_sync_status in ('pending', 'in_progress')"/>
                                                     <field name="dispatch_state" widget="statusbar"
                                                            statusbar_visible="placement_confirmed,picking_created,ready_to_dispatch,dispatched"/>
                                                 </header>
                                                 <sheet>
+                                                    <div class="oe_button_box" name="button_box">
+                                                        <button name="action_open_receiving_pickings"
+                                                                type="object"
+                                                                class="oe_stat_button"
+                                                                icon="fa-exchange"
+                                                                invisible="not receiving_picking_count">
+                                                            <field name="receiving_picking_count" widget="statinfo"
+                                                                   string="Receiving Pickings"/>
+                                                        </button>
+                                                    </div>
                                                     <group>
                                                         <group string="Amazon Shipment">
                                                             <field name="amazon_shipment_id"/>
                                                             <field name="shipment_confirmation_id"/>
                                                             <field name="amazon_reference_id"/>
                                                             <field name="destination_fc"/>
-                                                            <field name="status"/>
+                                                            <field name="status" string="Amazon Status (Raw)"/>
                                                         </group>
                                                         <group string="Local Dispatch">
                                                             <field name="picking_id"/>
@@ -466,12 +489,59 @@
                                                     </group>
                                                     <field name="transportation_response" readonly="1" nolabel="1"
                                                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                                                    <separator string="Amazon Receiving"/>
+                                                    <group>
+                                                        <group string="Physical Shipment Receiving">
+                                                            <field name="receiving_state" readonly="1"/>
+                                                            <field name="receiving_dispatched_quantity" string="Dispatched Qty" readonly="1"/>
+                                                            <field name="amazon_received_quantity" readonly="1"/>
+                                                            <field name="processed_received_quantity" readonly="1"/>
+                                                            <field name="remaining_in_transit_quantity" readonly="1"/>
+                                                            <field name="receiving_difference" readonly="1"/>
+                                                            <field name="received_location_id" readonly="1"/>
+                                                        </group>
+                                                        <group string="Receiving Synchronization">
+                                                            <field name="receiving_sync_status" readonly="1"/>
+                                                            <field name="last_receiving_sync_at" readonly="1"/>
+                                                            <field name="receiving_discrepancy_count" readonly="1"/>
+                                                            <field name="receiving_error_code" readonly="1"
+                                                                   groups="sdlc_amazon_connector.group_amazon_manager"/>
+                                                            <field name="receiving_error_message" readonly="1"
+                                                                   groups="sdlc_amazon_connector.group_amazon_manager"/>
+                                                        </group>
+                                                    </group>
+                                                    <div class="alert alert-info" role="alert">
+                                                        Amazon QuantityReceived is cumulative per item and physical shipment.
+                                                        Only its validated positive delta moves from Transit to Received/Staging.
+                                                        Sellable, Reserved, and Unsellable disposition is not inferred here.
+                                                    </div>
+                                                    <field name="receiving_discrepancy_ids" readonly="1">
+                                                        <list create="0" delete="0" decoration-danger="status == 'open'">
+                                                            <field name="sku"/>
+                                                            <field name="discrepancy_type"/>
+                                                            <field name="amazon_quantity"/>
+                                                            <field name="odoo_quantity"/>
+                                                            <field name="quantity"/>
+                                                            <field name="amazon_status"/>
+                                                            <field name="status"/>
+                                                            <field name="create_date"/>
+                                                        </list>
+                                                    </field>
+                                                    <field name="receiving_response" readonly="1" nolabel="1"
+                                                           groups="sdlc_amazon_connector.group_amazon_manager"/>
                                                     <field name="line_ids" readonly="1">
                                                         <list>
                                                             <field name="msku"/>
                                                             <field name="asin"/>
                                                             <field name="fnsku"/>
-                                                            <field name="quantity"/>
+                                                            <field name="quantity" string="Expected Qty"/>
+                                                            <field name="dispatched_quantity"/>
+                                                            <field name="amazon_shipped_quantity" optional="hide"/>
+                                                            <field name="amazon_received_quantity"/>
+                                                            <field name="processed_received_quantity"/>
+                                                            <field name="remaining_in_transit_quantity"/>
+                                                            <field name="receiving_difference"/>
+                                                            <field name="last_receiving_sync_at"/>
                                                         </list>
                                                     </field>
                                                 </sheet>
@@ -496,7 +566,8 @@
                                     <div class="alert alert-info" role="alert" colspan="2">
                                         Shipping moves stock from the configured Source to Amazon Transit.
                                         Receiving synchronization moves only newly received quantities from
-                                        Amazon Transit to Amazon Sellable using standard stock moves.
+                                        Amazon Transit to Amazon Received/Staging using standard stock moves.
+                                        Inventory disposition is handled by the separate reconciliation workflow.
                                     </div>
                                 </group>
                             </group>
@@ -575,10 +646,10 @@
                                 </group>
                             </group>
                             <div class="alert alert-warning" role="alert">
-                                Amazon currently exposes cumulative shipped and received quantities through
+                                Amazon currently exposes cumulative shipped and received quantities per physical shipment through
                                 the preserved, non-deprecated Fulfillment Inbound v0 item operation. It does
-                                not expose shipment-scoped damaged or lost quantities. Closed shortages are
-                                retained below as unresolved discrepancies and are never silently removed.
+                                not expose disposition. Received units enter Amazon Received/Staging; closed
+                                shortages and other quantity mismatches remain unresolved discrepancies.
                             </div>
                             <field name="receiving_discrepancy_ids" readonly="1">
                                 <list create="0" delete="0"
@@ -586,6 +657,8 @@
                                     <field name="sku"/>
                                     <field name="discrepancy_type"/>
                                     <field name="quantity"/>
+                                    <field name="amazon_quantity" optional="show"/>
+                                    <field name="odoo_quantity" optional="show"/>
                                     <field name="amazon_status"/>
                                     <field name="amazon_reported_lost" optional="hide"/>
                                     <field name="status"/>
@@ -653,6 +726,9 @@
                 <field name="amazon_shipment_confirmation_id"
                        readonly="1"
                        invisible="not amazon_fba_physical_shipment_id"/>
+                <field name="amazon_inbound_operation_job_id"
+                       readonly="1"
+                       invisible="not amazon_inbound_operation_job_id"/>
             </field>
         </field>
     </record>

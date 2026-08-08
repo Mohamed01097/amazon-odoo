@@ -21,6 +21,12 @@ FBA_LOCATION_DEFINITIONS = {
         'name': 'Amazon FBA Transit',
         'usage': 'transit',
     },
+    'received': {
+        'field': 'fba_received_location_id',
+        'label': 'FBA Received / Staging Location',
+        'name': 'Amazon FBA Received / Staging',
+        'usage': 'internal',
+    },
     'sellable': {
         'field': 'fba_sellable_location_id',
         'label': 'FBA Sellable Location',
@@ -189,6 +195,16 @@ class AmazonInstance(models.Model):
         check_company=True,
         domain="[('active', '=', True), ('usage', '=', 'transit'), ('company_id', '=', company_id)]",
         help="Company-owned inventory sent to Amazon but not received by Amazon yet.",
+    )
+    fba_received_location_id = fields.Many2one(
+        'stock.location',
+        string='FBA Received / Staging Location',
+        check_company=True,
+        domain="[('active', '=', True), ('usage', '=', 'internal'), ('company_id', '=', company_id)]",
+        help=(
+            "Company-owned inventory Amazon has physically received, before a separate "
+            "inventory reconciliation assigns Sellable, Reserved, or Unsellable disposition."
+        ),
     )
     fba_sellable_location_id = fields.Many2one(
         'stock.location',
@@ -402,6 +418,7 @@ class AmazonInstance(models.Model):
         'fba_source_location_id',
         'fba_ship_from_partner_id',
         'fba_transit_location_id',
+        'fba_received_location_id',
         'fba_sellable_location_id',
         'fba_reserved_location_id',
         'fba_unsellable_location_id',
@@ -492,7 +509,7 @@ class AmazonInstance(models.Model):
                     ))
                 used_location_ids[location.id] = label
 
-                if role in {'sellable', 'reserved', 'unsellable'}:
+                if role in {'received', 'sellable', 'reserved', 'unsellable'}:
                     stock_location = warehouse.lot_stock_id if warehouse else False
                     if (
                         not stock_location
@@ -539,7 +556,7 @@ class AmazonInstance(models.Model):
             ))
         if location.company_id != self.company_id:
             raise UserError(_("%s must belong to the Amazon instance company.", label))
-        if role in {'sellable', 'reserved', 'unsellable'}:
+        if role in {'received', 'sellable', 'reserved', 'unsellable'}:
             stock_location = self.fba_warehouse_id.lot_stock_id
             if location == stock_location or not location._child_of(stock_location):
                 raise UserError(_(
@@ -706,10 +723,11 @@ class AmazonInstance(models.Model):
         ]
         _logger.info(
             "FBA stock structure configured for Amazon instance %s (id=%s): "
-            "transit=%s, sellable=%s, reserved=%s, unsellable=%s",
+            "transit=%s, received=%s, sellable=%s, reserved=%s, unsellable=%s",
             self.name,
             self.id,
             self.fba_transit_location_id.display_name,
+            self.fba_received_location_id.display_name,
             self.fba_sellable_location_id.display_name,
             self.fba_reserved_location_id.display_name,
             self.fba_unsellable_location_id.display_name,

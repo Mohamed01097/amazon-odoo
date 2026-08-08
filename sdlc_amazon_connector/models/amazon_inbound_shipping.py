@@ -683,6 +683,7 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
         for physical in self:
             picking = physical.picking_ids.filtered(
                 lambda picking: picking.state != 'cancel'
+                and picking.amazon_fba_movement_type == 'outbound_to_transit'
             )[:1]
             physical.picking_id = picking
             physical.picking_state = picking.state or False
@@ -1324,13 +1325,23 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
                 "The existing aggregate picking does not match this physical shipment's final "
                 "Amazon quantity distribution and cannot be linked safely."
             ))
-        picking.write({'amazon_fba_physical_shipment_id': self.id})
+        picking.write({
+            'amazon_fba_physical_shipment_id': self.id,
+            'amazon_fba_movement_type': 'outbound_to_transit',
+        })
         self._sync_dispatch_state_from_picking(picking)
 
     def _sync_dispatch_state_from_picking(self, picking=False):
         for physical in self:
-            active = picking if picking and picking.amazon_fba_physical_shipment_id == physical else (
-                physical.picking_ids.filtered(lambda item: item.state != 'cancel')[:1]
+            active = picking if (
+                picking
+                and picking.amazon_fba_physical_shipment_id == physical
+                and picking.amazon_fba_movement_type == 'outbound_to_transit'
+            ) else (
+                physical.picking_ids.filtered(
+                    lambda item: item.state != 'cancel'
+                    and item.amazon_fba_movement_type == 'outbound_to_transit'
+                )[:1]
             )
             vals = {}
             if not active:
@@ -1353,7 +1364,10 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
     def _create_dispatch_picking(self):
         self.ensure_one()
         self._lock_dispatch()
-        active = self.picking_ids.filtered(lambda picking: picking.state != 'cancel')
+        active = self.picking_ids.filtered(
+            lambda picking: picking.state != 'cancel'
+            and picking.amazon_fba_movement_type == 'outbound_to_transit'
+        )
         if active:
             if len(active) > 1:
                 raise UserError(_("More than one active dispatch picking is linked to this shipment."))
@@ -1439,7 +1453,8 @@ class StockPickingAmazonInbound(models.Model):
 
     _unique_active_physical_dispatch = models.UniqueIndex(
         '(amazon_fba_physical_shipment_id) WHERE '
-        "amazon_fba_physical_shipment_id IS NOT NULL AND state != 'cancel'",
+        "amazon_fba_physical_shipment_id IS NOT NULL "
+        "AND amazon_fba_movement_type = 'outbound_to_transit' AND state != 'cancel'",
         'Only one active dispatch picking can be linked to an Amazon physical shipment.',
     )
 

@@ -120,7 +120,7 @@
 
     <record id="cron_amazon_sync_inbound_receiving" model="ir.cron">
         <field name="name">Amazon: Synchronize Inbound Receiving</field>
-        <field name="model_id" ref="model_amazon_inbound_shipment"/>
+        <field name="model_id" ref="model_amazon_fba_physical_shipment"/>
         <field name="state">code</field>
         <field name="code">model.cron_enqueue_receiving_sync()</field>
         <field name="interval_number">30</field>

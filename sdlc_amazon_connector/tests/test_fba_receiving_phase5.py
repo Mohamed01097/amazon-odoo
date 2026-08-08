@@ -1,15 +1,14 @@
-from unittest.mock import MagicMock, patch
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import requests
 
 from odoo import Command
+from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
 
 from ..models.amazon_api import AmazonAPI
-
-
-PLAN_ID = 'wf5000abcd-1234-abcd-5678-1234abcd5678'
-PLACEMENT_OPTION_ID = 'pl5000abcd-1234-abcd-5678-1234abcd5678'
-SHIPMENT_ID = 'sh5000abcd-1234-abcd-5678-1234abcd5678'
-SHIPMENT_CONFIRMATION_ID = 'FBA19PHASE5'
 
 
 @tagged('post_install', '-at_install')
@@ -18,87 +17,128 @@ class TestFbaReceivingPhase5(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env['res.company'].sudo().create({
-            'name': 'Amazon FBA Phase 5 Test Company',
+            'name': 'Amazon FBA Receiving Test Company',
         })
         Warehouse = self.env['stock.warehouse'].sudo().with_company(self.company)
         self.source_warehouse = Warehouse.create({
-            'name': 'Phase 5 Source Warehouse',
-            'code': 'P5SRC',
+            'name': 'Receiving Source Warehouse',
+            'code': 'RCSRC',
             'company_id': self.company.id,
         })
         self.fba_warehouse = Warehouse.create({
-            'name': 'Phase 5 FBA Warehouse',
-            'code': 'P5FBA',
+            'name': 'Receiving FBA Warehouse',
+            'code': 'RCFBA',
             'company_id': self.company.id,
         })
         self.instance = self.env['amazon.instance'].sudo().create({
-            'name': 'Phase 5 Test Instance',
+            'name': 'Receiving Test Instance',
             'company_id': self.company.id,
-            'marketplace_id': 'ATVPDKIKX0DER',
+            'marketplace_id': 'ARBP9OOSHTCHU',
             'fba_warehouse_id': self.fba_warehouse.id,
             'fba_source_location_id': self.source_warehouse.lot_stock_id.id,
         })
         self.instance.action_create_fba_stock_structure()
-        self.product = self.env['product.product'].sudo().with_company(self.company).create({
-            'name': 'Phase 5 Storable Product',
-            'default_code': 'P5-MSKU-001',
+        self.product_a, self.amazon_product_a = self._create_product('RC-SKU-A')
+        self.product_b, self.amazon_product_b = self._create_product('RC-SKU-B')
+        self.shipment, physical = self._create_plan(
+            1,
+            [[(self.amazon_product_a, 100, 'FN-RC-A')]],
+        )
+        self.physical = physical[0]
+        self._dispatch_physical_shipments(physical)
+
+    def _create_product(self, sku):
+        product = self.env['product.product'].sudo().with_company(self.company).create({
+            'name': sku,
+            'default_code': sku,
             'type': 'consu',
             'is_storable': True,
             'company_id': self.company.id,
         })
-        self.amazon_product = self.env['amazon.product'].sudo().create({
-            'name': 'Phase 5 Amazon Product',
+        amazon_product = self.env['amazon.product'].sudo().create({
+            'name': sku,
             'instance_id': self.instance.id,
-            'sku': 'P5-MSKU-001',
-            'odoo_product_id': self.product.id,
+            'sku': sku,
+            'odoo_product_id': product.id,
         })
-        self.shipment = self.env['amazon.inbound.shipment'].sudo().create({
-            'name': 'P5-PLAN-001',
-            'shipment_name': 'P5-PLAN-001',
+        return product, amazon_product
+
+    def _create_plan(self, sequence, physical_item_groups):
+        plan_id = 'wf%08d-1234-abcd-5678-1234abcd5678' % sequence
+        placement_id = 'pl%08d-1234-abcd-5678-1234abcd5678' % sequence
+        shipment_ids = [
+            'sh%08d-1234-abcd-5678-1234abcd%04d' % (sequence * 100 + index, index)
+            for index in range(1, len(physical_item_groups) + 1)
+        ]
+        planned = {}
+        products = {}
+        fnskus = {}
+        for item_group in physical_item_groups:
+            for amazon_product, quantity, fnsku in item_group:
+                planned[amazon_product.sku] = planned.get(amazon_product.sku, 0) + quantity
+                products[amazon_product.sku] = amazon_product
+                fnskus[amazon_product.sku] = fnsku
+        shipment = self.env['amazon.inbound.shipment'].sudo().create({
+            'name': 'RC-PLAN-%s' % sequence,
+            'shipment_name': 'RC-PLAN-%s' % sequence,
             'instance_id': self.instance.id,
-            'inbound_plan_id': PLAN_ID,
-            'shipment_id': SHIPMENT_ID,
-            'shipment_confirmation_id': SHIPMENT_CONFIRMATION_ID,
-            'shipment_confirmation_status': 'success',
+            'inbound_plan_id': plan_id,
+            'shipment_id': shipment_ids[0] if len(shipment_ids) == 1 else False,
             'create_operation_status': 'success',
             'packing_confirmation_status': 'success',
             'placement_confirmation_status': 'success',
-            'state': 'waiting_receiving',
+            'state': 'placement_confirmed',
             'line_ids': [Command.create({
-                'amazon_product_id': self.amazon_product.id,
-                'odoo_product_id': self.product.id,
-                'sku': self.amazon_product.sku,
-                'fnsku': 'X00PHASE5FNSKU',
-                'planned_quantity': 100,
-                'quantity_shipped': 100,
+                'amazon_product_id': products[sku].id,
+                'odoo_product_id': products[sku].odoo_product_id.id,
+                'sku': sku,
+                'fnsku': fnskus[sku],
+                'planned_quantity': quantity,
                 'prep_owner': 'SELLER',
                 'label_owner': 'SELLER',
-            })],
+            }) for sku, quantity in planned.items()],
         })
-        self.env['amazon.fba.placement.option'].sudo().create({
-            'inbound_shipment_id': self.shipment.id,
-            'amazon_placement_option_id': PLACEMENT_OPTION_ID,
+        placement = self.env['amazon.fba.placement.option'].sudo().create({
+            'inbound_shipment_id': shipment.id,
+            'amazon_placement_option_id': placement_id,
             'status': 'ACCEPTED',
-            'amazon_shipment_ids': '["%s"]' % SHIPMENT_ID,
+            'amazon_shipment_ids': json.dumps(shipment_ids),
             'selected': True,
         })
-        self._put_in_transit(100)
+        physical_shipments = self.env['amazon.fba.physical.shipment']
+        for index, item_group in enumerate(physical_item_groups, start=1):
+            physical = self.env['amazon.fba.physical.shipment'].sudo().create({
+                'inbound_shipment_id': shipment.id,
+                'placement_option_id': placement.id,
+                'amazon_shipment_id': shipment_ids[index - 1],
+                'shipment_confirmation_id': 'FBA19RC%04d%02d' % (sequence, index),
+                'status': 'SHIPPED',
+                'destination_fc': 'CAI1',
+                'line_ids': [Command.create({
+                    'amazon_product_id': amazon_product.id,
+                    'msku': amazon_product.sku,
+                    'fnsku': fnsku,
+                    'quantity': quantity,
+                }) for amazon_product, quantity, fnsku in item_group],
+            })
+            physical_shipments |= physical
+        return shipment, physical_shipments
 
-    def _put_in_transit(self, quantity):
+    def _put_in_source(self, product, quantity):
         supplier = self.env.ref('stock.stock_location_suppliers')
-        transit = self.instance.fba_transit_location_id
+        source = self.instance.fba_source_location_id
         picking = self.env['stock.picking'].sudo().with_company(self.company).create({
-            'picking_type_id': self.fba_warehouse.in_type_id.id,
+            'picking_type_id': self.source_warehouse.in_type_id.id,
             'location_id': supplier.id,
-            'location_dest_id': transit.id,
+            'location_dest_id': source.id,
             'company_id': self.company.id,
-            'origin': 'P5-TEST-TRANSIT-BALANCE',
+            'origin': 'RECEIVING-TEST-SEED',
             'move_ids': [Command.create({
-                'product_id': self.product.id,
+                'product_id': product.id,
                 'product_uom_qty': quantity,
-                'product_uom': self.product.uom_id.id,
+                'product_uom': product.uom_id.id,
                 'location_id': supplier.id,
-                'location_dest_id': transit.id,
+                'location_dest_id': source.id,
                 'company_id': self.company.id,
             })],
         })
@@ -108,231 +148,341 @@ class TestFbaReceivingPhase5(TransactionCase):
         self.assertNotIsInstance(result, dict)
         self.assertEqual(picking.state, 'done')
 
-    def _quantity_at(self, location):
-        self.product.invalidate_recordset()
-        return self.product.with_context(location=location.id).qty_available
+    def _dispatch_physical_shipments(self, physical_shipments):
+        requirements = {}
+        for line in physical_shipments.mapped('line_ids'):
+            product = line.amazon_product_id.odoo_product_id
+            requirements[product] = requirements.get(product, 0) + line.quantity
+        for product, quantity in requirements.items():
+            self._put_in_source(product, quantity)
+        for physical in physical_shipments:
+            picking, created = physical._create_dispatch_picking()
+            self.assertTrue(created)
+            result = picking.with_context(
+                picking_ids_not_to_backorder=picking.ids,
+            ).button_validate()
+            self.assertNotIsInstance(result, dict)
+            self.assertEqual(picking.state, 'done')
+            self.assertEqual(physical.dispatch_state, 'dispatched')
+        physical_shipments.mapped('inbound_shipment_id').write({'state': 'waiting_receiving'})
+
+    def _quantity_at(self, product, location):
+        product.invalidate_recordset()
+        return product.with_context(location=location.id).qty_available
 
     @staticmethod
-    def _status_response(status='RECEIVING'):
+    def _status_response(physical, status='RECEIVING'):
         return {
-            'placementOptionId': PLACEMENT_OPTION_ID,
-            'shipmentId': SHIPMENT_ID,
-            'shipmentConfirmationId': SHIPMENT_CONFIRMATION_ID,
-            'selectedTransportationOptionId': 'to-phase5-official',
+            'placementOptionId': physical.placement_option_id.amazon_placement_option_id,
+            'shipmentId': physical.amazon_shipment_id,
+            'shipmentConfirmationId': physical.shipment_confirmation_id,
             'destination': {
                 'destinationType': 'AMAZON_WAREHOUSE',
-                'warehouseId': 'ONT8',
+                'warehouseId': physical.destination_fc,
             },
-            'source': {'sourceType': 'SELLER_FACILITY'},
             'status': status,
-            '_amazon_request_id': 'phase5-status-request',
+            '_amazon_request_id': 'receiving-status-request',
         }
 
     @staticmethod
-    def _items_response(received, shipped=100, extra=None):
-        item = {
-            'ShipmentId': SHIPMENT_CONFIRMATION_ID,
-            'SellerSKU': 'P5-MSKU-001',
-            'FulfillmentNetworkSKU': 'X00PHASE5FNSKU',
-            'QuantityShipped': shipped,
-            'QuantityReceived': received,
+    def _items_response(physical, received_by_sku, shipped_by_sku=None, extra_items=None):
+        shipped_by_sku = shipped_by_sku or {}
+        items = [{
+            'ShipmentId': physical.shipment_confirmation_id,
+            'SellerSKU': line.msku,
+            'FulfillmentNetworkSKU': line.fnsku,
+            'QuantityShipped': shipped_by_sku.get(line.msku, line.quantity),
+            'QuantityReceived': received_by_sku.get(line.msku, 0),
             'QuantityInCase': 0,
-        }
-        item.update(extra or {})
+        } for line in physical.line_ids]
+        items.extend(extra_items or [])
         return {
-            'payload': {'ItemData': [item]},
-            '_amazon_request_ids': ['phase5-items-request'],
-            '_pages': [{'payload': {'ItemData': [item]}}],
+            'payload': {'ItemData': items},
+            '_amazon_request_ids': ['receiving-items-request'],
+            '_pages': [{'payload': {'ItemData': items}}],
         }
 
-    def _sync(self, received, status='RECEIVING', shipped=100, extra=None):
-        with (
-            patch.object(
-                type(self.instance), '_get_access_token_or_raise',
-                return_value='test-token',
+    def _apply(self, physical, received_by_sku, status='RECEIVING',
+               shipped_by_sku=None, extra_items=None):
+        return physical._apply_receiving_snapshot(
+            self._status_response(physical, status),
+            self._items_response(
+                physical, received_by_sku,
+                shipped_by_sku=shipped_by_sku,
+                extra_items=extra_items,
             ),
-            patch.object(
-                AmazonAPI, 'get_shipment', autospec=True,
-                return_value=self._status_response(status),
-            ),
-            patch.object(
-                AmazonAPI, 'get_inbound_shipment_items_v0', autospec=True,
-                return_value=self._items_response(received, shipped, extra),
-            ),
-        ):
-            self.shipment.action_sync_receiving()
-            job = self.shipment.operation_job_ids.filtered(
-                lambda item: item.operation_type == 'sync_receiving'
-                and item.state in ('pending', 'in_progress')
-            )
-            self.assertEqual(len(job), 1)
-            job._process_operation()
-        return job
-
-    def _receiving_pickings(self):
-        return self.shipment.picking_ids.filtered(
-            lambda picking: picking.amazon_fba_movement_type == 'receiving_sellable'
         )
 
-    def test_01_partial_receipts_move_only_cumulative_delta(self):
-        transit = self.instance.fba_transit_location_id
-        sellable = self.instance.fba_sellable_location_id
-        unsellable = self.instance.fba_unsellable_location_id
+    @staticmethod
+    def _receiving_pickings(physical):
+        return physical.picking_ids.filtered(
+            lambda picking: picking.amazon_fba_movement_type == 'receiving_staging'
+        )
 
-        self._sync(20)
-        self.assertEqual(self.shipment.state, 'partially_received')
-        self.assertEqual(self.shipment.sent_quantity, 100)
-        self.assertEqual(self.shipment.received_quantity, 20)
-        self.assertEqual(self.shipment.remaining_quantity, 80)
-        self.assertEqual(self.shipment.line_ids.received_moved_quantity, 20)
-        self.assertEqual(self._quantity_at(transit), 80)
-        self.assertEqual(self._quantity_at(sellable), 20)
-        self.assertEqual(self._quantity_at(unsellable), 0)
+    def test_00_receiving_requires_done_physical_dispatch(self):
+        _shipment, physical_shipments = self._create_plan(
+            99,
+            [[(self.amazon_product_a, 1, 'FN-RC-A')]],
+        )
+        physical = physical_shipments[0]
+        with self.assertRaises(UserError):
+            self._apply(physical, {'RC-SKU-A': 1})
 
-        self._sync(30)
-        self.assertEqual(self.shipment.received_quantity, 30)
-        self.assertEqual(self.shipment.line_ids.received_moved_quantity, 30)
-        self.assertEqual(self._quantity_at(transit), 70)
-        self.assertEqual(self._quantity_at(sellable), 30)
-        self.assertEqual(len(self._receiving_pickings()), 2)
-        self.assertTrue(all(
-            picking.state == 'done' for picking in self._receiving_pickings()
-        ))
-        self.assertTrue(all(
-            move.move_line_ids
-            for move in self._receiving_pickings().mapped('move_ids')
-        ))
+    def test_a_dispatch_100_amazon_received_30_moves_delta_30(self):
+        result = self._apply(self.physical, {'RC-SKU-A': 30})
+        line = self.physical.line_ids
+        self.assertEqual(result['deltaReceived'], 30)
+        self.assertEqual(line.dispatched_quantity, 100)
+        self.assertEqual(line.amazon_received_quantity, 30)
+        self.assertEqual(line.processed_received_quantity, 30)
+        self.assertEqual(line.remaining_in_transit_quantity, 70)
         self.assertEqual(
-            sorted(self._receiving_pickings().mapped('move_ids').mapped('product_uom_qty')),
-            [10, 20],
+            self._quantity_at(self.product_a, self.instance.fba_transit_location_id), 70,
+        )
+        self.assertEqual(
+            self._quantity_at(self.product_a, self.instance.fba_received_location_id), 30,
+        )
+        self.assertEqual(
+            self._quantity_at(self.product_a, self.instance.fba_sellable_location_id), 0,
         )
 
-    def test_02_duplicate_poll_creates_no_duplicate_move(self):
-        self._sync(30)
-        picking_ids = self._receiving_pickings().ids
-        transit = self._quantity_at(self.instance.fba_transit_location_id)
-        sellable = self._quantity_at(self.instance.fba_sellable_location_id)
-
-        self._sync(30)
-
-        self.assertEqual(self._receiving_pickings().ids, picking_ids)
-        self.assertEqual(self._quantity_at(self.instance.fba_transit_location_id), transit)
-        self.assertEqual(self._quantity_at(self.instance.fba_sellable_location_id), sellable)
-
-    def test_03_full_receipt_then_amazon_closed(self):
-        self._sync(100)
-        self.assertEqual(self.shipment.state, 'received')
-        self.assertEqual(self.shipment.remaining_quantity, 0)
-        self.assertEqual(self._quantity_at(self.instance.fba_transit_location_id), 0)
-        self.assertEqual(self._quantity_at(self.instance.fba_sellable_location_id), 100)
-        picking_ids = self._receiving_pickings().ids
-
-        self._sync(100, status='CLOSED')
-        self.assertEqual(self.shipment.state, 'closed')
-        self.assertEqual(self._receiving_pickings().ids, picking_ids)
-        self.assertFalse(self.shipment.receiving_discrepancy_ids)
-
-    def test_04_closed_shortage_is_discrepancy_not_silent_loss(self):
-        self._sync(90, status='CLOSED')
-
-        self.assertEqual(self.shipment.state, 'closed')
-        self.assertEqual(self.shipment.received_quantity, 90)
-        self.assertEqual(self.shipment.remaining_quantity, 10)
-        self.assertEqual(self.shipment.lost_quantity, 0)
-        self.assertEqual(self._quantity_at(self.instance.fba_transit_location_id), 10)
-        discrepancy = self.shipment.receiving_discrepancy_ids
-        self.assertEqual(len(discrepancy), 1)
-        self.assertEqual(discrepancy.discrepancy_type, 'closed_shortage')
-        self.assertEqual(discrepancy.quantity, 10)
-        self.assertFalse(discrepancy.amazon_reported_lost)
-
-        # Re-apply the exact same official snapshot directly because terminal
-        # shipments are no longer scheduled. The unique audit record is updated,
-        # and no additional move or discrepancy can be created.
-        pickings = self._receiving_pickings().ids
-        self.shipment._apply_receiving_snapshot(
-            self._status_response('CLOSED'), self._items_response(90),
+    def test_b_amazon_increases_30_to_80_moves_delta_50(self):
+        self._apply(self.physical, {'RC-SKU-A': 30})
+        result = self._apply(self.physical, {'RC-SKU-A': 80})
+        self.assertEqual(result['deltaReceived'], 50)
+        self.assertEqual(self.physical.line_ids.processed_received_quantity, 80)
+        self.assertEqual(
+            sorted(self._receiving_pickings(self.physical).move_ids.mapped('amazon_receiving_delta')),
+            [30, 50],
         )
-        self.assertEqual(self._receiving_pickings().ids, pickings)
-        self.assertEqual(len(self.shipment.receiving_discrepancy_ids), 1)
 
-    def test_05_undocumented_damage_field_is_not_inferred(self):
-        self._sync(20, extra={'QuantityDamaged': 5, 'QuantityLost': 2})
+    def test_c_amazon_remains_80_creates_no_stock_move(self):
+        self._apply(self.physical, {'RC-SKU-A': 80})
+        picking_ids = self._receiving_pickings(self.physical).ids
+        result = self._apply(self.physical, {'RC-SKU-A': 80})
+        self.assertEqual(result['deltaReceived'], 0)
+        self.assertEqual(self._receiving_pickings(self.physical).ids, picking_ids)
 
-        self.assertEqual(self.shipment.damaged_quantity, 0)
-        self.assertEqual(self.shipment.lost_quantity, 0)
-        self.assertEqual(self._quantity_at(self.instance.fba_unsellable_location_id), 0)
-        self.assertEqual(self._quantity_at(self.instance.fba_sellable_location_id), 20)
+    def test_d_amazon_reaches_100_moves_final_delta_20(self):
+        self._apply(self.physical, {'RC-SKU-A': 30})
+        self._apply(self.physical, {'RC-SKU-A': 80})
+        result = self._apply(self.physical, {'RC-SKU-A': 100})
+        self.assertEqual(result['deltaReceived'], 20)
+        self.assertEqual(self.physical.line_ids.processed_received_quantity, 100)
+        self.assertEqual(
+            self._quantity_at(self.product_a, self.instance.fba_transit_location_id), 0,
+        )
+        self.assertEqual(
+            self._quantity_at(self.product_a, self.instance.fba_received_location_id), 100,
+        )
 
-    def test_06_received_quantity_decrease_never_reverses_inventory(self):
-        self._sync(30)
-        transit = self._quantity_at(self.instance.fba_transit_location_id)
-        sellable = self._quantity_at(self.instance.fba_sellable_location_id)
-        picking_ids = self._receiving_pickings().ids
+    def test_e_over_receipt_105_creates_no_move_and_discrepancy(self):
+        result = self._apply(self.physical, {'RC-SKU-A': 105})
+        self.assertEqual(result['deltaReceived'], 0)
+        self.assertFalse(self._receiving_pickings(self.physical))
+        self.assertEqual(self.physical.line_ids.amazon_received_quantity, 105)
+        self.assertEqual(self.physical.line_ids.processed_received_quantity, 0)
+        discrepancy = self.physical.receiving_discrepancy_ids.filtered(
+            lambda item: item.discrepancy_type == 'received_overage'
+        )
+        self.assertEqual(discrepancy.quantity, 5)
+        self.assertEqual(
+            self._quantity_at(self.product_a, self.instance.fba_transit_location_id), 100,
+        )
 
-        self._sync(25)
-
-        self.assertEqual(self.shipment.received_quantity, 25)
-        self.assertEqual(self.shipment.line_ids.received_moved_quantity, 30)
-        self.assertEqual(self._quantity_at(self.instance.fba_transit_location_id), transit)
-        self.assertEqual(self._quantity_at(self.instance.fba_sellable_location_id), sellable)
-        self.assertEqual(self._receiving_pickings().ids, picking_ids)
-        discrepancy = self.shipment.receiving_discrepancy_ids.filtered(
+    def test_f_received_quantity_decrease_never_reverses_or_moves(self):
+        self._apply(self.physical, {'RC-SKU-A': 80})
+        picking_ids = self._receiving_pickings(self.physical).ids
+        transit_before = self._quantity_at(
+            self.product_a, self.instance.fba_transit_location_id,
+        )
+        result = self._apply(self.physical, {'RC-SKU-A': 78})
+        self.assertEqual(result['deltaReceived'], 0)
+        self.assertEqual(self.physical.line_ids.amazon_received_quantity, 78)
+        self.assertEqual(self.physical.line_ids.processed_received_quantity, 80)
+        self.assertEqual(self._receiving_pickings(self.physical).ids, picking_ids)
+        self.assertEqual(
+            self._quantity_at(self.product_a, self.instance.fba_transit_location_id),
+            transit_before,
+        )
+        discrepancy = self.physical.receiving_discrepancy_ids.filtered(
             lambda item: item.discrepancy_type == 'received_quantity_decrease'
         )
-        self.assertEqual(len(discrepancy), 1)
-        self.assertEqual(discrepancy.quantity, 5)
+        self.assertEqual(discrepancy.quantity, 2)
 
-    def test_07_api_wrapper_uses_preserved_paths_and_paginates(self):
-        api = AmazonAPI()
-        first = MagicMock()
-        first.headers = {'x-amzn-RequestId': 'request-page-1'}
-        first.json.return_value = {
-            'payload': {
-                'ItemData': [{'SellerSKU': 'SKU-1'}],
-                'NextToken': 'next-token',
-            },
+    def test_g_two_skus_receive_independent_partial_quantities(self):
+        _shipment, physical = self._create_plan(2, [[
+            (self.amazon_product_a, 20, 'FN-RC-A'),
+            (self.amazon_product_b, 10, 'FN-RC-B'),
+        ]])
+        physical = physical[0]
+        self._dispatch_physical_shipments(physical)
+        self._apply(physical, {'RC-SKU-A': 15, 'RC-SKU-B': 10})
+        lines = {line.msku: line for line in physical.line_ids}
+        self.assertEqual(lines['RC-SKU-A'].processed_received_quantity, 15)
+        self.assertEqual(lines['RC-SKU-A'].remaining_in_transit_quantity, 5)
+        self.assertEqual(lines['RC-SKU-B'].processed_received_quantity, 10)
+        self.assertEqual(lines['RC-SKU-B'].remaining_in_transit_quantity, 0)
+
+    def test_h_same_sku_two_physical_shipments_remains_traceable(self):
+        _shipment, physical = self._create_plan(3, [
+            [(self.amazon_product_a, 10, 'FN-RC-A')],
+            [(self.amazon_product_a, 20, 'FN-RC-A')],
+        ])
+        self._dispatch_physical_shipments(physical)
+        self._apply(physical[0], {'RC-SKU-A': 10})
+        self._apply(physical[1], {'RC-SKU-A': 5})
+        self.assertEqual(physical[0].processed_received_quantity, 10)
+        self.assertEqual(physical[1].processed_received_quantity, 5)
+        pickings = self._receiving_pickings(physical[0]) | self._receiving_pickings(physical[1])
+        self.assertEqual(len(pickings), 2)
+        self.assertEqual(set(pickings.mapped('amazon_fba_physical_shipment_id')), set(physical))
+
+    def test_i_unmapped_amazon_sku_creates_discrepancy_and_no_move(self):
+        unknown = {
+            'ShipmentId': self.physical.shipment_confirmation_id,
+            'SellerSKU': 'UNKNOWN-AMAZON-SKU',
+            'FulfillmentNetworkSKU': 'UNKNOWN-FNSKU',
+            'QuantityShipped': 7,
+            'QuantityReceived': 4,
         }
-        second = MagicMock()
-        second.headers = {'x-amzn-RequestId': 'request-page-2'}
-        second.json.return_value = {
-            'payload': {'ItemData': [{'SellerSKU': 'SKU-2'}]},
-        }
-        with patch.object(
-            api, '_amazon_request', side_effect=[first, second],
-        ) as request:
-            result = api.get_inbound_shipment_items_v0(
-                self.instance, 'test-token', SHIPMENT_CONFIRMATION_ID,
-            )
+        response = self._items_response(self.physical, {}, extra_items=[unknown])
+        # Remove the expected item to model an Amazon response containing only an unknown SKU.
+        response['payload']['ItemData'] = [unknown]
+        self.physical._apply_receiving_snapshot(
+            self._status_response(self.physical), response,
+        )
+        self.assertFalse(self._receiving_pickings(self.physical))
+        discrepancy = self.physical.receiving_discrepancy_ids.filtered(
+            lambda item: item.discrepancy_type == 'unmapped_amazon_sku'
+        )
+        self.assertEqual(discrepancy.sku, 'UNKNOWN-AMAZON-SKU')
+        self.assertEqual(discrepancy.amazon_quantity, 4)
 
-        self.assertEqual(
-            [item['SellerSKU'] for item in result['payload']['ItemData']],
-            ['SKU-1', 'SKU-2'],
+    def test_j_http_429_retries_without_stock_change(self):
+        response = requests.Response()
+        response.status_code = 429
+        response.headers['Retry-After'] = '120'
+        error = requests.exceptions.HTTPError('rate limited', response=response)
+        transit_before = self._quantity_at(
+            self.product_a, self.instance.fba_transit_location_id,
         )
+        job, created = self.physical._enqueue_receiving_job()
+        self.assertTrue(created)
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='token'),
+            patch.object(AmazonAPI, 'get_shipment', autospec=True, side_effect=error),
+        ):
+            job._process_operation()
+        self.assertEqual(job.state, 'in_progress')
+        self.assertEqual(job.retry_count, 1)
+        self.assertTrue(job.next_run_at)
+        self.assertEqual(self.physical.receiving_error_code, 'HTTP_429')
         self.assertEqual(
-            result['_amazon_request_ids'], ['request-page-1', 'request-page-2'],
+            self._quantity_at(self.product_a, self.instance.fba_transit_location_id),
+            transit_before,
         )
-        self.assertTrue(request.call_args_list[0].args[3].endswith(
-            '/fba/inbound/v0/shipments/%s/items' % SHIPMENT_CONFIRMATION_ID
-        ))
-        self.assertTrue(request.call_args_list[1].args[3].endswith(
-            '/fba/inbound/v0/shipmentItems'
-        ))
-        self.assertEqual(request.call_args_list[1].kwargs['params'], {
-            'QueryType': 'NEXT_TOKEN',
-            'NextToken': 'next-token',
-            'MarketplaceId': self.instance.marketplace_id,
-        })
 
-    def test_08_scheduler_deduplicates_active_jobs(self):
-        self.assertEqual(
-            self.env['amazon.inbound.shipment'].cron_enqueue_receiving_sync(), 1,
+    def test_k_network_timeout_retries_without_stock_change(self):
+        transit_before = self._quantity_at(
+            self.product_a, self.instance.fba_transit_location_id,
         )
+        job, _created = self.physical._enqueue_receiving_job()
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='token'),
+            patch.object(
+                AmazonAPI, 'get_shipment', autospec=True,
+                side_effect=requests.exceptions.Timeout('timeout'),
+            ),
+        ):
+            job._process_operation()
+        self.assertEqual(job.state, 'in_progress')
+        self.assertEqual(job.retry_count, 1)
+        self.assertEqual(self.physical.receiving_error_code, 'NETWORK_ERROR')
         self.assertEqual(
-            self.env['amazon.inbound.shipment'].cron_enqueue_receiving_sync(), 0,
+            self._quantity_at(self.product_a, self.instance.fba_transit_location_id),
+            transit_before,
         )
-        jobs = self.shipment.operation_job_ids.filtered(
+
+    def test_l_repeated_cron_enqueues_only_one_active_job(self):
+        Physical = self.env['amazon.fba.physical.shipment']
+        self.assertEqual(Physical.cron_enqueue_receiving_sync(), 1)
+        self.assertEqual(Physical.cron_enqueue_receiving_sync(), 0)
+        jobs = self.physical.inbound_shipment_id.operation_job_ids.filtered(
             lambda item: item.operation_type == 'sync_receiving'
+            and item.physical_shipment_id == self.physical
             and item.state in ('pending', 'in_progress')
         )
         self.assertEqual(len(jobs), 1)
+
+    def test_m_receiving_job_enqueue_is_concurrency_safe_and_idempotent(self):
+        first, first_created = self.physical._enqueue_receiving_job()
+        second, second_created = self.physical._enqueue_receiving_job()
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first, second)
+
+    def test_n_closed_shipment_with_mismatch_keeps_transit_shortage(self):
+        self._apply(self.physical, {'RC-SKU-A': 98}, status='CLOSED')
+        self.assertEqual(self.physical.status, 'CLOSED')
+        self.assertEqual(self.physical.receiving_state, 'discrepancy')
+        self.assertEqual(self.physical.line_ids.processed_received_quantity, 98)
+        self.assertEqual(
+            self._quantity_at(self.product_a, self.instance.fba_transit_location_id), 2,
+        )
+        discrepancy = self.physical.receiving_discrepancy_ids.filtered(
+            lambda item: item.discrepancy_type == 'closed_shortage'
+        )
+        self.assertEqual(discrepancy.quantity, 2)
+
+    def test_o_receiving_code_has_no_direct_stock_quant_write(self):
+        source = Path(__file__).parents[1] / 'models' / 'amazon_inbound_receiving.py'
+        code = source.read_text(encoding='utf-8')
+        self.assertNotIn("env['stock.quant']", code)
+        self.assertNotIn('stock.quant', code)
+        self.assertNotIn('quant.quantity', code)
+
+    def test_p_api_wrapper_uses_supported_shipment_item_operation(self):
+        response = requests.Response()
+        response.status_code = 200
+        response.headers['x-amzn-RequestId'] = 'receiving-wrapper-request'
+        response._content = json.dumps({
+            'payload': {
+                'ItemData': [{
+                    'ShipmentId': self.physical.shipment_confirmation_id,
+                    'SellerSKU': 'RC-SKU-A',
+                    'QuantityShipped': 100,
+                    'QuantityReceived': 30,
+                }],
+            },
+        }).encode()
+        with patch.object(AmazonAPI, '_amazon_request', return_value=response) as request:
+            result = AmazonAPI().get_inbound_shipment_items_v0(
+                self.instance, 'token', self.physical.shipment_confirmation_id,
+            )
+        self.assertEqual(result['payload']['ItemData'][0]['QuantityReceived'], 30)
+        self.assertIn(
+            '/fba/inbound/v0/shipments/%s/items' % self.physical.shipment_confirmation_id,
+            request.call_args.args[3],
+        )
+
+    def test_q_terminal_status_gets_one_receiving_sync_then_stops_polling(self):
+        Physical = self.env['amazon.fba.physical.shipment']
+        self.physical.sudo().write({
+            'status': 'CLOSED',
+            'receiving_state': 'not_started',
+            'receiving_sync_status': False,
+        })
+        self.assertEqual(Physical.cron_enqueue_receiving_sync(), 1)
+        job = self.physical.inbound_shipment_id.operation_job_ids.filtered(
+            lambda item: item.operation_type == 'sync_receiving'
+            and item.physical_shipment_id == self.physical
+            and item.state in ('pending', 'in_progress')
+        )
+        self.assertEqual(len(job), 1)
+        job.sudo().write({'state': 'done'})
+        self.physical.sudo().write({
+            'receiving_state': 'discrepancy',
+            'receiving_sync_status': 'success',
+        })
+        self.assertEqual(Physical.cron_enqueue_receiving_sync(), 0)

@@ -98,6 +98,7 @@
                             <field name="fba_ship_from_partner_id"
                                    context="{'default_company_id': company_id}"/>
                             <field name="fba_transit_location_id"/>
+                            <field name="fba_received_location_id"/>
                             <field name="fba_sellable_location_id"/>
                             <field name="fba_reserved_location_id"/>
                             <field name="fba_unsellable_location_id"/>
@@ -115,6 +116,7 @@
                                 <strong>Source</strong> is the client's warehouse stock location.<br/>
                                 <strong>Ship-From Address</strong> is the physical address sent to Amazon for inbound planning.<br/>
                                 <strong>Transit</strong> is inventory sent to Amazon but not received yet.<br/>
+                                <strong>Received/Staging</strong> is physically received inventory whose Amazon disposition is not yet reconciled.<br/>
                                 <strong>Sellable</strong> is inventory Amazon has received and can sell.<br/>
                                 <strong>Reserved</strong> is inventory Amazon has reserved.<br/>
                                 <strong>Unsellable</strong> is inventory Amazon holds but cannot sell.

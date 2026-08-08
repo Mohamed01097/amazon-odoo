@@ -8,6 +8,7 @@ class StockLocation(models.Model):
     amazon_fba_location_type = fields.Selection(
         [
             ('transit', 'FBA Transit'),
+            ('received', 'FBA Received / Staging'),
             ('sellable', 'FBA Sellable'),
             ('reserved', 'FBA Reserved'),
             ('unsellable', 'FBA Unsellable'),
@@ -46,6 +47,7 @@ class StockLocation(models.Model):
     def _check_amazon_fba_location_configuration(self):
         expected_usage = {
             'transit': 'transit',
+            'received': 'internal',
             'sellable': 'internal',
             'reserved': 'internal',
             'unsellable': 'internal',
@@ -74,7 +76,7 @@ class StockLocation(models.Model):
                 ))
 
             warehouse = instance.fba_warehouse_id
-            if role in {'sellable', 'reserved', 'unsellable'}:
+            if role in {'received', 'sellable', 'reserved', 'unsellable'}:
                 stock_location = warehouse.lot_stock_id if warehouse else False
                 if (
                     not stock_location
@@ -82,7 +84,7 @@ class StockLocation(models.Model):
                     or not location._child_of(stock_location)
                 ):
                     raise ValidationError(_(
-                        "Sellable, Reserved, and Unsellable FBA locations must be below "
+                        "Received/Staging, Sellable, Reserved, and Unsellable FBA locations must be below "
                         "the configured FBA warehouse Stock location."
                     ))
             elif warehouse and location._child_of(warehouse.lot_stock_id):
