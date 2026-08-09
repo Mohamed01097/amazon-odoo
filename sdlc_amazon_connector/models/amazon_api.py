@@ -553,7 +553,11 @@ class AmazonAPI():
         if (compression or '').upper() == 'GZIP':
             data = gzip.decompress(data)
 
-        return data.decode('utf-8')
+        # Flat-file reports are documented as text but historical exports can
+        # contain a UTF-8 BOM or an isolated invalid byte in a product name.
+        # Keep the valid rows processable and surface the replacement character
+        # in the row diagnostic instead of failing the complete report download.
+        return data.decode('utf-8-sig', errors='replace')
 
     @staticmethod
     def _decrypt_report_payload(ciphertext, encryption_details):

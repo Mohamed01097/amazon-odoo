@@ -111,17 +111,49 @@ class AmazonPhase7StockService(models.AbstractModel):
 
     @api.model
     def resolve_product(self, instance, sku=False, fnsku=False, asin=False):
-        domain = [('instance_id', '=', instance.id)]
-        identity = []
+        """Resolve an existing mapping without ever creating a product.
+
+        Seller SKU is the connector's authoritative direct key.  FNSKU is not
+        stored on ``amazon.product``, so it is used only through existing,
+        instance-scoped inventory evidence.  ASIN is accepted only when it
+        identifies one Amazon product for the seller instance.
+        """
+        sku = str(sku or '').strip()
+        fnsku = str(fnsku or '').strip()
+        asin = str(asin or '').strip()
+        product_model = self.env['amazon.product']
+        amazon_product = product_model
+
         if sku:
-            identity.append(('sku', '=', str(sku).strip()))
-        if asin:
-            identity.append(('asin', '=', str(asin).strip()))
-        amazon_product = self.env['amazon.product']
-        for condition in identity:
-            amazon_product = self.env['amazon.product'].search(domain + [condition], limit=1)
-            if amazon_product:
-                break
+            candidates = product_model.search([
+                ('instance_id', '=', instance.id), ('sku', '=', sku),
+            ], limit=2)
+            if len(candidates) == 1:
+                amazon_product = candidates
+
+        if not amazon_product and fnsku:
+            # Reuse the FNSKU mappings already observed by inventory
+            # reconciliation and the detailed inventory ledger.
+            mapped_products = self.env['amazon.product']
+            reconciliation_rows = self.env['amazon.inventory.reconciliation'].search([
+                ('instance_id', '=', instance.id), ('fnsku', '=', fnsku),
+                ('amazon_product_id', '!=', False),
+            ], order='run_date desc, id desc', limit=20)
+            mapped_products |= reconciliation_rows.mapped('amazon_product_id')
+            adjustment_rows = self.env['amazon.fba.inventory.adjustment'].search([
+                ('instance_id', '=', instance.id), ('fnsku', '=', fnsku),
+                ('amazon_product_id', '!=', False),
+            ], order='event_date desc, id desc', limit=20)
+            mapped_products |= adjustment_rows.mapped('amazon_product_id')
+            if len(mapped_products) == 1:
+                amazon_product = mapped_products
+
+        if not amazon_product and asin:
+            candidates = product_model.search([
+                ('instance_id', '=', instance.id), ('asin', '=', asin),
+            ], limit=2)
+            if len(candidates) == 1:
+                amazon_product = candidates
         return {
             'amazon_product_id': amazon_product.id or False,
             'odoo_product_id': amazon_product.odoo_product_id.id if amazon_product.odoo_product_id else False,
@@ -727,34 +759,84 @@ class AmazonFBAReimbursement(models.Model):
         'amazon.instance', required=True, ondelete='cascade', index=True, check_company=True,
     )
     company_id = fields.Many2one(related='instance_id.company_id', store=True, readonly=True, index=True)
-    event_key = fields.Char(required=True, readonly=True, copy=False, index=True)
-    reimbursement_id = fields.Char(required=True, index=True, tracking=True)
+    marketplace_id = fields.Char(
+        related='instance_id.marketplace_id', store=True, readonly=True, index=True,
+    )
+    event_key = fields.Char(
+        string='Internal Reimbursement Event Key', required=True,
+        readonly=True, copy=False, index=True,
+    )
+    line_key = fields.Char(
+        string='Reimbursement Line Key', related='event_key',
+        store=True, readonly=True, index=True,
+        help="Deterministic identity for one item row within an Amazon reimbursement ID.",
+    )
+    reimbursement_id = fields.Char(
+        string='Amazon Reimbursement ID', required=True, index=True, tracking=True,
+    )
     case_id = fields.Char(index=True)
     approval_date = fields.Datetime(index=True)
+    reason_raw = fields.Char(string='Amazon Reason', index=True, tracking=True)
     reimbursement_reason = fields.Char(index=True, tracking=True)
     reimbursement_classification = fields.Selection([
         ('lost_inventory', 'Lost Inventory'), ('damaged_inventory', 'Damaged Inventory'),
         ('customer_return', 'Customer Return'), ('removal', 'Removal'),
         ('reversal', 'Reversal'), ('other', 'Other/Unknown'),
     ], default='other', required=True, index=True)
-    amazon_order_id = fields.Char(index=True)
-    amazon_order_item_id = fields.Char(index=True)
+    amazon_order_id = fields.Char(string='Amazon Order ID', index=True)
+    amazon_order_item_id = fields.Char(
+        string='Legacy Amazon Order Item ID', index=True,
+        help="Upgrade-only compatibility field. It is not part of the current FBA Reimbursements Report and is never populated by this importer.",
+    )
     sku = fields.Char(index=True)
     fnsku = fields.Char(index=True)
     asin = fields.Char(index=True)
+    product_name = fields.Char()
+    condition = fields.Char(index=True)
     amazon_product_id = fields.Many2one('amazon.product', ondelete='set null', index=True)
     odoo_product_id = fields.Many2one('product.product', ondelete='restrict', index=True)
+    product_mapping_state = fields.Selection([
+        ('mapped', 'Mapped'), ('unmapped', 'Unmapped Product'),
+    ], default='unmapped', required=True, readonly=True, index=True)
+    amazon_order_record_id = fields.Many2one(
+        'amazon.sale.order', string='Linked Amazon Order', ondelete='set null', index=True,
+    )
+    order_link_state = fields.Selection([
+        ('not_applicable', 'No Order Reported'), ('linked', 'Order Linked'),
+        ('order_not_found', 'Order Not Found'),
+    ], default='not_applicable', required=True, readonly=True, index=True)
     quantity_reimbursed_cash = fields.Float()
     quantity_reimbursed_inventory = fields.Float()
-    quantity_reimbursed_total = fields.Float(compute='_compute_quantity_total', store=True)
+    quantity_reimbursed_total = fields.Float(
+        help="Exact quantity-reimbursed-total reported by Amazon; it is not computed locally.",
+    )
+    has_reported_quantity_total = fields.Boolean(readonly=True)
+    quantity_anomaly = fields.Boolean(readonly=True, index=True)
     amount_per_unit = fields.Monetary(currency_field='currency_id')
     amount_total = fields.Monetary(currency_field='currency_id')
     currency_id = fields.Many2one('res.currency', ondelete='restrict')
     currency_code = fields.Char()
-    original_reimbursement_id = fields.Char(index=True)
+    amount_currency_anomaly = fields.Boolean(readonly=True, index=True)
+    original_reimbursement_id = fields.Char(string='Original Reimbursement ID', index=True)
     original_reimbursement_type = fields.Char()
+    original_reimbursement_record_id = fields.Many2one(
+        'amazon.fba.reimbursement', string='Linked Original Reimbursement',
+        ondelete='restrict', index=True, check_company=True,
+    )
+    reversal_reimbursement_ids = fields.One2many(
+        'amazon.fba.reimbursement', 'original_reimbursement_record_id',
+        string='Related Reimbursements / Reversals', readonly=True,
+    )
+    original_link_state = fields.Selection([
+        ('not_applicable', 'Not Applicable'), ('linked', 'Original Linked'),
+        ('not_found', 'Original Not Found'), ('ambiguous', 'Original Ambiguous'),
+    ], default='not_applicable', required=True, readonly=True, index=True)
     linked_return_id = fields.Many2one('amazon.return.report.line', ondelete='set null', check_company=True)
     linked_adjustment_id = fields.Many2one('amazon.fba.inventory.adjustment', ondelete='set null', check_company=True)
+    linked_inventory_event_id = fields.Many2one(
+        'amazon.fba.inventory.adjustment', string='Matched Inventory Event',
+        related='linked_adjustment_id', store=True, readonly=False,
+    )
     linked_removal_order_id = fields.Many2one('amazon.removal.order', ondelete='set null', check_company=True)
     linked_settlement_id = fields.Many2one('amazon.settlement.report', ondelete='set null')
     accounting_state = fields.Selection([
@@ -763,18 +845,37 @@ class AmazonFBAReimbursement(models.Model):
     review_state = fields.Selection([
         ('unmatched', 'Unmatched'), ('matched', 'Matched'),
         ('manual_review', 'Manual Review'), ('ignored', 'Ignored'),
+    ], default='unmatched', required=True, index=True, tracking=True,
+       help="Legacy review state retained for upgrade compatibility.")
+    matching_state = fields.Selection([
+        ('unmatched', 'Unmatched'), ('matched', 'Matched'),
+        ('ambiguous', 'Ambiguous'), ('manually_matched', 'Manually Matched'),
+        ('ignored', 'Ignored'),
     ], default='unmatched', required=True, index=True, tracking=True)
+    financial_state = fields.Selection([
+        ('imported', 'Imported'), ('unmatched', 'Unmatched'),
+        ('matched', 'Matched'), ('ready_for_finance', 'Ready for Finance'),
+        ('posted_later', 'Posted Later'),
+    ], default='imported', required=True, index=True, tracking=True,
+       help="Reserved for the later settlement/accounting phase. Importing does not post anything.")
     match_method = fields.Char(readonly=True)
+    matching_explanation = fields.Text(readonly=True)
+    requires_review = fields.Boolean(readonly=True, index=True)
     review_note = fields.Text()
+    source_report_id = fields.Char(index=True)
     raw_report_reference = fields.Char(index=True)
+    raw_report_row = fields.Text(groups='sdlc_amazon_connector.group_amazon_technical_admin')
     raw_report_data = fields.Text(groups='sdlc_amazon_connector.group_amazon_technical_admin')
     imported_at = fields.Datetime(default=fields.Datetime.now, readonly=True)
     last_synced_at = fields.Datetime(readonly=True)
+    last_match_attempt_at = fields.Datetime(readonly=True, index=True)
     amazon_order_count = fields.Integer(compute='_compute_link_counts')
     sale_order_count = fields.Integer(compute='_compute_link_counts')
     return_count = fields.Integer(compute='_compute_link_counts')
     adjustment_count = fields.Integer(compute='_compute_link_counts')
     removal_order_count = fields.Integer(compute='_compute_link_counts')
+    original_reimbursement_count = fields.Integer(compute='_compute_link_counts')
+    reversal_reimbursement_count = fields.Integer(compute='_compute_link_counts')
     sync_log_count = fields.Integer(compute='_compute_link_counts')
 
     _event_unique = models.Constraint(
@@ -783,6 +884,8 @@ class AmazonFBAReimbursement(models.Model):
 
     def _amazon_orders(self):
         self.ensure_one()
+        if self.amazon_order_record_id:
+            return self.amazon_order_record_id
         if not self.amazon_order_id:
             return self.env['amazon.sale.order']
         return self.env['amazon.sale.order'].search([
@@ -799,6 +902,8 @@ class AmazonFBAReimbursement(models.Model):
             record.return_count = bool(record.linked_return_id)
             record.adjustment_count = bool(record.linked_adjustment_id)
             record.removal_order_count = bool(record.linked_removal_order_id)
+            record.original_reimbursement_count = bool(record.original_reimbursement_record_id)
+            record.reversal_reimbursement_count = len(record.reversal_reimbursement_ids)
             record.sync_log_count = sync_log_model.search_count([
                 ('source_model', '=', record._name), ('source_id', '=', record.id),
             ])
@@ -833,6 +938,27 @@ class AmazonFBAReimbursement(models.Model):
             _('Inventory Adjustment'), 'amazon.fba.inventory.adjustment', self.linked_adjustment_id,
         )
 
+    def action_view_amazon_product(self):
+        return self._open_linked_records(
+            _('Amazon Product'), 'amazon.product', self.amazon_product_id,
+        )
+
+    def action_view_odoo_product(self):
+        return self._open_linked_records(
+            _('Odoo Product'), 'product.product', self.odoo_product_id,
+        )
+
+    def action_view_original_reimbursement(self):
+        return self._open_linked_records(
+            _('Original Reimbursement'), self._name, self.original_reimbursement_record_id,
+        )
+
+    def action_view_reversal_reimbursements(self):
+        return self._open_linked_records(
+            _('Related Reimbursements / Reversals'), self._name,
+            self.reversal_reimbursement_ids,
+        )
+
     def action_view_removal_order(self):
         return self._open_linked_records(
             _('Removal Order'), 'amazon.removal.order', self.linked_removal_order_id,
@@ -844,19 +970,12 @@ class AmazonFBAReimbursement(models.Model):
         ])
         return self._open_linked_records(_('Sync Logs'), records._name, records)
 
-    @api.depends('quantity_reimbursed_cash', 'quantity_reimbursed_inventory')
-    def _compute_quantity_total(self):
-        for rec in self:
-            rec.quantity_reimbursed_total = (
-                rec.quantity_reimbursed_cash + rec.quantity_reimbursed_inventory
-            )
-
     @api.model
     def _classification(self, reason, original_type):
         text = ('%s %s' % (reason or '', original_type or '')).lower()
         if 'reversal' in text:
             return 'reversal'
-        if 'removal' in text:
+        if any(token in text for token in ('removal', 'destroy', 'dispos')):
             return 'removal'
         if 'return' in text:
             return 'customer_return'
@@ -867,55 +986,248 @@ class AmazonFBAReimbursement(models.Model):
         return 'other'
 
     @api.model
-    def import_row(self, instance, row, report_reference=False):
-        reimbursement_id = row.get('reimbursement-id') or ''
+    def _normalize_row(self, row):
+        return {
+            str(key or '').strip().lstrip('\ufeff').lower().replace('_', '-').replace(' ', '-'): (
+                value.strip() if isinstance(value, str) else value
+            )
+            for key, value in (row or {}).items()
+            if key and key != '_extra_fields'
+        }
+
+    @api.model
+    def _line_key_for_row(self, instance, row):
+        """Build a stable item identity without mutable amount/quantity values.
+
+        Amazon documents reimbursement-id as the reimbursement identifier, but
+        the report is itemized and the same ID can span multiple products.  The
+        documented item/order/original identifiers therefore form the line
+        identity.  Reported money and quantities remain mutable upsert data.
+        """
         components = [
-            instance.id, reimbursement_id, row.get('approval-date'), row.get('amazon-order-id'),
-            row.get('sku'), row.get('fnsku'), row.get('asin'), row.get('reason'),
-            row.get('condition'), row.get('currency-unit'), row.get('amount-total'),
-            row.get('quantity-reimbursed-cash'), row.get('quantity-reimbursed-inventory'),
+            instance.id, row.get('reimbursement-id'), row.get('case-id'),
+            row.get('amazon-order-id'), row.get('sku'), row.get('fnsku'),
+            row.get('asin'),
+            row.get('product-name') if not any(
+                row.get(key) for key in ('sku', 'fnsku', 'asin')
+            ) else '',
+            row.get('reason'),
+            row.get('condition'),
             row.get('original-reimbursement-id'), row.get('original-reimbursement-type'),
         ]
-        key = hashlib.sha256('|'.join(str(value or '').strip() for value in components).encode()).hexdigest()
+        return hashlib.sha256(
+            '|'.join(str(value or '').strip() for value in components).encode()
+        ).hexdigest()
+
+    @api.model
+    def _legacy_row_candidates(self, instance, row):
+        domain = [
+            ('instance_id', '=', instance.id),
+            ('reimbursement_id', '=', row.get('reimbursement-id')),
+            ('sku', '=', row.get('sku') or ''),
+            ('fnsku', '=', row.get('fnsku') or ''),
+            ('asin', '=', row.get('asin') or ''),
+            ('amazon_order_id', '=', row.get('amazon-order-id') or ''),
+            ('case_id', '=', row.get('case-id') or ''),
+            ('reimbursement_reason', '=', row.get('reason') or ''),
+            ('original_reimbursement_id', '=', row.get('original-reimbursement-id') or ''),
+        ]
+        return self.search(domain, limit=2)
+
+    @api.model
+    def _order_values(self, instance, amazon_order_id):
+        amazon_order_id = str(amazon_order_id or '').strip()
+        if not amazon_order_id:
+            return {'amazon_order_record_id': False, 'order_link_state': 'not_applicable'}
+        order = self.env['amazon.sale.order'].search([
+            ('instance_id', '=', instance.id), ('amazon_order_ref', '=', amazon_order_id),
+        ], limit=1)
+        return {
+            'amazon_order_record_id': order.id or False,
+            'order_link_state': 'linked' if order else 'order_not_found',
+        }
+
+    def _base_review_issues(self):
+        self.ensure_one()
+        issues = []
+        if self.product_mapping_state == 'unmapped':
+            issues.append(_("UNMAPPED PRODUCT: %s", self.sku or self.fnsku or self.asin or _('empty')))
+        if self.order_link_state == 'order_not_found':
+            issues.append(_("ORDER NOT FOUND: %s", self.amazon_order_id))
+        if self.quantity_anomaly:
+            if not self.has_reported_quantity_total:
+                issues.append(_("QUANTITY ANOMALY: Amazon omitted quantity-reimbursed-total."))
+            else:
+                issues.append(_(
+                    "QUANTITY ANOMALY: reported total %s differs from cash %s plus inventory %s.",
+                    self.quantity_reimbursed_total, self.quantity_reimbursed_cash,
+                    self.quantity_reimbursed_inventory,
+                ))
+        if self.amount_currency_anomaly:
+            issues.append(_(
+                "AMOUNT/CURRENCY ANOMALY: %s is not available for the reported amount.",
+                self.currency_code or _('currency code'),
+            ))
+        if self.original_link_state == 'not_found':
+            issues.append(_(
+                "ORIGINAL REIMBURSEMENT NOT FOUND: %s", self.original_reimbursement_id,
+            ))
+        elif self.original_link_state == 'ambiguous':
+            issues.append(_(
+                "ORIGINAL REIMBURSEMENT AMBIGUOUS: %s", self.original_reimbursement_id,
+            ))
+        return issues
+
+    def _write_review(self, matching_issue=False):
+        self.ensure_one()
+        issues = self._base_review_issues()
+        if matching_issue:
+            issues.append(matching_issue)
+        self.write({
+            'requires_review': bool(issues),
+            'review_note': '\n'.join(issues) or False,
+        })
+        return issues
+
+    def _original_candidates(self):
+        self.ensure_one()
+        if not self.original_reimbursement_id:
+            return self.env[self._name]
+        candidates = self.search([
+            ('instance_id', '=', self.instance_id.id),
+            ('reimbursement_id', '=', self.original_reimbursement_id),
+            ('id', '!=', self.id),
+        ], limit=20)
+        for field_name in ('fnsku', 'sku', 'asin'):
+            value = self[field_name]
+            if value:
+                exact = candidates.filtered(lambda item: item[field_name] == value)
+                if exact:
+                    return exact
+        return candidates
+
+    def _resolve_original_relationship(self):
+        self.ensure_one()
+        if not self.original_reimbursement_id:
+            self.write({
+                'original_reimbursement_record_id': False,
+                'original_link_state': 'not_applicable',
+            })
+            return self.env[self._name]
+        candidates = self._original_candidates()
+        if len(candidates) == 1:
+            self.write({
+                'original_reimbursement_record_id': candidates.id,
+                'original_link_state': 'linked',
+            })
+            return candidates
+        self.write({
+            'original_reimbursement_record_id': False,
+            'original_link_state': 'ambiguous' if candidates else 'not_found',
+        })
+        return self.env[self._name]
+
+    @api.model
+    def import_row(self, instance, row, report_reference=False):
+        row = self._normalize_row(row)
+        reimbursement_id = row.get('reimbursement-id') or ''
+        missing = []
+        if not reimbursement_id:
+            missing.append('reimbursement-id')
+        if not row.get('approval-date'):
+            missing.append('approval-date')
+        if missing:
+            raise ValidationError(_(
+                "Malformed FBA reimbursement row; missing %s.", ', '.join(missing),
+            ))
+        key = self._line_key_for_row(instance, row)
         reimbursement = self.search([
             ('instance_id', '=', instance.id), ('event_key', '=', key),
         ], limit=1)
+        if not reimbursement:
+            legacy = self._legacy_row_candidates(instance, row)
+            reimbursement = legacy if len(legacy) == 1 else self.env[self._name]
         currency_code = (row.get('currency-unit') or '').strip()
-        currency = self.env['res.currency'].search([('name', '=', currency_code)], limit=1)
+        currency = self.env['res.currency'].with_context(active_test=False).search([
+            ('name', '=', currency_code),
+        ], limit=1)
         product_values = self.env['amazon.phase7.stock.service'].resolve_product(
             instance, row.get('sku'), row.get('fnsku'), row.get('asin')
         )
+        cash_quantity = self.env['amazon.phase7.stock.service'].number(
+            row.get('quantity-reimbursed-cash')
+        )
+        inventory_quantity = self.env['amazon.phase7.stock.service'].number(
+            row.get('quantity-reimbursed-inventory')
+        )
+        has_total = row.get('quantity-reimbursed-total') not in (None, '')
+        total_quantity = self.env['amazon.phase7.stock.service'].number(
+            row.get('quantity-reimbursed-total')
+        )
+        quantity_anomaly = (
+            not has_total
+            or abs(total_quantity - cash_quantity - inventory_quantity) > 0.00001
+        )
+        amount_total = self.env['amazon.phase7.stock.service'].number(row.get('amount-total'))
+        diagnostic = json.dumps(row, default=str, sort_keys=True)[:20000]
         vals = {
             'instance_id': instance.id, 'event_key': key,
             'reimbursement_id': reimbursement_id,
             'case_id': row.get('case-id') or '',
             'approval_date': self.env['amazon.phase7.stock.service'].datetime(row.get('approval-date')),
+            'reason_raw': row.get('reason') or '',
             'reimbursement_reason': row.get('reason') or '',
             'reimbursement_classification': self._classification(
                 row.get('reason'), row.get('original-reimbursement-type')
             ),
             'amazon_order_id': row.get('amazon-order-id') or '',
-            'amazon_order_item_id': row.get('amazon-order-item-id') or '',
             'sku': row.get('sku') or '', 'fnsku': row.get('fnsku') or '',
-            'asin': row.get('asin') or '',
-            'quantity_reimbursed_cash': self.env['amazon.phase7.stock.service'].number(row.get('quantity-reimbursed-cash')),
-            'quantity_reimbursed_inventory': self.env['amazon.phase7.stock.service'].number(row.get('quantity-reimbursed-inventory')),
+            'asin': row.get('asin') or '', 'product_name': row.get('product-name') or '',
+            'condition': row.get('condition') or '',
+            'product_mapping_state': (
+                'mapped'
+                if product_values.get('amazon_product_id') and product_values.get('odoo_product_id')
+                else 'unmapped'
+            ),
+            'quantity_reimbursed_cash': cash_quantity,
+            'quantity_reimbursed_inventory': inventory_quantity,
+            'quantity_reimbursed_total': total_quantity,
+            'has_reported_quantity_total': has_total,
+            'quantity_anomaly': quantity_anomaly,
             'amount_per_unit': self.env['amazon.phase7.stock.service'].number(row.get('amount-per-unit')),
-            'amount_total': self.env['amazon.phase7.stock.service'].number(row.get('amount-total')),
+            'amount_total': amount_total,
             'currency_id': currency.id or False, 'currency_code': currency_code,
+            'amount_currency_anomaly': bool(amount_total and (not currency_code or not currency)),
             'original_reimbursement_id': row.get('original-reimbursement-id') or '',
             'original_reimbursement_type': row.get('original-reimbursement-type') or '',
+            'source_report_id': report_reference,
             'raw_report_reference': report_reference,
-            'raw_report_data': json.dumps(row, default=str, sort_keys=True),
+            'raw_report_row': diagnostic,
+            'raw_report_data': diagnostic,
             'last_synced_at': fields.Datetime.now(),
+            **self._order_values(instance, row.get('amazon-order-id')),
             **product_values,
         }
         if reimbursement:
-            for protected in ('instance_id', 'event_key', 'review_state', 'match_method'):
+            for protected in (
+                'instance_id', 'matching_state', 'review_state', 'financial_state',
+                'linked_return_id', 'linked_adjustment_id', 'linked_removal_order_id',
+                'match_method', 'matching_explanation',
+            ):
                 vals.pop(protected, None)
             reimbursement.write(vals)
         else:
-            reimbursement = self.create(vals)
+            reimbursement = self.create({
+                **vals, 'imported_at': fields.Datetime.now(), 'financial_state': 'imported',
+            })
+        reimbursement._resolve_original_relationship()
+        reimbursement._write_review()
+        if reimbursement.requires_review:
+            self.env['amazon.smart.alert'].phase7_alert(
+                instance, 'reimbursement-review:%s' % reimbursement.event_key,
+                _("FBA reimbursement requires review"), reimbursement.review_note,
+                source=reimbursement, product=reimbursement.amazon_product_id,
+            )
         return reimbursement
 
     def action_match(self):
@@ -923,79 +1235,225 @@ class AmazonFBAReimbursement(models.Model):
             reimbursement._match_one()
         return True
 
-    def _set_match(self, field_name, record, method):
+    def action_confirm_manual_match(self):
+        for reimbursement in self:
+            event = reimbursement.linked_inventory_event_id
+            if not event:
+                raise ValidationError(_("Select an inventory event before confirming a manual match."))
+            reimbursement._set_match(
+                'linked_adjustment_id', event, 'manual_inventory_event',
+                _("Manually matched to inventory event %s by %s.", event.display_name, self.env.user.display_name),
+                manual=True,
+            )
+        return True
+
+    @api.constrains(
+        'original_reimbursement_record_id', 'linked_adjustment_id',
+        'linked_return_id', 'linked_removal_order_id', 'amazon_order_record_id',
+    )
+    def _check_instance_links(self):
+        for reimbursement in self:
+            for record in (
+                reimbursement.original_reimbursement_record_id,
+                reimbursement.linked_adjustment_id,
+                reimbursement.linked_return_id,
+                reimbursement.linked_removal_order_id,
+                reimbursement.amazon_order_record_id,
+            ):
+                if record and record.instance_id != reimbursement.instance_id:
+                    raise ValidationError(_("A reimbursement cannot link across Amazon instances."))
+
+    def _set_match(self, field_name, record, method, explanation=False, manual=False):
         self.ensure_one()
-        if record.company_id != self.company_id:
-            raise ValidationError(_("A reimbursement cannot link across companies."))
+        if not record or record.instance_id != self.instance_id:
+            raise ValidationError(_("A reimbursement cannot link across Amazon instances."))
+        state = 'manually_matched' if manual else 'matched'
         self.write({
             field_name: record.id, 'review_state': 'matched',
-            'match_method': method, 'review_note': False,
-            'accounting_state': 'ready_for_phase8',
+            'matching_state': state, 'match_method': method,
+            'matching_explanation': explanation or method.replace('_', ' ').title(),
         })
-        if field_name == 'linked_adjustment_id':
+        if field_name == 'linked_adjustment_id' and not record.linked_reimbursement_id:
             record.linked_reimbursement_id = self
+        self._write_review()
         return True
+
+    def _same_product_as_event(self, event):
+        self.ensure_one()
+        for field_name in ('fnsku', 'sku', 'asin'):
+            reimbursement_value = (self[field_name] or '').strip()
+            event_value = (event[field_name] or '').strip()
+            if reimbursement_value and event_value:
+                return reimbursement_value == event_value
+        return bool(
+            self.amazon_product_id and event.amazon_product_id
+            and self.amazon_product_id == event.amazon_product_id
+        )
+
+    def _quantity_matches_event(self, event):
+        self.ensure_one()
+        return bool(
+            self.has_reported_quantity_total and not self.quantity_anomaly
+            and abs(abs(event.quantity) - abs(self.quantity_reimbursed_total)) < 0.00001
+        )
+
+    def _allowed_event_categories(self):
+        self.ensure_one()
+        return {
+            'lost_inventory': {'lost'},
+            'damaged_inventory': {'damaged'},
+            'removal': {'destroyed'},
+            'reversal': {'found'},
+        }.get(self.reimbursement_classification, set())
+
+    def _filter_inventory_events(self, records, require_quantity=False):
+        self.ensure_one()
+        allowed = self._allowed_event_categories()
+        if not allowed:
+            return self.env['amazon.fba.inventory.adjustment']
+        return records.filtered(lambda event: (
+            event.event_category in allowed
+            and self._same_product_as_event(event)
+            and (not require_quantity or self._quantity_matches_event(event))
+        ))
+
+    def _match_found_reversal(self):
+        self.ensure_one()
+        original = self.original_reimbursement_record_id
+        loss = original.linked_adjustment_id if original else self.env['amazon.fba.inventory.adjustment']
+        if not loss or loss.event_category != 'lost':
+            return False
+        candidates = self.env['amazon.fba.inventory.adjustment'].search([
+            ('instance_id', '=', self.instance_id.id),
+            ('event_category', '=', 'found'),
+            ('reversal_of_adjustment_id', '=', loss.id),
+        ], limit=3)
+        candidates = candidates.filtered(lambda event: (
+            self._same_product_as_event(event)
+            and (not self.has_reported_quantity_total or self._quantity_matches_event(event))
+        ))
+        if len(candidates) == 1:
+            return self._set_match(
+                'linked_adjustment_id', candidates,
+                'original_reimbursement_found_event',
+                _("Matched by original reimbursement + linked Lost event + Found reversal event."),
+            )
+        if len(candidates) > 1:
+            return self._ambiguous(_(
+                "Multiple Found events reverse the Lost event linked to the original reimbursement."
+            ))
+        return False
 
     def _match_one(self):
         self.ensure_one()
-        if self.review_state == 'matched':
+        if self.matching_state in ('matched', 'manually_matched', 'ignored'):
             return True
+        self.last_match_attempt_at = fields.Datetime.now()
         instance_domain = [('instance_id', '=', self.instance_id.id)]
-        candidates = []
-        # Strong report references first.
-        if self.original_reimbursement_id:
-            prior = self.search(instance_domain + [
-                ('reimbursement_id', '=', self.original_reimbursement_id),
-                ('id', '!=', self.id),
-            ], limit=2)
-            if len(prior) == 1:
-                self.write({
-                    'review_state': 'matched', 'match_method': 'original_reimbursement_id',
-                    'accounting_state': 'ready_for_phase8',
-                })
-                return True
-        if self.amazon_order_id:
+        self._resolve_original_relationship()
+        if self.reimbursement_classification == 'reversal' and self._match_found_reversal():
+            return True
+
+        # Strong ledger references, with compatible reason and product evidence.
+        references = list(dict.fromkeys(filter(None, (
+            self.case_id, self.reimbursement_id, self.amazon_order_id,
+        ))))
+        if references:
+            candidates = self.env['amazon.fba.inventory.adjustment'].search(instance_domain + [
+                ('reference_id', 'in', references),
+            ], limit=10)
+            candidates = self._filter_inventory_events(candidates)
+            if len(candidates) == 1:
+                return self._set_match(
+                    'linked_adjustment_id', candidates, 'inventory_reference_product_reason',
+                    _("Matched by inventory ReferenceID + product identity + compatible reason."),
+                )
+            if len(candidates) > 1:
+                return self._ambiguous(_(
+                    "Multiple inventory events match the reference, product, and reason."
+                ))
+
+        # Customer-return reimbursements need order, product, and quantity.
+        if self.amazon_order_id and self.reimbursement_classification == 'customer_return':
             candidates = self.env['amazon.return.report.line'].search(instance_domain + [
                 ('amazon_order_id', '=', self.amazon_order_id),
-            ], limit=3)
-            if self.amazon_order_item_id:
-                exact = candidates.filtered(lambda rec: rec.amazon_order_item_id == self.amazon_order_item_id)
-                candidates = exact or candidates
+            ], limit=20).filtered(lambda event: (
+                self._same_product_as_event(event)
+                and self.has_reported_quantity_total and not self.quantity_anomaly
+                and abs(abs(event.quantity) - abs(self.quantity_reimbursed_total)) < 0.00001
+            ))
             if len(candidates) == 1:
-                return self._set_match('linked_return_id', candidates, 'amazon_order_item')
+                return self._set_match(
+                    'linked_return_id', candidates, 'amazon_order_product_quantity',
+                    _("Matched by Amazon Order ID + product identity + quantity."),
+                )
             if len(candidates) > 1:
-                return self._ambiguous(_('Multiple customer returns match the Amazon order.'))
-        adjustment = self.env['amazon.fba.inventory.adjustment'].search(instance_domain + [
-            ('reference_id', 'in', [self.case_id, self.reimbursement_id]),
-        ], limit=2) if self.case_id or self.reimbursement_id else self.env['amazon.fba.inventory.adjustment']
-        if len(adjustment) == 1:
-            return self._set_match('linked_adjustment_id', adjustment, 'adjustment_reference')
-        if len(adjustment) > 1:
-            return self._ambiguous(_('Multiple inventory adjustments match the reference.'))
-        removal = self.env['amazon.removal.order'].search(instance_domain + [
-            ('removal_order_id', 'in', [self.case_id, self.amazon_order_id]),
-        ], limit=2) if self.case_id or self.amazon_order_id else self.env['amazon.removal.order']
-        if len(removal) == 1:
-            return self._set_match('linked_removal_order_id', removal, 'removal_order_id')
-        if len(removal) > 1:
-            return self._ambiguous(_('Multiple removal orders match the reference.'))
-        # Controlled fallback: same FNSKU/SKU, close date, exact absolute quantity.
-        if self.approval_date and (self.fnsku or self.sku) and self.quantity_reimbursed_total:
+                return self._ambiguous(_(
+                    "Multiple customer-return events match the order, product, and quantity."
+                ))
+
+        # A removal/disposal link requires both an explicit removal reference and
+        # an item identity on that order.
+        if self.reimbursement_classification == 'removal' and (self.case_id or self.amazon_order_id):
+            removal = self.env['amazon.removal.order'].search(instance_domain + [
+                ('removal_order_id', 'in', list(filter(None, (self.case_id, self.amazon_order_id)))),
+            ], limit=3)
+            removal = removal.filtered(lambda order: any(
+                (self.fnsku and line.fnsku == self.fnsku)
+                or (self.sku and line.sku == self.sku)
+                or (self.amazon_product_id and line.amazon_product_id == self.amazon_product_id)
+                for line in order.line_ids
+            ))
+            if len(removal) == 1:
+                return self._set_match(
+                    'linked_removal_order_id', removal, 'removal_reference_product',
+                    _("Matched by removal order reference + product identity."),
+                )
+            if len(removal) > 1:
+                return self._ambiguous(_(
+                    "Multiple removal orders match the reference and product."
+                ))
+
+        # Controlled fallback is limited to a reason-compatible ledger event,
+        # a single product identity, a close date, and the exact reported total.
+        if (
+            self.approval_date and (self.fnsku or self.sku or self.asin or self.amazon_product_id)
+            and self.has_reported_quantity_total and not self.quantity_anomaly
+            and self._allowed_event_categories()
+        ):
             start = self.approval_date - timedelta(days=45)
             end = self.approval_date + timedelta(days=45)
-            domain = instance_domain + [('event_date', '>=', start), ('event_date', '<=', end)]
-            domain += [('fnsku', '=', self.fnsku)] if self.fnsku else [('sku', '=', self.sku)]
-            possible = self.env['amazon.fba.inventory.adjustment'].search(domain, limit=3).filtered(
-                lambda item: abs(abs(item.quantity) - abs(self.quantity_reimbursed_total)) < 0.00001
+            domain = instance_domain + [
+                ('event_date', '>=', start), ('event_date', '<=', end),
+                ('event_category', 'in', list(self._allowed_event_categories())),
+            ]
+            if self.fnsku:
+                domain.append(('fnsku', '=', self.fnsku))
+            elif self.sku:
+                domain.append(('sku', '=', self.sku))
+            elif self.asin:
+                domain.append(('asin', '=', self.asin))
+            else:
+                domain.append(('amazon_product_id', '=', self.amazon_product_id.id))
+            possible = self.env['amazon.fba.inventory.adjustment'].search(
+                domain, limit=10,
             )
+            possible = self._filter_inventory_events(possible, require_quantity=True)
             if len(possible) == 1:
-                return self._set_match('linked_adjustment_id', possible, 'sku_date_quantity_fallback')
+                identity = 'FNSKU' if self.fnsku else ('SKU' if self.sku else 'ASIN/product')
+                return self._set_match(
+                    'linked_adjustment_id', possible, 'reason_product_date_quantity',
+                    _("Matched by compatible reason + %s + approval-date window + exact quantity.", identity),
+                )
             if len(possible) > 1:
-                return self._ambiguous(_('Fallback SKU/date/quantity match is ambiguous.'))
+                return self._ambiguous(_(
+                    "Multiple reason/product/date/quantity inventory events match."
+                ))
         self.write({
-            'review_state': 'manual_review',
-            'review_note': _("No strong operational match was found."),
+            'matching_state': 'unmatched', 'review_state': 'manual_review',
+            'match_method': False, 'matching_explanation': False,
         })
+        self._write_review(_("No strong operational match was found."))
         self.env['amazon.smart.alert'].phase7_alert(
             self.instance_id, 'reimbursement:%s' % self.event_key,
             _("FBA reimbursement is unmatched"), self.review_note,
@@ -1005,7 +1463,11 @@ class AmazonFBAReimbursement(models.Model):
 
     def _ambiguous(self, message):
         self.ensure_one()
-        self.write({'review_state': 'manual_review', 'review_note': message})
+        self.write({
+            'matching_state': 'ambiguous', 'review_state': 'manual_review',
+            'match_method': False, 'matching_explanation': False,
+        })
+        self._write_review(message)
         self.env['amazon.smart.alert'].phase7_alert(
             self.instance_id, 'reimbursement:%s' % self.event_key,
             _("FBA reimbursement match is ambiguous"), message,
@@ -1259,7 +1721,7 @@ class AmazonPhase7Job(models.Model):
                     row_errors.append(
                         "Row %s (order=%s, sku=%s): %s" % (
                             offset,
-                            str(row.get('order-id') or '')[:80],
+                            str(row.get('order-id') or row.get('amazon-order-id') or '')[:80],
                             str(row.get('sku') or row.get('fnsku') or row.get('asin') or '')[:80],
                             str(exc)[:1000],
                         )
@@ -1346,11 +1808,13 @@ class AmazonPhase7Job(models.Model):
             'inventory_adjustments': 'last_fba_adjustment_sync_at',
             'reimbursements': 'last_fba_reimbursement_sync_at',
         }.get(self.operation_type)
-        # Never advance an incremental return/removal cursor past rejected
-        # source rows. Valid rows remain committed and idempotent, so the next
-        # run can safely overlap and recover the rejected evidence.
+        # Never advance an incremental cursor past rejected operational source
+        # rows. Valid rows remain committed and idempotent, so the next run can
+        # safely overlap and recover rejected evidence.
         if cursor_field and not (
-            self.operation_type in ('customer_returns', 'removal_status')
+            self.operation_type in (
+                'customer_returns', 'removal_status', 'reimbursements',
+            )
             and self.total_failed
         ):
             self.instance_id.write({cursor_field: fields.Datetime.now()})
@@ -1360,6 +1824,8 @@ class AmazonPhase7Job(models.Model):
             'last_error_message': self.row_error_log if self.total_failed else False,
             'next_run_at': False, 'raw_document': False,
         })
+        if self.operation_type == 'reimbursements':
+            self.enqueue(self.instance_id, 'reimbursement_matching')
         return True
 
     def _submit_removal(self):
@@ -1479,7 +1945,9 @@ class AmazonPhase7Job(models.Model):
     def _match_reimbursements(self):
         records = self.env['amazon.fba.reimbursement'].search([
             ('instance_id', '=', self.instance_id.id),
-            ('review_state', 'in', ('unmatched', 'manual_review')),
+            ('matching_state', '=', 'unmatched'),
+            '|', ('last_match_attempt_at', '=', False),
+            ('last_match_attempt_at', '<', self.create_date),
         ], order='approval_date, id', limit=self.batch_size)
         for record in records:
             with self.env.cr.savepoint():
@@ -1514,6 +1982,19 @@ class AmazonPhase7Job(models.Model):
         cause = exc.__cause__ or exc
         response = getattr(cause, 'response', None)
         status_code = getattr(response, 'status_code', None)
+        reimbursement_authorization_error = self.operation_type == 'reimbursements' and (
+            status_code in (401, 403)
+            or any(token in message.lower() for token in (
+                '401', '403', 'unauthorized', 'forbidden', 'accessdenied',
+                'role is not authorized', 'revoked authorization',
+            ))
+        )
+        if reimbursement_authorization_error:
+            message = _(
+                "FBA Reimbursements Report authorization failed. Amazon requires "
+                "the Pricing or Amazon Fulfillment role for GET_FBA_REIMBURSEMENTS_DATA. %s",
+                message,
+            )[:10000]
         retryable = status_code == 429 or (status_code and status_code >= 500) or any(
             token in message.lower() for token in (
             '429', 'throttl', 'timeout', 'connection', 'temporar', '503', '500', '502', '504',
@@ -1538,7 +2019,11 @@ class AmazonPhase7Job(models.Model):
         else:
             self.write({
                 'state': 'failed', 'retry_count': retry_count, 'next_run_at': False,
-                'finished_at': fields.Datetime.now(), 'last_error_code': 'PHASE7_ERROR',
+                'finished_at': fields.Datetime.now(),
+                'last_error_code': (
+                    'REPORT_ROLE_MISSING'
+                    if reimbursement_authorization_error else 'PHASE7_ERROR'
+                ),
                 'last_error_message': message,
             })
             source = self._source()
@@ -1552,7 +2037,7 @@ class AmazonPhase7Job(models.Model):
             self.env['amazon.operation.control'].sudo().record_source_failure(self)
             self.env['amazon.smart.alert'].phase7_alert(
                 self.instance_id, 'phase7-job:%s' % self.id,
-                _("FBA returns/removals job failed"), message,
+                _("FBA operational report job failed"), message,
                 source=self, critical=True,
             )
         _logger.exception("Amazon Phase 7 job %s failed: %s", self.id, exc)
@@ -1565,7 +2050,11 @@ class AmazonInstancePhase7(models.Model):
         self.ensure_one()
         end = fields.Date.today()
         cursor = self[cursor_field]
-        start = fields.Date.to_date(cursor) - timedelta(days=2) if cursor else end - timedelta(days=default_days)
+        overlap_days = 7 if cursor_field == 'last_fba_reimbursement_sync_at' else 2
+        start = (
+            fields.Date.to_date(cursor) - timedelta(days=overlap_days)
+            if cursor else end - timedelta(days=default_days)
+        )
         # Thirty days is a conservative connector window, not an Amazon
         # published maximum. Overlap is safe because event keys are idempotent.
         return max(start, end - timedelta(days=30)), end

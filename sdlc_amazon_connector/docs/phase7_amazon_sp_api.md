@@ -91,6 +91,9 @@ It contains recommendations, not the authoritative removal lifecycle.
 
 ### `GET_FBA_REIMBURSEMENTS_DATA`
 
+- Official documentation rechecked on **2026-08-09** together with the current
+  Reports API release notes. No reimbursement-report deprecation or column
+  change was published at that time.
 - FBA sellers; requested report; daily data; tab-delimited flat file.
 - Roles: **Amazon Fulfillment** or **Pricing**.
 - Official columns consumed: `approval-date`, `reimbursement-id`, `case-id`,
@@ -99,6 +102,18 @@ It contains recommendations, not the authoritative removal lifecycle.
   `quantity-reimbursed-cash`, `quantity-reimbursed-inventory`,
   `quantity-reimbursed-total`, `original-reimbursement-id`, and
   `original-reimbursement-type`.
+- Amazon publishes Egypt as marketplace `ARBP9OOSHTCHU` in the EU SP-API
+  region. The report page has no Egypt exclusion, so availability follows the
+  seller's FBA registration and application role authorization.
+- The report is the compensation source of truth. Cash quantity, inventory
+  quantity, reported total, signed amount, and currency are stored separately;
+  none is derived from product cost, selling price, or a ledger quantity.
+- `reimbursement-id` identifies the reimbursement, while the itemized report
+  can contain multiple product rows. The connector therefore uses a stable
+  instance/reimbursement/item line key and updates money/quantity values on
+  overlap imports.
+- Reimbursements never create stock moves or accounting entries. Matching only
+  links the report row to separately imported operational evidence.
 
 ## Feed used
 
@@ -141,7 +156,8 @@ limit.
 Amazon does not publish a report-specific maximum request interval for the
 customer-return, removal-detail, removal-shipment, or reimbursement reports.
 The connector therefore uses conservative 30-day windows with a two-day
-overlap; this is an implementation choice, not an invented Amazon limit.
+overlap, extended to seven days for daily reimbursement data; this is an
+implementation choice, not an invented Amazon limit.
 Idempotent event keys make the overlap safe. Ledger detail is additionally
 bounded by Amazon's official 18-month availability.
 
