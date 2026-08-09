@@ -261,6 +261,7 @@ class AmazonInstance(models.Model):
     last_fba_removal_sync_at = fields.Datetime(readonly=True)
     last_fba_adjustment_sync_at = fields.Datetime(readonly=True)
     last_fba_reimbursement_sync_at = fields.Datetime(readonly=True)
+    last_settlement_sync_at = fields.Datetime(readonly=True)
 
     # Defaults
     default_currency_id = fields.Many2one('res.currency', string='Default Currency')
@@ -1786,134 +1787,21 @@ class AmazonInstance(models.Model):
     # ══════════════════════════════════════════════════
 
     def action_import_settlement_reports(self):
-        """Fetch the list of settlement reports available on Amazon and create
-        a draft ``amazon.settlement.report`` row for any that aren't already
-        in the DB. Does NOT download the report bodies — that is per-report
-        via ``action_download_report``.
-        """
+        """Queue discovery/import of Amazon-generated V2 settlement reports."""
         self.ensure_one()
         self._check_required_fields()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        reports_list = self._api_call_safe(
-            api.get_settlement_reports_list, self, access_token,
-            error_msg="Failed to fetch settlement reports list",
+        job = self.env['amazon.phase7.job'].enqueue(self, 'settlements')
+        return self._notify(
+            _("Settlement Reports"),
+            _("V2 settlement discovery and import was queued as job %s.", job.name),
         )
-        total = len(reports_list)
-        created = 0
-        skipped_existing = 0
-        skipped_invalid = 0
-
-        for rpt in reports_list:
-            report_id = rpt.get('reportId')
-            if not report_id:
-                skipped_invalid += 1
-                continue
-
-            existing = self.env['amazon.settlement.report'].search([
-                ('settlement_id', '=', report_id),
-                ('instance_id', '=', self.id),
-            ], limit=1)
-            if existing:
-                skipped_existing += 1
-                continue
-
-            # SP-API returns ISO 8601 timestamps; persist only the date portion
-            # for ``start_date``/``end_date`` (Date fields on the model).
-            data_start = (rpt.get('dataStartTime') or '')[:10] or False
-            data_end = (rpt.get('dataEndTime') or '')[:10] or False
-
-            # SP-API uses 'YYYY-MM-DDTHH:MM:SS[+Z]'. Odoo Datetime accepts the
-            # 'YYYY-MM-DD HH:MM:SS' form, so we strip the 'T' and trim any
-            # timezone suffix. None / empty becomes False.
-            def _to_dt(iso):
-                if not iso:
-                    return False
-                # Take first 19 chars 'YYYY-MM-DDTHH:MM:SS' and replace 'T' with space.
-                cleaned = iso[:19].replace('T', ' ')
-                return cleaned if len(cleaned) == 19 else False
-
-            # marketplaceIds may be a list of strings; join for the Char field.
-            mp_ids = rpt.get('marketplaceIds') or []
-            marketplace_value = ','.join(mp_ids) if isinstance(mp_ids, list) else (mp_ids or '')
-
-            self.env['amazon.settlement.report'].create({
-                'instance_id': self.id,
-                'settlement_id': report_id,
-                'report_document_id': rpt.get('reportDocumentId') or '',
-                'start_date': data_start,
-                'end_date': data_end,
-                'state': 'draft',
-                # Amazon-side metadata — captured verbatim, surfaced in UI for audit.
-                'report_type': rpt.get('reportType') or '',
-                'processing_status': rpt.get('processingStatus') or '',
-                'created_time': _to_dt(rpt.get('createdTime')),
-                'processing_start_time': _to_dt(rpt.get('processingStartTime')),
-                'processing_end_time': _to_dt(rpt.get('processingEndTime')),
-                'marketplace_ids': marketplace_value,
-            })
-            created += 1
-
-        # Message intentionally distinguishes the three buckets so the user
-        # can self-diagnose: if total=0, the API returned nothing (auth/role/
-        # marketplace issue on Amazon's side); if skipped_existing dominates,
-        # the import is working and they already have these reports.
-        msg = (
-            "Amazon returned %d settlement report(s); "
-            "%d new added, %d already imported, %d skipped (no reportId)."
-            % (total, created, skipped_existing, skipped_invalid)
-        )
-        return self._notify("Settlement Reports", msg)
 
     def _download_settlement_report(self, report_rec):
-        """Download and parse a specific settlement report."""
+        """Compatibility entry point: settlement downloads are always asynchronous."""
         self.ensure_one()
-        access_token = self._get_access_token_or_raise()
-        api = AmazonAPI()
-
-        if not report_rec.report_document_id:
-            raise UserError("No report document ID. The report may still be processing.")
-
-        doc_data = self._api_call_safe(
-            api.get_report_document, self, access_token, report_rec.report_document_id,
-            error_msg="Failed to get report document"
-        )
-        download_url = doc_data.get('url')
-        if not download_url:
-            raise UserError("No download URL for settlement report.")
-
-        import csv as csv_mod
-        import io as io_mod
-
-        raw_text = api.download_report_document(
-            download_url,
-            compression=doc_data.get('compressionAlgorithm'),
-            encryption=doc_data.get('encryptionDetails'),
-            instance=self,
-        )
-        # Same defensive parsing as fetch_report_rows in amazon_api.py: strip
-        # BOM, normalise line endings, and disable CSV quoting. Without this a
-        # stray \r in an unquoted field raises _csv.Error.
-        raw_text = raw_text.lstrip('﻿').replace('\r\n', '\n').replace('\r', '\n')
-        reader = csv_mod.DictReader(
-            io_mod.StringIO(raw_text), delimiter='\t', quoting=csv_mod.QUOTE_NONE,
-        )
-
-        report_rec.line_ids.unlink()
-        for row in reader:
-            self.env['amazon.settlement.report.line'].create({
-                'report_id': report_rec.id,
-                'order_id_ref': row.get('order-id', ''),
-                'order_item_id': row.get('order-item-code', ''),
-                'transaction_type': row.get('transaction-type', ''),
-                'amount_type': row.get('amount-type', ''),
-                'amount_description': row.get('amount-description', ''),
-                'amount': float(row.get('amount', 0) or 0),
-                'posted_date': row.get('posted-date', ''),
-            })
-
-        report_rec.state = 'downloaded'
+        if report_rec.instance_id != self:
+            raise UserError(_("The settlement belongs to another Amazon instance."))
+        return report_rec.action_download_report()
 
     # ══════════════════════════════════════════════════
     # Return Reports
@@ -2339,7 +2227,7 @@ class AmazonInstance(models.Model):
                 )
 
             # Settlement reports
-            if inst._should_run('settlement_sync_interval', 'last_order_sync'):
+            if inst._should_run('settlement_sync_interval', 'last_settlement_sync_at'):
                 try:
                     inst.action_import_settlement_reports()
                     _logger.info("[AutoSync] Settlements synced for %s", inst.name)
@@ -2552,7 +2440,7 @@ class AmazonInstance(models.Model):
                 _logger.error("Cron FBM status update failed for %s: %s", inst.display_name, exc)
 
     def cron_import_settlement_reports(self):
-        for inst in self.env['amazon.instance'].search([]):
+        for inst in self.env['amazon.instance'].search([('active', '=', True)]):
             try:
                 inst.action_import_settlement_reports()
             except Exception as exc:

@@ -150,6 +150,7 @@
                             <field name="last_fba_removal_sync_at"/>
                             <field name="last_fba_adjustment_sync_at"/>
                             <field name="last_fba_reimbursement_sync_at"/>
+                            <field name="last_settlement_sync_at"/>
                         </group>
                     </group>
 

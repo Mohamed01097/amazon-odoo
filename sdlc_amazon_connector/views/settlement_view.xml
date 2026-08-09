@@ -5,20 +5,53 @@
         <field name="view_mode">list,form</field>
     </record>
 
+    <record id="amazon_settlement_line_action" model="ir.actions.act_window">
+        <field name="name">Settlement Financial Lines</field>
+        <field name="res_model">amazon.settlement.report.line</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('active', '=', True)]</field>
+    </record>
+
+    <record id="amazon_settlement_search" model="ir.ui.view">
+        <field name="name">amazon.settlement.report.search</field>
+        <field name="model">amazon.settlement.report</field>
+        <field name="arch" type="xml">
+            <search string="Settlement Reports">
+                <field name="settlement_id"/>
+                <field name="instance_id"/>
+                <field name="currency_code"/>
+                <filter name="pending_review" string="Needs Review"
+                        domain="[('reconciliation_state', 'in', ('pending', 'mismatch', 'incomplete', 'error', 'manual_review'))]"/>
+                <filter name="matched" string="Matched" domain="[('reconciliation_state', '=', 'matched')]"/>
+                <group>
+                    <filter name="group_instance" string="Instance" context="{'group_by': 'instance_id'}"/>
+                    <filter name="group_currency" string="Currency" context="{'group_by': 'currency_code'}"/>
+                    <filter name="group_reconciliation" string="Reconciliation" context="{'group_by': 'reconciliation_state'}"/>
+                    <filter name="group_deposit_month" string="Deposit Month" context="{'group_by': 'deposit_date:month'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
     <record id="amazon_settlement_list" model="ir.ui.view">
         <field name="name">amazon.settlement.report.list</field>
         <field name="model">amazon.settlement.report</field>
         <field name="arch" type="xml">
-            <list string="Settlement Reports">
-                <field name="name"/>
+            <list string="Settlement Reports" create="0" delete="0"
+                  decoration-success="reconciliation_state == 'matched'"
+                  decoration-danger="reconciliation_state in ('mismatch', 'error')"
+                  decoration-warning="reconciliation_state in ('pending', 'incomplete', 'manual_review')">
                 <field name="settlement_id"/>
-                <field name="report_type" optional="hide"/>
-                <field name="start_date"/>
-                <field name="end_date"/>
-                <field name="created_time" optional="hide"/>
-                <field name="processing_status" string="Amazon Status"/>
-                <field name="total_amount"/>
-                <field name="instance_id"/>
+                <field name="settlement_start_date"/>
+                <field name="settlement_end_date"/>
+                <field name="deposit_date"/>
+                <field name="currency_code"/>
+                <field name="reported_net_amount" sum="Reported Net"/>
+                <field name="calculated_net_amount" sum="Calculated Net"/>
+                <field name="reconciliation_difference" sum="Difference"/>
+                <field name="reconciliation_state" widget="badge"/>
+                <field name="instance_id" optional="show"/>
+                <field name="parsing_error_count" optional="hide"/>
             </list>
         </field>
     </record>
@@ -27,59 +60,208 @@
         <field name="name">amazon.settlement.report.form</field>
         <field name="model">amazon.settlement.report</field>
         <field name="arch" type="xml">
-            <form string="Settlement Report">
+            <form string="Settlement Report" create="0" edit="0" delete="0">
                 <header>
-                    <button name="action_download_report" type="object" string="Download Report" class="btn-primary" invisible="state != 'draft'"/>
-                    <button name="action_process_report" type="object" string="Process" invisible="state != 'downloaded'"/>
-                    <button name="action_reconcile" type="object" string="Reconcile" invisible="state != 'processed'"/>
-                    <field name="state" widget="statusbar"/>
+                    <button name="action_reconcile" type="object" string="Recalculate"
+                            class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <field name="reconciliation_state" widget="statusbar"
+                           statusbar_visible="pending,matched,mismatch,incomplete,manual_review,error"/>
                 </header>
                 <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_view_orders" type="object" class="oe_stat_button" icon="fa-shopping-cart">
+                            <field name="order_count" widget="statinfo" string="Amazon Orders"/>
+                        </button>
+                        <button name="action_view_reimbursements" type="object" class="oe_stat_button" icon="fa-undo">
+                            <field name="reimbursement_count" widget="statinfo" string="Reimbursements"/>
+                        </button>
+                        <button name="action_view_sync_logs" type="object" class="oe_stat_button" icon="fa-list-alt"
+                                groups="sdlc_amazon_connector.group_amazon_manager">
+                            <field name="sync_log_count" widget="statinfo" string="Sync Logs"/>
+                        </button>
+                    </div>
+                    <widget name="web_ribbon" title="Incomplete" bg_color="text-bg-warning"
+                            invisible="reconciliation_state != 'incomplete'"/>
+                    <widget name="web_ribbon" title="Mismatch" bg_color="text-bg-danger"
+                            invisible="reconciliation_state != 'mismatch'"/>
+                    <div class="oe_title">
+                        <label for="settlement_id"/>
+                        <h1><field name="settlement_id"/></h1>
+                    </div>
                     <group>
-                        <group string="Settlement Identity">
-                            <field name="name"/>
+                        <group string="Settlement">
                             <field name="instance_id"/>
-                            <field name="settlement_id"/>
-                            <field name="report_document_id"/>
-                            <field name="report_type"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                            <field name="marketplace_id"/>
                             <field name="marketplace_ids"/>
+                            <field name="settlement_start_date"/>
+                            <field name="settlement_end_date"/>
+                            <field name="deposit_date"/>
                         </group>
-                        <group string="Amounts &amp; Dates">
-                            <field name="start_date"/>
-                            <field name="end_date"/>
-                            <field name="total_amount"/>
+                        <group string="Payout Reconciliation">
                             <field name="currency_id"/>
+                            <field name="reported_net_amount"/>
+                            <field name="calculated_net_amount"/>
+                            <field name="reconciliation_difference"/>
+                            <field name="currency_mismatch" invisible="not currency_mismatch"/>
+                            <field name="state"/>
                         </group>
                     </group>
-                    <group string="Amazon Processing Metadata">
-                        <group>
-                            <field name="processing_status" string="Amazon Status"/>
-                            <field name="created_time"/>
-                        </group>
-                        <group>
-                            <field name="processing_start_time"/>
-                            <field name="processing_end_time"/>
-                        </group>
+                    <group string="Financial Breakdown" col="4">
+                        <field name="gross_sales_amount"/>
+                        <field name="refund_amount"/>
+                        <field name="amazon_fee_amount"/>
+                        <field name="reimbursement_amount"/>
+                        <field name="promotion_amount"/>
+                        <field name="adjustment_amount"/>
+                        <field name="tax_amount"/>
+                        <field name="other_credit_amount"/>
+                        <field name="other_debit_amount"/>
                     </group>
                     <notebook>
-                        <page string="Lines" name="lines">
-                            <field name="line_ids">
-                                <list>
-                                    <field name="posted_date"/>
-                                    <field name="order_id_ref"/>
+                        <page string="Financial Lines" name="lines">
+                            <field name="line_ids" readonly="1" context="{'active_test': False}">
+                                <list create="0" delete="0"
+                                      decoration-muted="not active"
+                                      decoration-danger="amount &lt; 0">
+                                    <field name="active" optional="hide"/>
+                                    <field name="posted_date_time"/>
                                     <field name="transaction_type"/>
+                                    <field name="amazon_order_id"/>
+                                    <field name="sku"/>
                                     <field name="amount_type"/>
                                     <field name="amount_description"/>
-                                    <field name="amount"/>
-                                    <field name="sale_order_id"/>
-                                    <field name="invoice_id"/>
+                                    <field name="amount" sum="Net"/>
+                                    <field name="currency_code"/>
+                                    <field name="normalized_category" widget="badge"/>
+                                    <field name="order_link_state" optional="hide"/>
+                                    <field name="reimbursement_id" optional="hide"/>
                                 </list>
                             </field>
                         </page>
-                        <page string="Reimbursements" name="reimbursements">
-                            <field name="reimbursement_invoice_ids"/>
+                        <page string="Import &amp; Errors" name="import_errors">
+                            <group>
+                                <group string="Reports API">
+                                    <field name="report_type"/>
+                                    <field name="report_id"/>
+                                    <field name="report_document_id"/>
+                                    <field name="processing_status"/>
+                                    <field name="created_time"/>
+                                    <field name="processing_start_time"/>
+                                    <field name="processing_end_time"/>
+                                </group>
+                                <group string="Import">
+                                    <field name="imported_at"/>
+                                    <field name="last_synced_at"/>
+                                    <field name="line_count"/>
+                                    <field name="parsing_error_count"/>
+                                </group>
+                            </group>
+                            <field name="parsing_error_log" nolabel="1" placeholder="No parser errors."/>
+                            <field name="raw_header_source" nolabel="1"
+                                   groups="sdlc_amazon_connector.group_amazon_technical_admin"/>
                         </page>
                     </notebook>
+                </sheet>
+                <chatter/>
+            </form>
+        </field>
+    </record>
+
+    <record id="amazon_settlement_line_search" model="ir.ui.view">
+        <field name="name">amazon.settlement.report.line.search</field>
+        <field name="model">amazon.settlement.report.line</field>
+        <field name="arch" type="xml">
+            <search string="Settlement Financial Lines">
+                <field name="amazon_order_id"/>
+                <field name="sku"/>
+                <field name="amount_description"/>
+                <field name="adjustment_id"/>
+                <field name="reimbursement_id"/>
+                <group>
+                    <filter name="group_category" string="Category" context="{'group_by': 'normalized_category'}"/>
+                    <filter name="group_order" string="Amazon Order" context="{'group_by': 'amazon_order_id'}"/>
+                    <filter name="group_description" string="Amount Description" context="{'group_by': 'amount_description'}"/>
+                    <filter name="group_settlement" string="Settlement" context="{'group_by': 'report_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="amazon_settlement_line_list" model="ir.ui.view">
+        <field name="name">amazon.settlement.report.line.list</field>
+        <field name="model">amazon.settlement.report.line</field>
+        <field name="arch" type="xml">
+            <list string="Settlement Financial Lines" create="0" delete="0"
+                  decoration-danger="amount &lt; 0">
+                <field name="report_id"/>
+                <field name="posted_date_time"/>
+                <field name="transaction_type"/>
+                <field name="amazon_order_id"/>
+                <field name="sku"/>
+                <field name="amount_type"/>
+                <field name="amount_description"/>
+                <field name="amount" sum="Net"/>
+                <field name="currency_code"/>
+                <field name="normalized_category" widget="badge"/>
+                <field name="fee_category" optional="hide"/>
+                <field name="reimbursement_id" optional="hide"/>
+                <field name="order_link_state" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_settlement_line_form" model="ir.ui.view">
+        <field name="name">amazon.settlement.report.line.form</field>
+        <field name="model">amazon.settlement.report.line</field>
+        <field name="arch" type="xml">
+            <form string="Settlement Financial Line" create="0" edit="0" delete="0">
+                <sheet>
+                    <group>
+                        <group string="Amazon Transaction">
+                            <field name="report_id"/>
+                            <field name="transaction_type"/>
+                            <field name="posted_date"/>
+                            <field name="posted_date_time"/>
+                            <field name="amount_type"/>
+                            <field name="amount_description"/>
+                            <field name="amount"/>
+                            <field name="currency_id"/>
+                            <field name="normalized_category"/>
+                            <field name="fee_category"/>
+                        </group>
+                        <group string="Identifiers">
+                            <field name="amazon_order_id"/>
+                            <field name="merchant_order_id"/>
+                            <field name="adjustment_id"/>
+                            <field name="shipment_id"/>
+                            <field name="order_item_id"/>
+                            <field name="merchant_order_item_id"/>
+                            <field name="merchant_adjustment_item_id"/>
+                            <field name="sku"/>
+                            <field name="quantity_purchased"/>
+                            <field name="promotion_id"/>
+                            <field name="marketplace_name"/>
+                            <field name="fulfillment_id"/>
+                        </group>
+                    </group>
+                    <group string="Links">
+                        <field name="amazon_order_record_id"/>
+                        <field name="sale_order_id"/>
+                        <field name="order_link_state"/>
+                        <field name="amazon_product_id"/>
+                        <field name="odoo_product_id"/>
+                        <field name="return_line_id"/>
+                        <field name="reimbursement_id"/>
+                        <field name="matching_note"/>
+                    </group>
+                    <group string="Source">
+                        <field name="source_report_id"/>
+                        <field name="source_document_id"/>
+                        <field name="raw_report_row" nolabel="1"
+                               groups="sdlc_amazon_connector.group_amazon_technical_admin"/>
+                    </group>
                 </sheet>
             </form>
         </field>

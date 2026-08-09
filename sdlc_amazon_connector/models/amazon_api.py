@@ -70,7 +70,7 @@ REPORT_FBA_SHIPMENT = 'GET_AMAZON_FULFILLED_SHIPMENTS_DATA_GENERAL'
 REPORT_FBA_RETURNS = 'GET_FBA_FULFILLMENT_CUSTOMER_RETURNS_DATA'
 REPORT_FBA_INVENTORY_ADJUSTMENT = 'GET_LEDGER_DETAIL_VIEW_DATA'
 REPORT_FBA_REIMBURSEMENTS = 'GET_FBA_REIMBURSEMENTS_DATA'
-REPORT_SETTLEMENT = 'GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE'
+REPORT_SETTLEMENT = 'GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2'
 REPORT_SELLER_FEEDBACK = 'GET_SELLER_FEEDBACK_DATA'
 REPORT_REMOVAL_ORDER_DETAIL = 'GET_FBA_FULFILLMENT_REMOVAL_ORDER_DETAIL_DATA'
 REPORT_REMOVAL_SHIPMENT_DETAIL = 'GET_FBA_FULFILLMENT_REMOVAL_SHIPMENT_DETAIL_DATA'
@@ -671,7 +671,10 @@ class AmazonAPI():
         )
 
     def fetch_settlement_report(self, instance, access_token):
-        return self.fetch_report_rows(instance, access_token, REPORT_SETTLEMENT)
+        raise RuntimeError(
+            "Settlement reports are generated automatically by Amazon. "
+            "Locate GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2 with getReports instead."
+        )
 
     def fetch_seller_feedback_report(self, instance, access_token):
         return self.fetch_report_rows(instance, access_token, REPORT_SELLER_FEEDBACK)
@@ -699,17 +702,19 @@ class AmazonAPI():
         return self.fetch_report_rows(instance, access_token, REPORT_VCS_TAX)
 
     def get_settlement_reports_list(self, instance, access_token,
-                                    processing_statuses=None, max_pages=50):
+                                    processing_statuses='DONE', created_since=None,
+                                    created_until=None, max_pages=50):
         """Get every settlement report available to this seller.
 
         Paginates via ``nextToken`` until the response stops returning one,
         or ``max_pages`` is hit (defensive upper bound). SP-API allows up to
         ``pageSize=100`` per call; we use that to minimise round-trips.
 
-        We intentionally do NOT filter ``processingStatuses`` by default —
-        the previous ``DONE``-only filter silently hid IN_PROGRESS settlements
-        and made callers think Amazon had no data. Callers that want only
-        finished reports can opt in by passing ``processing_statuses='DONE'``.
+        Settlement reports cannot be requested or scheduled; Amazon generates
+        them automatically. Only completed documents are useful to the import
+        job, so DONE is the safe default. ``getReports`` retains report metadata
+        for at most 90 days and continuation requests must contain only the
+        returned nextToken.
 
         :param processing_statuses: optional comma-separated SP-API statuses
             (e.g. ``'DONE,IN_PROGRESS'``). If None, no filter is applied.
@@ -724,9 +729,14 @@ class AmazonAPI():
         }
         if processing_statuses:
             params["processingStatuses"] = processing_statuses
+        if created_since:
+            params["createdSince"] = created_since
+        if created_until:
+            params["createdUntil"] = created_until
 
         seen_ids = set()
         out = []
+        next_token = False
         for _ in range(max_pages):
             resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
             data = resp.json()
@@ -741,6 +751,11 @@ class AmazonAPI():
             # Per SP-API spec, follow-up calls send only nextToken; all other
             # filter params must be omitted on continuation pages.
             params = {'nextToken': next_token}
+        if next_token:
+            raise RuntimeError(
+                "Settlement report discovery exceeded the pagination safety limit; "
+                "the result is incomplete and was not imported."
+            )
         return out
 
     # ══════════════════════════════════════════════════

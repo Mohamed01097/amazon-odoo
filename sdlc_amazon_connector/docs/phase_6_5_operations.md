@@ -37,10 +37,11 @@ than silently redesigned in this observability phase:
   XML listing feed types `POST_PRODUCT_PRICING_DATA` and
   `POST_INVENTORY_AVAILABILITY_DATA`. There is no active call site for those
   constants; active listing export uses `JSON_LISTINGS_FEED`.
-- The disabled legacy settlement-report workflow references
-  `GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE`, which Amazon has deprecated.
-  Phase 7 must replace it with Finances API v2024-06-19 `listTransactions`
-  before enabling financial synchronization.
+- The settlement workflow now discovers Amazon-generated
+  `GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2` documents through Reports API
+  `getReports`. The settlement report remains the payout source of truth;
+  Finances API v2024-06-19 `listTransactions` is reserved for targeted future
+  diagnostics and does not create a second financial ledger.
 
 Amazon documents dynamic as well as standard usage plans. The connector must
 therefore observe `x-amzn-RateLimit-Limit` when it is present and must not

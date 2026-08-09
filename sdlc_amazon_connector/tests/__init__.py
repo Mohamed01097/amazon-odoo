@@ -10,3 +10,4 @@ from . import test_phase7_fba_events
 from . import test_fba_customer_returns
 from . import test_fba_removal_disposal
 from . import test_fba_reimbursements
+from . import test_settlement_payout

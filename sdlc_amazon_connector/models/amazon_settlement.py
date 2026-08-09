@@ -1,164 +1,907 @@
+import csv
+import hashlib
+import io
+import json
 import logging
-from odoo import models, fields, api
-from odoo.exceptions import UserError
+import re
+from collections import defaultdict
+from datetime import timezone
+from decimal import Decimal, InvalidOperation
+
+from dateutil import parser as date_parser
+
+from odoo import _, api, fields, models
+from odoo.exceptions import UserError, ValidationError
+
 
 _logger = logging.getLogger(__name__)
+
+
+SETTLEMENT_HEADER_FIELDS = (
+    'settlement-id', 'settlement-start-date', 'settlement-end-date',
+    'deposit-date', 'total-amount', 'currency',
+)
+SETTLEMENT_LINE_DIMENSIONS = (
+    'transaction-type', 'order-id', 'merchant-order-id', 'adjustment-id',
+    'shipment-id', 'marketplace-name', 'amount-type', 'amount-description',
+    'fulfillment-id', 'posted-date', 'posted-date-time', 'order-item-code',
+    'merchant-order-item-id', 'merchant-adjustment-item-id', 'sku',
+    'promotion-id',
+)
 
 
 class AmazonSettlementReport(models.Model):
     _name = 'amazon.settlement.report'
     _description = 'Amazon Settlement Report'
-    _order = 'end_date desc'
+    _inherit = ['mail.thread', 'mail.activity.mixin']
+    _order = 'settlement_end_date desc, id desc'
+    _check_company_auto = True
 
-    name = fields.Char('Name', required=True, default='New')
-    instance_id = fields.Many2one('amazon.instance', string='Instance', required=True, ondelete='cascade')
-    settlement_id = fields.Char('Settlement ID', index=True)
-    report_document_id = fields.Char('Report Document ID')
-    start_date = fields.Date('Start Date')
-    end_date = fields.Date('End Date')
-    # Computed from line_ids.amount so it populates after Download (no need to
-    # click Process just to see the total). `store=True` keeps it queryable
-    # and sortable in list views.
-    total_amount = fields.Float('Total Amount', compute='_compute_total_amount', store=True)
-    currency_id = fields.Many2one('res.currency', string='Currency')
+    name = fields.Char(required=True, default='New', readonly=True, copy=False)
+    instance_id = fields.Many2one(
+        'amazon.instance', required=True, ondelete='cascade', index=True,
+        check_company=True, readonly=True,
+    )
+    company_id = fields.Many2one(
+        related='instance_id.company_id', store=True, readonly=True, index=True,
+    )
+    marketplace_id = fields.Char(
+        related='instance_id.marketplace_id', store=True, readonly=True, index=True,
+    )
+    marketplace_ids = fields.Char(
+        string='Amazon Marketplace IDs', readonly=True,
+        help='Marketplace IDs returned in the Reports API metadata.',
+    )
+    settlement_id = fields.Char('Settlement ID', index=True, readonly=True, tracking=True)
+    settlement_start_date = fields.Datetime(readonly=True, index=True)
+    settlement_end_date = fields.Datetime(readonly=True, index=True)
+    deposit_date = fields.Datetime(readonly=True, index=True)
+    # Legacy date fields are retained for existing integrations and views.
+    start_date = fields.Date('Start Date', readonly=True)
+    end_date = fields.Date('End Date', readonly=True)
+
+    currency_id = fields.Many2one('res.currency', readonly=True, ondelete='restrict')
+    currency_code = fields.Char(readonly=True, index=True)
+    reported_net_amount = fields.Monetary(
+        currency_field='currency_id', readonly=True,
+        help='Exact total-amount reported by Amazon. It is never derived locally.',
+    )
+    total_amount = fields.Monetary(
+        related='reported_net_amount', currency_field='currency_id',
+        store=True, readonly=True, string='Amazon Reported Payout',
+    )
+    calculated_net_amount = fields.Monetary(
+        compute='_compute_financial_totals', store=True, currency_field='currency_id',
+    )
+    reconciliation_difference = fields.Monetary(
+        compute='_compute_reconciliation_difference', store=True,
+        currency_field='currency_id',
+    )
+
+    gross_sales_amount = fields.Monetary(
+        compute='_compute_financial_totals', store=True, currency_field='currency_id',
+    )
+    refund_amount = fields.Monetary(
+        compute='_compute_financial_totals', store=True, currency_field='currency_id',
+    )
+    amazon_fee_amount = fields.Monetary(
+        compute='_compute_financial_totals', store=True, currency_field='currency_id',
+    )
+    reimbursement_amount = fields.Monetary(
+        compute='_compute_financial_totals', store=True, currency_field='currency_id',
+    )
+    promotion_amount = fields.Monetary(
+        compute='_compute_financial_totals', store=True, currency_field='currency_id',
+    )
+    adjustment_amount = fields.Monetary(
+        compute='_compute_financial_totals', store=True, currency_field='currency_id',
+    )
+    tax_amount = fields.Monetary(
+        compute='_compute_financial_totals', store=True, currency_field='currency_id',
+    )
+    other_credit_amount = fields.Monetary(
+        compute='_compute_financial_totals', store=True, currency_field='currency_id',
+    )
+    other_debit_amount = fields.Monetary(
+        compute='_compute_financial_totals', store=True, currency_field='currency_id',
+    )
+
     state = fields.Selection([
-        ('draft', 'Draft'),
-        ('downloaded', 'Downloaded'),
-        ('processed', 'Processed'),
-        ('reconciled', 'Reconciled'),
-    ], string='Status', default='draft')
-    line_ids = fields.One2many('amazon.settlement.report.line', 'report_id', string='Lines')
-    line_count = fields.Integer(compute='_compute_line_count')
+        ('draft', 'Draft'), ('downloaded', 'Downloaded'),
+        ('processed', 'Processed'), ('reconciled', 'Reconciled'),
+        ('imported', 'Imported'), ('incomplete', 'Incomplete'), ('error', 'Error'),
+    ], default='draft', required=True, readonly=True, index=True, tracking=True)
+    reconciliation_state = fields.Selection([
+        ('pending', 'Pending'), ('matched', 'Matched'), ('mismatch', 'Mismatch'),
+        ('incomplete', 'Incomplete'), ('error', 'Error'),
+        ('manual_review', 'Manual Review'),
+    ], default='pending', required=True, readonly=True, index=True, tracking=True)
+    currency_mismatch = fields.Boolean(readonly=True, index=True)
+    parsing_error_count = fields.Integer(readonly=True)
+    parsing_error_log = fields.Text(readonly=True)
 
-    # Amazon-side report metadata. Captured verbatim from getReports response
-    # so nothing Amazon returns is silently dropped — surfaced in the UI for
-    # client visibility/audit.
-    report_type = fields.Char('Report Type', readonly=True,
-                              help='Amazon reportType, e.g. GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE.')
-    processing_status = fields.Char('Amazon Status', readonly=True,
-                                    help="Amazon's processingStatus: IN_QUEUE / IN_PROGRESS / DONE / CANCELLED / FATAL.")
-    created_time = fields.Datetime('Created Time', readonly=True,
-                                   help='Amazon createdTime — when Amazon began generating the report.')
-    processing_start_time = fields.Datetime('Processing Start', readonly=True)
-    processing_end_time = fields.Datetime('Processing End', readonly=True)
-    marketplace_ids = fields.Char('Marketplace IDs', readonly=True,
-                                  help='Comma-separated Amazon marketplace IDs the report covers. '
-                                       'For most sellers this is the same value on every row.')
+    report_id = fields.Char('Amazon Report ID', readonly=True, copy=False, index=True)
+    report_document_id = fields.Char(readonly=True, copy=False, index=True)
+    report_type = fields.Char(readonly=True)
+    processing_status = fields.Char('Amazon Status', readonly=True)
+    created_time = fields.Datetime(readonly=True)
+    processing_start_time = fields.Datetime(readonly=True)
+    processing_end_time = fields.Datetime(readonly=True)
+    imported_at = fields.Datetime(readonly=True)
+    last_synced_at = fields.Datetime(readonly=True)
+    raw_header_source = fields.Text(
+        readonly=True, groups='sdlc_amazon_connector.group_amazon_technical_admin',
+    )
 
-    reimbursement_invoice_ids = fields.Many2many('account.move', string='Reimbursement Invoices')
+    line_ids = fields.One2many(
+        'amazon.settlement.report.line', 'report_id', string='Financial Lines',
+        readonly=True,
+    )
+    line_count = fields.Integer(compute='_compute_link_counts')
+    order_count = fields.Integer(compute='_compute_link_counts')
+    reimbursement_count = fields.Integer(compute='_compute_link_counts')
+    sync_log_count = fields.Integer(compute='_compute_link_counts')
 
-    _sql_constraints = [
-        ('unique_settlement', 'unique(settlement_id, instance_id)', 'Settlement ID must be unique per instance.'),
-    ]
+    # Legacy accounting links are retained read-only for upgrade compatibility.
+    # This integration never creates or updates accounting documents.
+    reimbursement_invoice_ids = fields.Many2many(
+        'account.move', string='Legacy Reimbursement Invoices', readonly=True,
+    )
 
-    def _compute_line_count(self):
-        for rec in self:
-            rec.line_count = len(rec.line_ids)
-
-    @api.depends('line_ids.amount')
-    def _compute_total_amount(self):
-        for rec in self:
-            rec.total_amount = sum(rec.line_ids.mapped('amount'))
+    _settlement_unique = models.Constraint(
+        'UNIQUE(instance_id, settlement_id)',
+        'Settlement ID must be unique per Amazon instance.',
+    )
 
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
             if vals.get('name', 'New') == 'New':
-                vals['name'] = self.env['ir.sequence'].next_by_code('amazon.settlement.report') or 'New'
+                vals['name'] = self.env['ir.sequence'].next_by_code(
+                    'amazon.settlement.report'
+                ) or 'New'
         return super().create(vals_list)
 
-    def action_download_report(self):
-        """Download settlement report from Amazon."""
+    @api.depends('line_ids.amount', 'line_ids.normalized_category', 'line_ids.active')
+    def _compute_financial_totals(self):
+        for settlement in self:
+            lines = settlement.line_ids.filtered('active')
+            settlement.calculated_net_amount = sum(lines.mapped('amount'))
+            settlement.gross_sales_amount = sum(
+                lines.filtered(lambda line: line.normalized_category == 'sale').mapped('amount')
+            )
+            settlement.refund_amount = sum(
+                lines.filtered(lambda line: line.normalized_category == 'refund').mapped('amount')
+            )
+            settlement.amazon_fee_amount = sum(
+                lines.filtered(lambda line: line.normalized_category in ('amazon_fee', 'fba_fee')).mapped('amount')
+            )
+            settlement.reimbursement_amount = sum(
+                lines.filtered(lambda line: line.normalized_category == 'reimbursement').mapped('amount')
+            )
+            settlement.promotion_amount = sum(
+                lines.filtered(lambda line: line.normalized_category == 'promotion').mapped('amount')
+            )
+            settlement.adjustment_amount = sum(
+                lines.filtered(lambda line: line.normalized_category == 'adjustment').mapped('amount')
+            )
+            settlement.tax_amount = sum(
+                lines.filtered(lambda line: line.normalized_category == 'tax').mapped('amount')
+            )
+            settlement.other_credit_amount = sum(
+                lines.filtered(lambda line: line.normalized_category == 'other_credit').mapped('amount')
+            )
+            settlement.other_debit_amount = sum(
+                lines.filtered(lambda line: line.normalized_category == 'other_debit').mapped('amount')
+            )
+
+    @api.depends('reported_net_amount', 'calculated_net_amount')
+    def _compute_reconciliation_difference(self):
+        for settlement in self:
+            settlement.reconciliation_difference = (
+                settlement.reported_net_amount - settlement.calculated_net_amount
+            )
+
+    def _compute_link_counts(self):
+        sync_logs = self.env['amazon.sync.log'].sudo()
+        for settlement in self:
+            lines = settlement.line_ids.filtered('active')
+            settlement.line_count = len(lines)
+            settlement.order_count = len(lines.mapped('amazon_order_record_id'))
+            settlement.reimbursement_count = len(lines.mapped('reimbursement_id'))
+            settlement.sync_log_count = sync_logs.search_count([
+                ('source_model', '=', settlement._name),
+                ('source_id', '=', settlement.id),
+            ])
+
+    def _open_records(self, title, model_name, records):
         self.ensure_one()
-        self.instance_id._download_settlement_report(self)
+        records = records.exists()
+        action = {
+            'type': 'ir.actions.act_window', 'name': title,
+            'res_model': model_name, 'view_mode': 'list,form',
+            'domain': [('id', 'in', records.ids)],
+        }
+        if len(records) == 1:
+            action.update({'view_mode': 'form', 'res_id': records.id})
+        return action
+
+    def action_view_orders(self):
+        return self._open_records(
+            _('Amazon Orders'), 'amazon.sale.order',
+            self.line_ids.mapped('amazon_order_record_id'),
+        )
+
+    def action_view_reimbursements(self):
+        return self._open_records(
+            _('FBA Reimbursements'), 'amazon.fba.reimbursement',
+            self.line_ids.mapped('reimbursement_id'),
+        )
+
+    def action_view_sync_logs(self):
+        records = self.env['amazon.sync.log'].search([
+            ('source_model', '=', self._name), ('source_id', '=', self.id),
+        ])
+        return self._open_records(_('Sync Logs'), records._name, records)
+
+    def action_download_report(self):
+        """Compatibility button: enqueue discovery/download; never block the UI."""
+        self.ensure_one()
+        self.env['amazon.phase7.job'].enqueue(self.instance_id, 'settlements')
+        return self.instance_id._notify(
+            _('Settlement Reports'), _('Settlement import was queued.'),
+        )
 
     def action_process_report(self):
-        """Process downloaded settlement data — link lines to Odoo orders/invoices."""
-        self.ensure_one()
-        if self.state not in ('downloaded',):
-            raise UserError("Report must be in 'Downloaded' state to process.")
-
-        # total_amount is now a stored compute on line_ids.amount; no manual sum needed.
-        for line in self.line_ids:
-            # Try to match with existing Odoo sale orders.
-            if line.order_id_ref and not line.sale_order_id:
-                amazon_order = self.env['amazon.sale.order'].search([
-                    ('amazon_order_ref', '=', line.order_id_ref),
-                    ('instance_id', '=', self.instance_id.id),
-                ], limit=1)
-                if amazon_order and amazon_order.sale_order_id:
-                    line.sale_order_id = amazon_order.sale_order_id.id
-                if amazon_order and amazon_order.invoice_id:
-                    line.invoice_id = amazon_order.invoice_id.id
-
-        self.state = 'processed'
+        """Relink and recalculate existing imported financial data only."""
+        for settlement in self:
+            settlement.line_ids._resolve_links()
+            settlement._recompute_reconciliation()
+        return True
 
     def action_reconcile(self):
-        """Reconcile settlement lines against invoices and orders."""
-        self.ensure_one()
-        if self.state != 'processed':
-            raise UserError("Process the report before reconciliation.")
-
-        reconciled = 0
-        reimbursement_lines = []
-        for line in self.line_ids:
-            if line.invoice_id and line.invoice_id.payment_state != 'paid':
-                reconciled += 1
-            if line.transaction_type == 'other-transaction' and 'Reimbursement' in (line.amount_type or ''):
-                reimbursement_lines.append(line)
-
-        # Generate reimbursement invoices if any
-        if reimbursement_lines:
-            self._create_reimbursement_invoices(reimbursement_lines)
-
-        self.state = 'reconciled'
+        """Recalculate payout reconciliation without accounting side effects."""
+        self.action_process_report()
         return {
-            "type": "ir.actions.client",
-            "tag": "display_notification",
-            "params": {
-                "title": "Settlement Reconciled",
-                "message": "%d line(s) reconciled." % reconciled,
-                "type": "success",
-                "sticky": False,
+            'type': 'ir.actions.client', 'tag': 'display_notification',
+            'params': {
+                'title': _('Settlement Reconciliation'),
+                'message': _('The Amazon-reported payout was compared with signed financial lines.'),
+                'type': 'success', 'sticky': False,
             },
         }
 
-    def _create_reimbursement_invoices(self, lines):
-        """Create vendor bills for Amazon reimbursements."""
-        amazon_partner = self.env['res.partner'].search([('name', '=', 'Amazon')], limit=1)
-        if not amazon_partner:
-            amazon_partner = self.env['res.partner'].create({'name': 'Amazon', 'supplier_rank': 1})
-
-        invoice_lines = []
-        for line in lines:
-            invoice_lines.append((0, 0, {
-                'name': '%s - %s' % (line.amount_type or '', line.amount_description or ''),
-                'price_unit': abs(line.amount),
-                'quantity': 1,
-            }))
-
-        if invoice_lines:
-            invoice = self.env['account.move'].create({
-                'move_type': 'in_refund',
-                'partner_id': amazon_partner.id,
-                'invoice_line_ids': invoice_lines,
-                'ref': 'Amazon Reimbursement - %s' % self.settlement_id,
+    def _recompute_reconciliation(self):
+        for settlement in self:
+            # Recompute now so a just-imported report is reconciled in the
+            # same transaction, without depending on a later cache flush.
+            settlement._compute_financial_totals()
+            settlement._compute_reconciliation_difference()
+            if (
+                settlement.parsing_error_count or settlement.currency_mismatch
+                or not settlement.currency_id or not settlement.line_ids.filtered('active')
+            ):
+                settlement.write({
+                    'state': 'incomplete', 'reconciliation_state': 'incomplete',
+                })
+                continue
+            matched = settlement.currency_id.compare_amounts(
+                settlement.reported_net_amount,
+                settlement.calculated_net_amount,
+            ) == 0
+            settlement.write({
+                'state': 'reconciled' if matched else 'processed',
+                'reconciliation_state': 'matched' if matched else 'mismatch',
             })
-            self.reimbursement_invoice_ids = [(4, invoice.id)]
+        return True
+
+    @api.model
+    def _normalize_row(self, row):
+        normalized = {
+            str(key or '').strip().lstrip('\ufeff').lower().replace('_', '-').replace(' ', '-'): (
+                value.strip() if isinstance(value, str) else value
+            )
+            for key, value in (row or {}).items()
+            if key and key != '_extra_fields'
+        }
+        if row.get('_extra_fields'):
+            normalized['_extra_fields'] = row['_extra_fields']
+        return normalized
+
+    @api.model
+    def _flat_file_rows(self, raw_text):
+        text = (raw_text or '').lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n')
+        if not text.strip():
+            return []
+        lines = text.split('\n')
+        header_index = False
+        required = {'settlement-id', 'amount-type', 'amount-description', 'amount'}
+        for index, line in enumerate(lines):
+            headers = {
+                cell.strip().lstrip('\ufeff').lower().replace('_', '-').replace(' ', '-')
+                for cell in line.split('\t')
+            }
+            if required.issubset(headers):
+                header_index = index
+                break
+        if header_index is False:
+            raise ValidationError(_(
+                'Unsupported settlement schema: the V2 settlement headers were not found.'
+            ))
+        reader = csv.DictReader(
+            io.StringIO('\n'.join(lines[header_index:])), delimiter='\t',
+            quoting=csv.QUOTE_NONE, restkey='_extra_fields', restval='',
+        )
+        return [
+            self._normalize_row(row)
+            for row in reader
+            if any(value not in (None, '') for value in row.values())
+        ]
+
+    @api.model
+    def _number(self, value, field_label='amount', optional=False):
+        if value in (None, ''):
+            if optional:
+                return 0.0
+            raise ValidationError(_('Amazon omitted required %s.', field_label))
+        if isinstance(value, (int, float, Decimal)):
+            return float(value)
+        text = str(value).strip().replace('\u00a0', '').replace(' ', '').replace("'", '')
+        negative = text.startswith('(') and text.endswith(')')
+        if negative:
+            text = text[1:-1]
+        if not re.fullmatch(r'[+-]?[0-9.,]+', text or ''):
+            raise ValidationError(_('Amazon returned invalid %s: %s', field_label, value))
+        comma = text.rfind(',')
+        dot = text.rfind('.')
+        if comma >= 0 and dot >= 0:
+            decimal_separator = ',' if comma > dot else '.'
+            thousands_separator = '.' if decimal_separator == ',' else ','
+            text = text.replace(thousands_separator, '')
+            text = text.replace(decimal_separator, '.')
+        elif comma >= 0:
+            parts = text.split(',')
+            if len(parts[-1]) in (1, 2):
+                text = ''.join(parts[:-1]) + '.' + parts[-1]
+            else:
+                text = ''.join(parts)
+        elif dot >= 0:
+            parts = text.split('.')
+            if len(parts[-1]) in (1, 2):
+                text = ''.join(parts[:-1]) + '.' + parts[-1]
+            else:
+                text = ''.join(parts)
+        try:
+            result = Decimal(text)
+        except InvalidOperation as exc:
+            raise ValidationError(_('Amazon returned invalid %s: %s', field_label, value)) from exc
+        return float(-result if negative else result)
+
+    @api.model
+    def _datetime(self, value):
+        if not value:
+            return False
+        try:
+            result = date_parser.parse(str(value))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValidationError(_('Amazon returned an invalid settlement date: %s', value)) from exc
+        if result.tzinfo:
+            result = result.astimezone(timezone.utc).replace(tzinfo=None)
+        return result.replace(microsecond=0)
+
+    @api.model
+    def _required_datetime(self, value):
+        if value in (None, ''):
+            raise ValidationError(_('Amazon omitted a required settlement date.'))
+        return self._datetime(value)
+
+    @api.model
+    def _currency(self, code):
+        return self.env['res.currency'].with_context(active_test=False).search([
+            ('name', '=', str(code or '').strip()),
+        ], limit=1)
+
+    @api.model
+    def _metadata_datetime(self, value):
+        return self._datetime(value) if value else False
+
+    @api.model
+    def import_flat_file(self, instance, raw_text, report_metadata):
+        """Upsert V2 settlements and their signed financial lines.
+
+        The report body, not the Reports API reportId, owns settlement-id and
+        total-amount. Valid rows are retained when another row is malformed,
+        while reconciliation is forced to INCOMPLETE.
+        """
+        rows = self._flat_file_rows(raw_text)
+        if not rows:
+            return {'settlements': self.browse(), 'processed': 0, 'failed': 0}
+
+        carry = {}
+        grouped = defaultdict(list)
+        unassigned_errors = []
+        for row_number, row in enumerate(rows, start=2):
+            for field_name in SETTLEMENT_HEADER_FIELDS:
+                if row.get(field_name) not in (None, ''):
+                    carry[field_name] = row[field_name]
+            merged = dict(row)
+            for field_name in SETTLEMENT_HEADER_FIELDS:
+                if merged.get(field_name) in (None, '') and carry.get(field_name) not in (None, ''):
+                    merged[field_name] = carry[field_name]
+            settlement_id = str(merged.get('settlement-id') or '').strip()
+            if not settlement_id:
+                unassigned_errors.append(_('Row %s has no settlement-id.', row_number))
+                continue
+            grouped[settlement_id].append((row_number, merged))
+
+        if not grouped:
+            raise ValidationError(_(
+                'The settlement document contains data rows but no settlement-id.'
+            ))
+
+        imported = self.browse()
+        total_processed = total_failed = total_issue_count = 0
+        sync_token = '%s:%s' % (
+            report_metadata.get('reportId') or 'report', fields.Datetime.now(),
+        )
+        for settlement_id, settlement_rows in grouped.items():
+            first_row = settlement_rows[0][1]
+            errors = list(unassigned_errors)
+            currency_code = str(first_row.get('currency') or '').strip()
+            currency = self._currency(currency_code)
+            if not currency_code or not currency:
+                errors.append(_('Unknown or missing settlement currency: %s', currency_code or _('empty')))
+
+            def safely(parse_method, value, label, default):
+                try:
+                    return parse_method(value)
+                except ValidationError as exc:
+                    errors.append(_('%s: %s', label, str(exc)))
+                    return default
+
+            reported_total = safely(
+                lambda value: self._number(value, 'total-amount'),
+                first_row.get('total-amount'), 'total-amount', 0.0,
+            )
+            start_datetime = safely(
+                self._required_datetime, first_row.get('settlement-start-date'),
+                'settlement-start-date', False,
+            )
+            end_datetime = safely(
+                self._required_datetime, first_row.get('settlement-end-date'),
+                'settlement-end-date', False,
+            )
+            deposit_datetime = safely(
+                self._required_datetime, first_row.get('deposit-date'), 'deposit-date', False,
+            )
+
+            settlement = self.search([
+                ('instance_id', '=', instance.id), ('settlement_id', '=', settlement_id),
+            ], limit=1)
+            if not settlement and report_metadata.get('reportId'):
+                legacy = self.search([
+                    ('instance_id', '=', instance.id),
+                    ('settlement_id', '=', report_metadata['reportId']),
+                ], limit=2)
+                settlement = legacy if len(legacy) == 1 else self.browse()
+
+            marketplace_ids = report_metadata.get('marketplaceIds') or []
+            marketplace_value = (
+                ','.join(marketplace_ids)
+                if isinstance(marketplace_ids, list) else str(marketplace_ids or '')
+            )
+            now = fields.Datetime.now()
+            header_values = {
+                'instance_id': instance.id,
+                'settlement_id': settlement_id,
+                'settlement_start_date': start_datetime,
+                'settlement_end_date': end_datetime,
+                'deposit_date': deposit_datetime,
+                'start_date': start_datetime.date() if start_datetime else False,
+                'end_date': end_datetime.date() if end_datetime else False,
+                'currency_id': currency.id or False,
+                'currency_code': currency_code,
+                'reported_net_amount': reported_total,
+                'report_id': report_metadata.get('reportId') or '',
+                'report_document_id': report_metadata.get('reportDocumentId') or '',
+                'report_type': report_metadata.get('reportType') or '',
+                'processing_status': report_metadata.get('processingStatus') or '',
+                'created_time': self._metadata_datetime(report_metadata.get('createdTime')),
+                'processing_start_time': self._metadata_datetime(
+                    report_metadata.get('processingStartTime')
+                ),
+                'processing_end_time': self._metadata_datetime(
+                    report_metadata.get('processingEndTime')
+                ),
+                'marketplace_ids': marketplace_value,
+                'last_synced_at': now,
+                'raw_header_source': json.dumps(first_row, default=str, sort_keys=True)[:20000],
+                'state': 'imported', 'reconciliation_state': 'pending',
+            }
+            if settlement:
+                settlement.write(header_values)
+            else:
+                settlement = self.create({
+                    **header_values, 'imported_at': now,
+                })
+
+            dimension_counts = defaultdict(int)
+            seen_keys = set()
+            for row_number, row in settlement_rows:
+                try:
+                    with self.env.cr.savepoint():
+                        if row.get('_extra_fields'):
+                            errors.append(_(
+                                'Row %s has unexpected trailing columns.', row_number,
+                            ))
+                        amount = self._number(row.get('amount'), 'amount')
+                        row_currency = str(row.get('currency') or currency_code).strip()
+                        if row_currency != currency_code:
+                            errors.append(_(
+                                'Row currency %s differs from settlement currency %s.',
+                                row_currency or _('empty'), currency_code or _('empty'),
+                            ))
+                        row_currency_record = self._currency(row_currency)
+                        if not row_currency_record:
+                            errors.append(_('Unknown row currency: %s', row_currency or _('empty')))
+                        if row.get('total-amount') not in (None, ''):
+                            row_total = self._number(row.get('total-amount'), 'total-amount')
+                            if currency and currency.compare_amounts(row_total, reported_total) != 0:
+                                errors.append(_(
+                                    'Row %s reports a different settlement total: %s.',
+                                    row_number, row.get('total-amount'),
+                                ))
+                        dimensions = [str(row.get(name) or '').strip() for name in SETTLEMENT_LINE_DIMENSIONS]
+                        dimension_digest = hashlib.sha256(
+                            '|'.join(dimensions).encode()
+                        ).hexdigest()
+                        occurrence = dimension_counts[dimension_digest]
+                        dimension_counts[dimension_digest] += 1
+                        line_key = hashlib.sha256(
+                            ('%s|%s|%s|%s' % (
+                                instance.id, settlement_id, dimension_digest, occurrence,
+                            )).encode()
+                        ).hexdigest()
+                        settlement._upsert_line(
+                            row, line_key, amount, row_currency_record, row_currency,
+                            report_metadata, sync_token,
+                        )
+                        seen_keys.add(line_key)
+                        total_processed += 1
+                except Exception as exc:
+                    total_failed += 1
+                    errors.append(_('Row %s: %s', row_number, str(exc)[:1000]))
+                    _logger.exception(
+                        'Settlement row %s failed for %s', row_number, settlement_id,
+                    )
+
+            if not seen_keys:
+                errors.append(_('No valid financial lines were imported.'))
+            if not errors:
+                settlement.line_ids.filtered(
+                    lambda line: line.line_key not in seen_keys
+                ).write({'active': False})
+            settlement.write({
+                'parsing_error_count': len(errors),
+                'parsing_error_log': '\n'.join(errors)[-10000:] or False,
+                'currency_mismatch': any('currency' in str(error).lower() for error in errors),
+            })
+            settlement._recompute_reconciliation()
+            imported |= settlement
+            total_issue_count += len(errors)
+
+        return {
+            'settlements': imported,
+            'processed': total_processed,
+            'failed': total_failed + total_issue_count,
+        }
+
+    def _upsert_line(self, row, line_key, amount, currency, currency_code,
+                     report_metadata, sync_token):
+        self.ensure_one()
+        # Include inactive stale lines so an Amazon refresh can reactivate the
+        # same deterministic identity instead of violating uniqueness.
+        line_model = self.env['amazon.settlement.report.line'].with_context(
+            active_test=False,
+        )
+        line = line_model.search([
+            ('report_id', '=', self.id), ('line_key', '=', line_key),
+        ], limit=1)
+        if not line:
+            legacy = line_model.search([
+                ('report_id', '=', self.id),
+                ('order_id_ref', '=', row.get('order-id') or ''),
+                ('transaction_type', '=', row.get('transaction-type') or ''),
+                ('amount_type', '=', row.get('amount-type') or ''),
+                ('amount_description', '=', row.get('amount-description') or ''),
+                ('order_item_id', '=', row.get('order-item-code') or ''),
+            ], limit=2)
+            line = legacy if len(legacy) == 1 else line_model.browse()
+        quantity = self._number(
+            row.get('quantity-purchased'), 'quantity-purchased', optional=True,
+        )
+        category, fee_category = line_model._classify(
+            row.get('transaction-type'), row.get('amount-type'),
+            row.get('amount-description'), row.get('promotion-id'), amount,
+        )
+        posted_date = self._datetime(row.get('posted-date'))
+        posted_datetime = self._datetime(
+            row.get('posted-date-time') or row.get('posted-date')
+        )
+        vals = {
+            'report_id': self.id, 'line_key': line_key, 'active': True,
+            'amazon_order_id': row.get('order-id') or '',
+            'order_id_ref': row.get('order-id') or '',
+            'merchant_order_id': row.get('merchant-order-id') or '',
+            'adjustment_id': row.get('adjustment-id') or '',
+            'shipment_id': row.get('shipment-id') or '',
+            'marketplace_name': row.get('marketplace-name') or '',
+            'transaction_type': row.get('transaction-type') or '',
+            'amazon_transaction_type_raw': row.get('transaction-type') or '',
+            'amount_type': row.get('amount-type') or '',
+            'amazon_amount_type_raw': row.get('amount-type') or '',
+            'amount_description': row.get('amount-description') or '',
+            'amazon_amount_description_raw': row.get('amount-description') or '',
+            'amount': amount,
+            'currency_id': currency.id or False,
+            'currency_code': currency_code,
+            'fulfillment_id': row.get('fulfillment-id') or '',
+            'posted_date': posted_date,
+            'posted_date_time': posted_datetime,
+            'order_item_id': row.get('order-item-code') or '',
+            'merchant_order_item_id': row.get('merchant-order-item-id') or '',
+            'merchant_adjustment_item_id': row.get('merchant-adjustment-item-id') or '',
+            'sku': row.get('sku') or '',
+            'quantity_purchased': quantity,
+            'promotion_id': row.get('promotion-id') or '',
+            'normalized_category': category,
+            'fee_category': fee_category,
+            'source_report_id': report_metadata.get('reportId') or '',
+            'source_document_id': report_metadata.get('reportDocumentId') or '',
+            'last_seen_sync_token': sync_token,
+            'raw_report_row': json.dumps(row, default=str, sort_keys=True)[:20000],
+        }
+        vals.update(line_model._order_and_product_values(self.instance_id, row))
+        if line:
+            line.write(vals)
+        else:
+            line = line_model.create(vals)
+        line._resolve_links()
+        return line
 
 
 class AmazonSettlementReportLine(models.Model):
     _name = 'amazon.settlement.report.line'
-    _description = 'Amazon Settlement Report Line'
+    _description = 'Amazon Settlement Financial Line'
+    _order = 'posted_date_time, id'
+    _check_company_auto = True
 
-    report_id = fields.Many2one('amazon.settlement.report', string='Report', required=True, ondelete='cascade')
-    order_id_ref = fields.Char('Amazon Order ID')
-    order_item_id = fields.Char('Order Item ID')
-    transaction_type = fields.Char('Transaction Type')
-    amount_type = fields.Char('Amount Type')
-    amount_description = fields.Char('Description')
-    amount = fields.Float('Amount')
-    fulfillment_id = fields.Char('Fulfillment ID')
-    posted_date = fields.Datetime('Posted Date')
-    sale_order_id = fields.Many2one('sale.order', string='Odoo Sale Order')
-    invoice_id = fields.Many2one('account.move', string='Invoice')
+    report_id = fields.Many2one(
+        'amazon.settlement.report', required=True, ondelete='cascade',
+        index=True, check_company=True,
+    )
+    instance_id = fields.Many2one(
+        related='report_id.instance_id', store=True, readonly=True, index=True,
+    )
+    company_id = fields.Many2one(
+        related='report_id.company_id', store=True, readonly=True, index=True,
+    )
+    line_key = fields.Char(readonly=True, copy=False, index=True)
+    active = fields.Boolean(default=True, index=True)
+
+    amazon_order_id = fields.Char(index=True)
+    order_id_ref = fields.Char('Amazon Order ID', index=True)
+    merchant_order_id = fields.Char(index=True)
+    adjustment_id = fields.Char(index=True)
+    shipment_id = fields.Char(index=True)
+    marketplace_name = fields.Char(index=True)
+    transaction_type = fields.Char(index=True)
+    amazon_transaction_type_raw = fields.Char(readonly=True, index=True)
+    amount_type = fields.Char(index=True)
+    amazon_amount_type_raw = fields.Char(readonly=True, index=True)
+    amount_description = fields.Char('Amount Description', index=True)
+    amazon_amount_description_raw = fields.Char(readonly=True, index=True)
+    amount = fields.Monetary(currency_field='currency_id')
+    currency_id = fields.Many2one('res.currency', ondelete='restrict')
+    currency_code = fields.Char(index=True)
+    fulfillment_id = fields.Char(index=True)
+    posted_date = fields.Datetime(index=True)
+    posted_date_time = fields.Datetime(index=True)
+    order_item_id = fields.Char('Amazon Order Item Code', index=True)
+    merchant_order_item_id = fields.Char(index=True)
+    merchant_adjustment_item_id = fields.Char(index=True)
+    sku = fields.Char(index=True)
+    quantity_purchased = fields.Float()
+    promotion_id = fields.Char(index=True)
+
+    normalized_category = fields.Selection([
+        ('sale', 'Sale'), ('amazon_fee', 'Amazon Fee'), ('fba_fee', 'FBA Fee'),
+        ('refund', 'Refund'), ('promotion', 'Promotion'),
+        ('reimbursement', 'Reimbursement'), ('adjustment', 'Adjustment'),
+        ('tax', 'Tax'), ('shipping', 'Shipping'),
+        ('other_credit', 'Other Credit'), ('other_debit', 'Other Debit'),
+        ('unknown', 'Unknown'),
+    ], default='unknown', required=True, index=True)
+    fee_category = fields.Selection([
+        ('referral_commission', 'Referral / Commission'),
+        ('fba_fulfillment', 'FBA Fulfillment Fee'),
+        ('storage', 'Storage Fee'),
+        ('shipping_service', 'Shipping / Service Fee'),
+        ('refund_administration', 'Refund Administration Fee'),
+        ('other_amazon_fee', 'Other Amazon Fee'),
+    ], index=True)
+
+    amazon_order_record_id = fields.Many2one(
+        'amazon.sale.order', string='Amazon Order', ondelete='set null',
+        index=True,
+    )
+    sale_order_id = fields.Many2one(
+        'sale.order', string='Odoo Sale Order', ondelete='set null',
+        index=True, check_company=True,
+    )
+    order_link_state = fields.Selection([
+        ('not_applicable', 'No Order Reported'), ('linked', 'Order Linked'),
+        ('order_not_found', 'Order Not Found'), ('ambiguous', 'Ambiguous Order'),
+    ], default='not_applicable', required=True, index=True)
+    amazon_product_id = fields.Many2one('amazon.product', ondelete='set null', index=True)
+    odoo_product_id = fields.Many2one('product.product', ondelete='restrict', index=True)
+    return_line_id = fields.Many2one(
+        'amazon.return.report.line', string='Linked Financial Refund Return',
+        ondelete='set null', index=True, check_company=True,
+    )
+    reimbursement_id = fields.Many2one(
+        'amazon.fba.reimbursement', string='Linked FBA Reimbursement',
+        ondelete='set null', index=True, check_company=True,
+    )
+    matching_note = fields.Text(readonly=True)
+
+    # Upgrade-only accounting pointer. Settlement import never populates it.
+    invoice_id = fields.Many2one('account.move', string='Legacy Invoice', readonly=True)
+    source_report_id = fields.Char(readonly=True, index=True)
+    source_document_id = fields.Char(readonly=True, index=True)
+    last_seen_sync_token = fields.Char(readonly=True, index=True)
+    raw_report_row = fields.Text(
+        readonly=True, groups='sdlc_amazon_connector.group_amazon_technical_admin',
+    )
+
+    _line_unique = models.Constraint(
+        'UNIQUE(report_id, line_key)',
+        'This settlement financial line was already imported.',
+    )
+
+    @api.model
+    def _classify(self, transaction_type, amount_type, description,
+                  promotion_id, amount):
+        transaction = str(transaction_type or '').strip().lower()
+        amount_group = str(amount_type or '').strip().lower()
+        detail = str(description or '').strip().lower()
+        text = ' '.join((transaction, amount_group, detail))
+
+        if 'reimburse' in text:
+            return 'reimbursement', False
+        if promotion_id or 'promotion' in amount_group or 'promotion' in detail:
+            return 'promotion', False
+        if 'adjust' in transaction or 'adjust' in amount_group:
+            return 'adjustment', False
+        fee_evidence = (
+            'fee' in amount_group or 'fee' in detail
+            or any(token in detail for token in ('commission', 'referral'))
+        )
+        if fee_evidence:
+            if any(token in detail for token in ('commission', 'referral')):
+                fee_category = 'referral_commission'
+            elif 'storage' in detail:
+                fee_category = 'storage'
+            elif 'refund' in detail:
+                fee_category = 'refund_administration'
+            elif any(token in detail for token in ('fba', 'fulfillment')):
+                fee_category = 'fba_fulfillment'
+            elif any(token in detail for token in ('shipping', 'service')):
+                fee_category = 'shipping_service'
+            else:
+                fee_category = 'other_amazon_fee'
+            category = 'fba_fee' if fee_category in ('fba_fulfillment', 'storage') else 'amazon_fee'
+            return category, fee_category
+        if 'refund' in transaction:
+            return 'refund', False
+        if 'tax' in amount_group or 'tax' in detail:
+            return 'tax', False
+        if any(token in amount_group for token in ('itemprice', 'item price', 'principal')):
+            return 'sale', False
+        if 'shipping' in amount_group or 'shipping' in detail:
+            return 'shipping', False
+        if 'other' in transaction or 'other' in amount_group:
+            return ('other_credit' if amount >= 0 else 'other_debit'), False
+        return 'unknown', False
+
+    @api.model
+    def _order_and_product_values(self, instance, row):
+        order_id = str(row.get('order-id') or '').strip()
+        order = self.env['amazon.sale.order']
+        order_state = 'not_applicable'
+        if order_id:
+            candidates = order.search([
+                ('instance_id', '=', instance.id), ('amazon_order_ref', '=', order_id),
+            ], limit=2)
+            if len(candidates) == 1:
+                order = candidates
+                order_state = 'linked'
+            elif candidates:
+                order_state = 'ambiguous'
+            else:
+                order_state = 'order_not_found'
+        product_values = self.env['amazon.phase7.stock.service'].resolve_product(
+            instance, row.get('sku'), False, False,
+        )
+        return {
+            'amazon_order_record_id': order.id or False,
+            'sale_order_id': order.sale_order_id.id if order.sale_order_id else False,
+            'order_link_state': order_state,
+            **product_values,
+        }
+
+    def _resolve_links(self):
+        for line in self:
+            notes = []
+            if line.order_link_state == 'order_not_found':
+                notes.append(_('ORDER NOT FOUND: %s', line.amazon_order_id))
+
+            return_line = self.env['amazon.return.report.line']
+            if line.normalized_category == 'refund' and line.amazon_order_id:
+                candidates = return_line.search([
+                    ('instance_id', '=', line.instance_id.id),
+                    ('amazon_order_id', '=', line.amazon_order_id),
+                ], limit=20)
+                if line.sku:
+                    candidates = candidates.filtered(lambda item: item.sku == line.sku)
+                if line.order_item_id:
+                    candidates = candidates.filtered(
+                        lambda item: item.amazon_order_item_id == line.order_item_id
+                    )
+                if len(candidates) == 1:
+                    return_line = candidates
+                    notes.append(_('Refund linked by Amazon order and item identity.'))
+                elif len(candidates) > 1:
+                    notes.append(_('Refund return match is ambiguous.'))
+
+            reimbursement = self.env['amazon.fba.reimbursement']
+            if line.normalized_category == 'reimbursement':
+                identifiers = list(dict.fromkeys(filter(None, (
+                    line.adjustment_id, line.merchant_adjustment_item_id,
+                ))))
+                if identifiers:
+                    candidates = reimbursement.search([
+                        ('instance_id', '=', line.instance_id.id),
+                        '|', ('reimbursement_id', 'in', identifiers),
+                        ('original_reimbursement_id', 'in', identifiers),
+                    ], limit=20)
+                    if line.sku:
+                        exact = candidates.filtered(lambda item: item.sku == line.sku)
+                        candidates = exact or candidates
+                    if len(candidates) == 1:
+                        reimbursement = candidates
+                        notes.append(_('Reimbursement linked by explicit adjustment identifier.'))
+                    elif len(candidates) > 1:
+                        notes.append(_('Reimbursement match is ambiguous.'))
+                else:
+                    notes.append(_('Reimbursement has no explicit adjustment identifier.'))
+
+            line.write({
+                'return_line_id': return_line.id or False,
+                'reimbursement_id': reimbursement.id or False,
+                'matching_note': '\n'.join(notes) or False,
+            })
+            if reimbursement and not reimbursement.linked_settlement_id:
+                reimbursement.linked_settlement_id = line.report_id
+        return True
+
+    @api.constrains(
+        'amazon_order_record_id', 'sale_order_id', 'return_line_id', 'reimbursement_id',
+    )
+    def _check_instance_links(self):
+        for line in self:
+            for record in (line.amazon_order_record_id, line.return_line_id, line.reimbursement_id):
+                if record and record.instance_id != line.instance_id:
+                    raise ValidationError(_('A settlement line cannot link across Amazon instances.'))
+            if line.sale_order_id and line.sale_order_id.company_id != line.company_id:
+                raise ValidationError(_('A settlement line cannot link across companies.'))

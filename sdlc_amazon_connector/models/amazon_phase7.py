@@ -17,6 +17,7 @@ from .amazon_api import (
     REPORT_FBA_RETURNS,
     REPORT_REMOVAL_ORDER_DETAIL,
     REPORT_REMOVAL_SHIPMENT_DETAIL,
+    REPORT_SETTLEMENT,
 )
 
 _logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ class AmazonSmartAlertPhase7(models.Model):
 
     alert_type = fields.Selection(selection_add=[
         ('phase7_manual_review', 'FBA Event Manual Review'),
-        ('phase7_job_failed', 'FBA Returns/Removals Job Failed'),
+        ('phase7_job_failed', 'FBA / Settlement Job Failed'),
     ], ondelete={
         'phase7_manual_review': 'cascade',
         'phase7_job_failed': 'cascade',
@@ -1496,6 +1497,7 @@ class AmazonPhase7Job(models.Model):
         ('inventory_adjustments', 'Inventory Adjustment Import'),
         ('reimbursements', 'Reimbursement Import'),
         ('reimbursement_matching', 'Reimbursement Matching'),
+        ('settlements', 'Settlement Import'),
     ], required=True, index=True)
     source_model = fields.Char(index=True)
     source_id = fields.Integer(index=True)
@@ -1644,6 +1646,8 @@ class AmazonPhase7Job(models.Model):
         return start, end
 
     def _report_turn(self):
+        if self.operation_type == 'settlements':
+            return self._settlement_turn()
         report_type, options, report_kind = self._report_configuration()
         api = AmazonAPI()
         if self.stage == 'request':
@@ -1741,6 +1745,118 @@ class AmazonPhase7Job(models.Model):
                 return False
             return self._complete_report_part()
         raise ValidationError(_("Unknown report job stage %s.", self.stage))
+
+    def _settlement_turn(self):
+        """Discover Amazon-generated V2 reports and import one document per turn."""
+        self.ensure_one()
+        api = AmazonAPI()
+        if self.stage == 'request':
+            token = self.instance_id._get_access_token_or_raise()
+            now = fields.Datetime.now()
+            earliest = now - timedelta(days=90)
+            if self.date_from:
+                created_since = datetime.combine(self.date_from, time.min)
+            elif self.instance_id.last_settlement_sync_at:
+                # Settlement documents can appear after their economic period.
+                # A seven-day overlap is safe because body IDs/lines are upserted.
+                created_since = self.instance_id.last_settlement_sync_at - timedelta(days=7)
+            else:
+                created_since = earliest
+            created_since = max(created_since, earliest)
+            if self.date_to:
+                created_until = min(
+                    datetime.combine(self.date_to + timedelta(days=1), time.min), now,
+                )
+            else:
+                created_until = now
+            reports = self.instance_id._api_call_safe(
+                api.get_settlement_reports_list, self.instance_id, token,
+                processing_statuses='DONE',
+                created_since=created_since.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                created_until=created_until.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                error_msg=_("Failed to discover Amazon V2 settlement reports"),
+            )
+            complete_reports = [
+                report for report in reports
+                if report.get('reportId') and report.get('reportDocumentId')
+                and report.get('reportType') == REPORT_SETTLEMENT
+            ]
+            self.write({
+                'report_kind': 'settlements',
+                'raw_document': json.dumps(complete_reports, default=str),
+                'total_found': len(complete_reports), 'cursor_index': 0,
+                'stage': 'download', 'state': 'pending',
+                'next_run_at': fields.Datetime.now(),
+            })
+            if not complete_reports:
+                return self._complete_settlement_job()
+            return False
+
+        if self.stage == 'download':
+            reports = json.loads(self.raw_document or '[]')
+            if self.cursor_index >= len(reports):
+                return self._complete_settlement_job()
+            report = reports[self.cursor_index]
+            document_id = report.get('reportDocumentId')
+            if not document_id:
+                raise ValidationError(_(
+                    "A completed settlement report has no reportDocumentId."
+                ))
+            token = self.instance_id._get_access_token_or_raise()
+            document = self.instance_id._api_call_safe(
+                api.get_report_document, self.instance_id, token, document_id,
+                error_msg=_("Failed to retrieve Amazon settlement document metadata"),
+            )
+            raw = api.download_report_document(
+                document.get('url'),
+                compression=document.get('compressionAlgorithm'),
+                encryption=document.get('encryptionDetails'),
+                instance=self.instance_id,
+            )
+            result = self.env['amazon.settlement.report'].import_flat_file(
+                self.instance_id, raw, report,
+            )
+            imported = result['settlements']
+            report_errors = '\n'.join(
+                filter(None, imported.mapped('parsing_error_log'))
+            )
+            cursor = self.cursor_index + 1
+            values = {
+                'amazon_report_id': report.get('reportId') or False,
+                'amazon_report_document_id': document_id,
+                'amazon_request_id': (
+                    document.get('_amazon_request_id') or self.amazon_request_id
+                ),
+                'cursor_index': cursor,
+                'total_processed': self.total_processed + result['processed'],
+                'total_failed': self.total_failed + result['failed'],
+                'row_error_log': '\n'.join(filter(None, (
+                    self.row_error_log, report_errors,
+                )))[-10000:] or False,
+                'last_activity_at': fields.Datetime.now(),
+            }
+            if cursor < len(reports):
+                values.update({
+                    'state': 'pending', 'next_run_at': fields.Datetime.now(),
+                })
+                self.write(values)
+                return False
+            self.write(values)
+            return self._complete_settlement_job()
+
+        raise ValidationError(_("Unknown settlement job stage %s.", self.stage))
+
+    def _complete_settlement_job(self):
+        self.ensure_one()
+        if not self.total_failed:
+            self.instance_id.last_settlement_sync_at = fields.Datetime.now()
+        self.write({
+            'state': 'done', 'stage': 'done', 'finished_at': fields.Datetime.now(),
+            'last_error_code': 'ROW_ERRORS' if self.total_failed else False,
+            'last_error_message': self.row_error_log if self.total_failed else False,
+            'next_run_at': False, 'raw_document': False,
+        })
+        return True
 
     @staticmethod
     def _parse_rows(raw):
@@ -1995,6 +2111,19 @@ class AmazonPhase7Job(models.Model):
                 "the Pricing or Amazon Fulfillment role for GET_FBA_REIMBURSEMENTS_DATA. %s",
                 message,
             )[:10000]
+        settlement_authorization_error = self.operation_type == 'settlements' and (
+            status_code in (401, 403)
+            or any(token in message.lower() for token in (
+                '401', '403', 'unauthorized', 'forbidden', 'accessdenied',
+                'role is not authorized', 'revoked authorization',
+            ))
+        )
+        if settlement_authorization_error:
+            message = _(
+                "Settlement report authorization failed. Amazon requires the "
+                "Finance and Accounting role for %s. %s",
+                REPORT_SETTLEMENT, message,
+            )[:10000]
         retryable = status_code == 429 or (status_code and status_code >= 500) or any(
             token in message.lower() for token in (
             '429', 'throttl', 'timeout', 'connection', 'temporar', '503', '500', '502', '504',
@@ -2021,8 +2150,10 @@ class AmazonPhase7Job(models.Model):
                 'state': 'failed', 'retry_count': retry_count, 'next_run_at': False,
                 'finished_at': fields.Datetime.now(),
                 'last_error_code': (
-                    'REPORT_ROLE_MISSING'
-                    if reimbursement_authorization_error else 'PHASE7_ERROR'
+                    'SETTLEMENT_ROLE_MISSING' if settlement_authorization_error else (
+                        'REPORT_ROLE_MISSING'
+                        if reimbursement_authorization_error else 'PHASE7_ERROR'
+                    )
                 ),
                 'last_error_message': message,
             })
@@ -2037,7 +2168,11 @@ class AmazonPhase7Job(models.Model):
             self.env['amazon.operation.control'].sudo().record_source_failure(self)
             self.env['amazon.smart.alert'].phase7_alert(
                 self.instance_id, 'phase7-job:%s' % self.id,
-                _("FBA operational report job failed"), message,
+                _(
+                    "Amazon settlement import failed"
+                    if self.operation_type == 'settlements'
+                    else "FBA operational report job failed"
+                ), message,
                 source=self, critical=True,
             )
         _logger.exception("Amazon Phase 7 job %s failed: %s", self.id, exc)

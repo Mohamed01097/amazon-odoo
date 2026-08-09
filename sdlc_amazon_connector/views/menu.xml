@@ -15,7 +15,7 @@
               name="Retry Center" action="amazon_retry_center_action" sequence="30"
               groups="sdlc_amazon_connector.group_amazon_manager"/>
     <menuitem id="amazon_phase7_job_menu" parent="amazon_operations_menu"
-              name="Returns &amp; Removals Jobs" action="amazon_phase7_job_action" sequence="35"/>
+              name="FBA &amp; Settlement Jobs" action="amazon_phase7_job_action" sequence="35"/>
     <menuitem id="amazon_operations_api_logs_menu" parent="amazon_operations_menu"
               name="API Telemetry" action="amazon_sync_log_action" sequence="40"/>
     <menuitem id="amazon_operations_rate_metrics_menu" parent="amazon_operations_menu"
@@ -91,6 +91,7 @@
     <!-- Accounting -->
     <menuitem id="amazon_accounting_menu" parent="amazon_root" name="Accounting" sequence="50"/>
     <menuitem id="amazon_settlement_menu" parent="amazon_accounting_menu" name="Settlement Reports" action="amazon_settlement_action" sequence="10"/>
+    <menuitem id="amazon_settlement_line_menu" parent="amazon_accounting_menu" name="Settlement Financial Lines" action="amazon_settlement_line_action" sequence="11"/>
     <menuitem id="amazon_vcs_menu" parent="amazon_accounting_menu" name="VCS Tax Reports" action="amazon_vcs_action" sequence="20"/>
 
     <!-- Reports -->

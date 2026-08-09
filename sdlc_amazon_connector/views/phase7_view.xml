@@ -6,7 +6,7 @@
         <field name="name">Reimbursements</field><field name="res_model">amazon.fba.reimbursement</field><field name="view_mode">list,form</field>
     </record>
     <record id="amazon_phase7_job_action" model="ir.actions.act_window">
-        <field name="name">FBA Operational Jobs</field><field name="res_model">amazon.phase7.job</field><field name="view_mode">list,form</field>
+        <field name="name">FBA &amp; Settlement Jobs</field><field name="res_model">amazon.phase7.job</field><field name="view_mode">list,form</field>
     </record>
 
     <record id="amazon_fba_inventory_adjustment_list" model="ir.ui.view">
