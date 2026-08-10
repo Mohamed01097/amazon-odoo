@@ -10,8 +10,8 @@ from decimal import Decimal, InvalidOperation
 
 from dateutil import parser as date_parser
 
-from odoo import _, api, fields, models
-from odoo.exceptions import UserError, ValidationError
+from odoo import Command, _, api, fields, models
+from odoo.exceptions import AccessError, UserError, ValidationError
 
 
 _logger = logging.getLogger(__name__)
@@ -28,6 +28,20 @@ SETTLEMENT_LINE_DIMENSIONS = (
     'merchant-order-item-id', 'merchant-adjustment-item-id', 'sku',
     'promotion-id',
 )
+ACCOUNT_FIELD_BY_CATEGORY = {
+    'sale': 'amazon_sales_account_id',
+    'amazon_fee': 'amazon_fee_account_id',
+    'fba_fee': 'amazon_fba_fee_account_id',
+    'refund': 'amazon_refund_account_id',
+    'promotion': 'amazon_promotion_account_id',
+    'reimbursement': 'amazon_reimbursement_account_id',
+    'adjustment': 'amazon_adjustment_account_id',
+    'tax': 'amazon_tax_account_id',
+    'shipping': 'amazon_shipping_account_id',
+    'other_credit': 'amazon_other_credit_account_id',
+    'other_debit': 'amazon_other_debit_account_id',
+}
+INVOICE_FINANCIAL_CATEGORIES = {'sale', 'refund', 'promotion', 'tax', 'shipping'}
 
 
 class AmazonSettlementReport(models.Model):
@@ -142,8 +156,21 @@ class AmazonSettlementReport(models.Model):
     reimbursement_count = fields.Integer(compute='_compute_link_counts')
     sync_log_count = fields.Integer(compute='_compute_link_counts')
 
-    # Legacy accounting links are retained read-only for upgrade compatibility.
-    # This integration never creates or updates accounting documents.
+    account_move_id = fields.Many2one(
+        'account.move', string='Accounting Entry', readonly=True, copy=False,
+        ondelete='restrict', check_company=True, tracking=True,
+    )
+    accounting_state = fields.Selection([
+        ('not_ready', 'Not Ready'), ('ready', 'Ready'),
+        ('draft_entry', 'Draft Entry'), ('posted', 'Posted'), ('error', 'Error'),
+    ], compute='_compute_accounting_status', string='Accounting State')
+    accounting_date = fields.Date(compute='_compute_accounting_status')
+    accounting_mapping_errors = fields.Text(
+        compute='_compute_accounting_status', string='Accounting Mapping Errors',
+        groups='account.group_account_user,account.group_account_manager',
+    )
+
+    # Legacy links are retained read-only for upgrade compatibility.
     reimbursement_invoice_ids = fields.Many2many(
         'account.move', string='Legacy Reimbursement Invoices', readonly=True,
     )
@@ -151,6 +178,10 @@ class AmazonSettlementReport(models.Model):
     _settlement_unique = models.Constraint(
         'UNIQUE(instance_id, settlement_id)',
         'Settlement ID must be unique per Amazon instance.',
+    )
+    _account_move_unique = models.Constraint(
+        'UNIQUE(account_move_id)',
+        'An accounting entry can only belong to one Amazon settlement.',
     )
 
     @api.model_create_multi
@@ -214,6 +245,50 @@ class AmazonSettlementReport(models.Model):
                 ('source_id', '=', settlement.id),
             ])
 
+    @api.depends(
+        'account_move_id', 'account_move_id.state', 'deposit_date',
+        'settlement_end_date', 'state', 'reconciliation_state',
+        'parsing_error_count', 'currency_mismatch', 'currency_id',
+        'line_ids.active', 'line_ids.normalized_category', 'line_ids.currency_id',
+        'line_ids.order_link_state', 'line_ids.reimbursement_id.financial_state',
+        'instance_id.settlement_journal_id',
+        'instance_id.amazon_clearing_account_id',
+        'instance_id.amazon_sales_account_id',
+        'instance_id.amazon_refund_account_id',
+        'instance_id.amazon_fee_account_id',
+        'instance_id.amazon_fba_fee_account_id',
+        'instance_id.amazon_reimbursement_account_id',
+        'instance_id.amazon_promotion_account_id',
+        'instance_id.amazon_adjustment_account_id',
+        'instance_id.amazon_shipping_account_id',
+        'instance_id.amazon_tax_account_id',
+        'instance_id.amazon_other_credit_account_id',
+        'instance_id.amazon_other_debit_account_id',
+    )
+    def _compute_accounting_status(self):
+        for settlement in self:
+            settlement.accounting_date = (
+                settlement.account_move_id.date
+                if settlement.account_move_id
+                else (
+                    settlement.deposit_date.date() if settlement.deposit_date
+                    else settlement.settlement_end_date.date()
+                    if settlement.settlement_end_date else False
+                )
+            )
+            if settlement.account_move_id:
+                settlement.accounting_state = (
+                    'posted' if settlement.account_move_id.state == 'posted' else 'draft_entry'
+                )
+                settlement.accounting_mapping_errors = False
+                continue
+            errors = settlement.sudo()._accounting_validation_errors()
+            settlement.accounting_mapping_errors = '\n'.join(errors) or False
+            if settlement.reconciliation_state != 'matched':
+                settlement.accounting_state = 'not_ready'
+            else:
+                settlement.accounting_state = 'error' if errors else 'ready'
+
     def _open_records(self, title, model_name, records):
         self.ensure_one()
         records = records.exists()
@@ -243,6 +318,294 @@ class AmazonSettlementReport(models.Model):
             ('source_model', '=', self._name), ('source_id', '=', self.id),
         ])
         return self._open_records(_('Sync Logs'), records._name, records)
+
+    def action_view_accounting_entry(self):
+        self.ensure_one()
+        if not self.account_move_id:
+            raise UserError(_('No accounting entry has been created for this settlement.'))
+        return {
+            'type': 'ir.actions.act_window',
+            'name': _('Amazon Settlement Accounting Entry'),
+            'res_model': 'account.move',
+            'view_mode': 'form',
+            'res_id': self.account_move_id.id,
+        }
+
+    @api.model
+    def _check_accounting_creation_access(self):
+        if self.env.su:
+            return
+        is_accountant = (
+            self.env.user.has_group('account.group_account_user')
+            or self.env.user.has_group('account.group_account_manager')
+        )
+        is_amazon_manager = self.env.user.has_group(
+            'sdlc_amazon_connector.group_amazon_manager'
+        )
+        if not (is_accountant and is_amazon_manager):
+            raise AccessError(_(
+                'Only an Accounting user who is also an Amazon Manager can create '
+                'settlement entries.'
+            ))
+
+    def _invoice_receivable_target(self, line):
+        """Return (account, partner, error) for already-booked invoice value."""
+        self.ensure_one()
+        if line.normalized_category not in INVOICE_FINANCIAL_CATEGORIES:
+            return self.env['account.account'], self.env['res.partner'], False
+
+        documents = self.env['account.move']
+        if line.amazon_order_record_id.invoice_id:
+            documents |= line.amazon_order_record_id.invoice_id
+        if line.sale_order_id:
+            documents |= line.sale_order_id.invoice_ids
+        if line.return_line_id.credit_note_id:
+            documents |= line.return_line_id.credit_note_id
+        documents = documents.exists().filtered(lambda move: move.state != 'cancel')
+
+        refund_transaction = (
+            line.normalized_category == 'refund'
+            or 'refund' in (line.amazon_transaction_type_raw or '').lower()
+        )
+        expected_type = 'out_refund' if refund_transaction else 'out_invoice'
+        relevant = documents.filtered(lambda move: move.move_type == expected_type)
+        if relevant.filtered(lambda move: move.state == 'draft'):
+            return self.env['account.account'], self.env['res.partner'], _(
+                'Settlement line %(line)s has a draft customer document. Review it before accounting.',
+                line=line.display_name,
+            )
+        posted = relevant.filtered(lambda move: move.state == 'posted')
+        if not posted:
+            return self.env['account.account'], self.env['res.partner'], False
+        receivable_lines = posted.line_ids.filtered(
+            lambda move_line: move_line.account_id.account_type == 'asset_receivable'
+        )
+        accounts = receivable_lines.account_id
+        partners = receivable_lines.partner_id
+        if len(accounts) != 1 or len(partners) > 1:
+            return self.env['account.account'], self.env['res.partner'], _(
+                'Settlement line %(line)s has ambiguous posted invoice receivable data.',
+                line=line.display_name,
+            )
+        if not accounts:
+            return self.env['account.account'], self.env['res.partner'], _(
+                'Settlement line %(line)s links a posted customer document without a receivable line.',
+                line=line.display_name,
+            )
+        return accounts, partners[:1], False
+
+    def _accounting_validation_errors(self):
+        self.ensure_one()
+        errors = []
+        instance = self.instance_id
+        company = self.company_id
+        lines = self.line_ids.filtered('active')
+        if self.state != 'reconciled' or self.reconciliation_state != 'matched':
+            errors.append(_('The settlement must be complete and payout-matched.'))
+        if self.parsing_error_count or self.currency_mismatch or not self.currency_id:
+            errors.append(_('The settlement contains import or currency errors.'))
+        if not lines:
+            errors.append(_('The settlement has no active financial lines.'))
+        if not self.deposit_date and not self.settlement_end_date:
+            errors.append(_('The settlement has no deposit date or settlement end date.'))
+
+        journal = instance.settlement_journal_id
+        if not journal:
+            errors.append(_('Settlement Journal is not configured.'))
+        elif journal.company_id != company or journal.type != 'general':
+            errors.append(_('Settlement Journal must be a general journal of the instance company.'))
+
+        clearing = instance.amazon_clearing_account_id
+        if not clearing:
+            errors.append(_('Amazon Clearing Account is not configured.'))
+        elif company not in clearing.company_ids:
+            errors.append(_('Amazon Clearing Account does not belong to the instance company.'))
+        elif clearing.account_type == 'asset_cash':
+            errors.append(_('Amazon Clearing Account cannot be a bank or cash account.'))
+
+        for line in lines:
+            if line.currency_id != self.currency_id or line.currency_code != self.currency_code:
+                errors.append(_(
+                    'Settlement line %(line)s has a currency inconsistent with the settlement.',
+                    line=line.display_name,
+                ))
+                continue
+            if line.normalized_category == 'unknown':
+                errors.append(_(
+                    'Unknown Amazon category on %(description)s; configure/classify it before accounting.',
+                    description=line.amount_description or line.display_name,
+                ))
+                continue
+            if (
+                line.normalized_category in ('sale', 'refund')
+                and line.amazon_order_id and line.order_link_state != 'linked'
+            ):
+                errors.append(_(
+                    '%(category)s line for Amazon order %(order)s is not safely linked; invoice double-booking cannot be excluded.',
+                    category=line.normalized_category.title(), order=line.amazon_order_id,
+                ))
+                continue
+            invoice_account, _partner, invoice_error = self._invoice_receivable_target(line)
+            if invoice_error:
+                errors.append(invoice_error)
+                continue
+            account = invoice_account or instance[ACCOUNT_FIELD_BY_CATEGORY.get(
+                line.normalized_category, 'amazon_suspense_account_id'
+            )]
+            if not account:
+                errors.append(_(
+                    'No account mapping is configured for category %(category)s.',
+                    category=line.normalized_category,
+                ))
+            elif company not in account.company_ids:
+                errors.append(_(
+                    'Mapped account %(account)s is outside the instance company.',
+                    account=account.display_name,
+                ))
+            elif account.account_type == 'asset_cash':
+                errors.append(_(
+                    'Mapped account %(account)s is a bank/cash account; settlement posting only uses Amazon Clearing.',
+                    account=account.display_name,
+                ))
+            if (
+                line.reimbursement_id
+                and line.reimbursement_id.financial_state == 'posted_later'
+            ):
+                errors.append(_(
+                    'Reimbursement %(reimbursement)s is already marked as financially posted.',
+                    reimbursement=line.reimbursement_id.reimbursement_id,
+                ))
+        return list(dict.fromkeys(errors))
+
+    def _accounting_move_line_values(self, line, move_date):
+        self.ensure_one()
+        instance = self.instance_id
+        company_currency = self.company_id.currency_id
+        invoice_account, partner, invoice_error = self._invoice_receivable_target(line)
+        if invoice_error:
+            raise UserError(invoice_error)
+        account = invoice_account or instance[ACCOUNT_FIELD_BY_CATEGORY[line.normalized_category]]
+        # Amazon positive values are credits to the financial component and a
+        # debit to clearing; negative values reverse that direction.
+        balance = self.currency_id._convert(
+            -line.amount, company_currency, self.company_id, move_date,
+        )
+        values = {
+            'name': _('Amazon Settlement %(settlement)s | %(category)s | %(description)s',
+                      settlement=self.settlement_id,
+                      category=line.normalized_category.replace('_', ' ').title(),
+                      description=line.amount_description or line.transaction_type or line.line_key[:12]),
+            'account_id': account.id,
+            'partner_id': partner.id or False,
+            'debit': max(balance, 0.0),
+            'credit': max(-balance, 0.0),
+        }
+        if self.currency_id != company_currency:
+            values.update({
+                'currency_id': self.currency_id.id,
+                'amount_currency': -line.amount,
+            })
+        return values
+
+    def action_create_accounting_entry(self):
+        self.ensure_one()
+        self._check_accounting_creation_access()
+        # Serialize creation for this settlement. Combined with the unique
+        # account_move_id constraint this prevents double clicks and workers.
+        self.flush_recordset(['account_move_id'])
+        self.env.cr.execute(
+            'SELECT account_move_id FROM amazon_settlement_report WHERE id = %s FOR UPDATE',
+            [self.id],
+        )
+        existing_move_id = self.env.cr.fetchone()[0]
+        if existing_move_id:
+            self.invalidate_recordset(['account_move_id'])
+            return self.action_view_accounting_entry()
+
+        errors = self._accounting_validation_errors()
+        if errors:
+            raise UserError(_('Accounting entry creation is blocked:\n- %s', '\n- '.join(errors)))
+
+        move_date = (
+            self.deposit_date.date() if self.deposit_date
+            else self.settlement_end_date.date()
+        )
+        component_values = [
+            self._accounting_move_line_values(line, move_date)
+            for line in self.line_ids.filtered('active')
+        ]
+        company_currency = self.company_id.currency_id
+        component_balance = sum(
+            values['debit'] - values['credit'] for values in component_values
+        )
+        clearing_balance = -component_balance
+        clearing_values = {
+            'name': _('Amazon Settlement %(settlement)s | Amazon Clearing',
+                      settlement=self.settlement_id),
+            'account_id': self.instance_id.amazon_clearing_account_id.id,
+            'debit': max(clearing_balance, 0.0),
+            'credit': max(-clearing_balance, 0.0),
+        }
+        if self.currency_id != company_currency:
+            clearing_values.update({
+                'currency_id': self.currency_id.id,
+                'amount_currency': self.reported_net_amount,
+            })
+
+        total_debit = sum(values['debit'] for values in component_values) + clearing_values['debit']
+        total_credit = sum(values['credit'] for values in component_values) + clearing_values['credit']
+        if company_currency.compare_amounts(total_debit, total_credit) != 0:
+            raise UserError(_(
+                'Settlement entry is not balanced. Debit: %(debit)s; Credit: %(credit)s.',
+                debit=total_debit, credit=total_credit,
+            ))
+        amazon_total = sum(self.line_ids.filtered('active').mapped('amount'))
+        if self.currency_id.compare_amounts(amazon_total, self.reported_net_amount) != 0:
+            raise UserError(_(
+                'Amazon Clearing does not match the payout. Reported: %(reported)s; computed: %(computed)s; difference: %(difference)s.',
+                reported=self.reported_net_amount, computed=amazon_total,
+                difference=self.reported_net_amount - amazon_total,
+            ))
+        clearing_currency_impact = (
+            self.reported_net_amount
+            if self.currency_id != company_currency else clearing_balance
+        )
+        if self.currency_id.compare_amounts(
+            clearing_currency_impact, self.reported_net_amount
+        ) != 0:
+            raise UserError(_(
+                'Amazon Clearing impact differs from the payout by %(difference)s %(currency)s.',
+                difference=self.reported_net_amount - clearing_currency_impact,
+                currency=self.currency_code,
+            ))
+
+        move = self.env['account.move'].with_company(self.company_id).create({
+            'move_type': 'entry',
+            'journal_id': self.instance_id.settlement_journal_id.id,
+            'company_id': self.company_id.id,
+            'date': move_date,
+            'ref': _('Amazon Settlement %s', self.settlement_id),
+            'amazon_instance_id': self.instance_id.id,
+            'line_ids': [
+                *(Command.create(values) for values in component_values),
+                Command.create(clearing_values),
+            ],
+        })
+        if move.state != 'draft':
+            raise UserError(_('Settlement accounting entry was not created in draft.'))
+        self.account_move_id = move
+        return self.action_view_accounting_entry()
+
+    @api.constrains('account_move_id', 'company_id')
+    def _check_account_move_company(self):
+        for settlement in self:
+            if (
+                settlement.account_move_id
+                and settlement.account_move_id.company_id != settlement.company_id
+            ):
+                raise ValidationError(_(
+                    'The settlement accounting entry must belong to the settlement company.'
+                ))
 
     def action_download_report(self):
         """Compatibility button: enqueue discovery/download; never block the UI."""

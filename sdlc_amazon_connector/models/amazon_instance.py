@@ -72,6 +72,15 @@ FBA_CONFIGURATION_FIELDS = {
     'fba_removal_return_partner_id',
     *(definition['field'] for definition in FBA_LOCATION_DEFINITIONS.values()),
 }
+SETTLEMENT_ACCOUNTING_FIELDS = {
+    'settlement_journal_id', 'amazon_clearing_account_id',
+    'amazon_sales_account_id', 'amazon_refund_account_id',
+    'amazon_fee_account_id', 'amazon_fba_fee_account_id',
+    'amazon_reimbursement_account_id', 'amazon_promotion_account_id',
+    'amazon_adjustment_account_id', 'amazon_shipping_account_id',
+    'amazon_tax_account_id', 'amazon_other_credit_account_id',
+    'amazon_other_debit_account_id', 'amazon_suspense_account_id',
+}
 
 
 def _amazon_datetime_to_odoo(value):
@@ -263,6 +272,66 @@ class AmazonInstance(models.Model):
     last_fba_reimbursement_sync_at = fields.Datetime(readonly=True)
     last_settlement_sync_at = fields.Datetime(readonly=True)
 
+    # Settlement accounting. These mappings are intentionally instance- and
+    # company-specific; settlement entries never post directly to a bank.
+    settlement_journal_id = fields.Many2one(
+        'account.journal', string='Settlement Journal', check_company=True,
+        ondelete='restrict', domain="[('company_id', '=', company_id), ('type', '=', 'general')]",
+    )
+    amazon_clearing_account_id = fields.Many2one(
+        'account.account', string='Amazon Clearing Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_sales_account_id = fields.Many2one(
+        'account.account', string='Amazon Sales Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_refund_account_id = fields.Many2one(
+        'account.account', string='Amazon Refund Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_fee_account_id = fields.Many2one(
+        'account.account', string='Amazon Fee Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_fba_fee_account_id = fields.Many2one(
+        'account.account', string='Amazon FBA Fee Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_reimbursement_account_id = fields.Many2one(
+        'account.account', string='Amazon Reimbursement Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_promotion_account_id = fields.Many2one(
+        'account.account', string='Amazon Promotion Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_adjustment_account_id = fields.Many2one(
+        'account.account', string='Amazon Adjustment Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_shipping_account_id = fields.Many2one(
+        'account.account', string='Amazon Shipping Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_tax_account_id = fields.Many2one(
+        'account.account', string='Amazon Tax Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_other_credit_account_id = fields.Many2one(
+        'account.account', string='Amazon Other Credit Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_other_debit_account_id = fields.Many2one(
+        'account.account', string='Amazon Other Debit Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+    )
+    amazon_suspense_account_id = fields.Many2one(
+        'account.account', string='Amazon Suspense Account', check_company=True,
+        ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
+        help='Reserved for an explicit future review workflow. Unknown settlement categories block draft creation and are never silently posted here.',
+    )
+
     # Defaults
     default_currency_id = fields.Many2one('res.currency', string='Default Currency')
 
@@ -385,6 +454,41 @@ class AmazonInstance(models.Model):
         'CHECK (order_status_sync_interval IS NULL OR order_status_sync_interval >= 1)',
         'Status sync interval must be at least 1 minute.',
     )
+
+    @api.constrains(
+        'company_id', 'settlement_journal_id', 'amazon_clearing_account_id',
+        'amazon_sales_account_id', 'amazon_refund_account_id',
+        'amazon_fee_account_id', 'amazon_fba_fee_account_id',
+        'amazon_reimbursement_account_id', 'amazon_promotion_account_id',
+        'amazon_adjustment_account_id', 'amazon_shipping_account_id',
+        'amazon_tax_account_id', 'amazon_other_credit_account_id',
+        'amazon_other_debit_account_id', 'amazon_suspense_account_id',
+    )
+    def _check_settlement_accounting_company(self):
+        account_fields = (
+            'amazon_clearing_account_id', 'amazon_sales_account_id',
+            'amazon_refund_account_id', 'amazon_fee_account_id',
+            'amazon_fba_fee_account_id', 'amazon_reimbursement_account_id',
+            'amazon_promotion_account_id', 'amazon_adjustment_account_id',
+            'amazon_shipping_account_id', 'amazon_tax_account_id',
+            'amazon_other_credit_account_id', 'amazon_other_debit_account_id',
+            'amazon_suspense_account_id',
+        )
+        for instance in self:
+            if (
+                instance.settlement_journal_id
+                and instance.settlement_journal_id.company_id != instance.company_id
+            ):
+                raise ValidationError(_(
+                    'The settlement journal must belong to the Amazon instance company.'
+                ))
+            for field_name in account_fields:
+                account = instance[field_name]
+                if account and instance.company_id not in account.company_ids:
+                    raise ValidationError(_(
+                        '%(account)s is not available to company %(company)s.',
+                        account=account.display_name, company=instance.company_id.display_name,
+                    ))
     _status_sync_lookback_non_negative = models.Constraint(
         'CHECK (status_sync_lookback_minutes IS NULL OR status_sync_lookback_minutes >= 0)',
         'Status sync lookback minutes cannot be negative.',
@@ -403,15 +507,36 @@ class AmazonInstance(models.Model):
             "the FBA stock structure configuration."
         ))
 
+    @api.model
+    def _check_settlement_accounting_access(self):
+        if self.env.su:
+            return
+        is_accountant = (
+            self.env.user.has_group('account.group_account_user')
+            or self.env.user.has_group('account.group_account_manager')
+        )
+        is_amazon_manager = self.env.user.has_group(
+            'sdlc_amazon_connector.group_amazon_manager'
+        )
+        if not (is_accountant and is_amazon_manager):
+            raise AccessError(_(
+                'Only an Accounting user who is also an Amazon Manager can change '
+                'settlement accounting mappings.'
+            ))
+
     @api.model_create_multi
     def create(self, vals_list):
         if any(FBA_CONFIGURATION_FIELDS.intersection(vals) for vals in vals_list):
             self._check_fba_configuration_access()
+        if any(SETTLEMENT_ACCOUNTING_FIELDS.intersection(vals) for vals in vals_list):
+            self._check_settlement_accounting_access()
         return super().create(vals_list)
 
     def write(self, vals):
         if FBA_CONFIGURATION_FIELDS.intersection(vals):
             self._check_fba_configuration_access()
+        if SETTLEMENT_ACCOUNTING_FIELDS.intersection(vals):
+            self._check_settlement_accounting_access()
         return super().write(vals)
 
     @api.constrains(

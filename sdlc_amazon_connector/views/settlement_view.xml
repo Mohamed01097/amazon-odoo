@@ -50,6 +50,7 @@
                 <field name="calculated_net_amount" sum="Calculated Net"/>
                 <field name="reconciliation_difference" sum="Difference"/>
                 <field name="reconciliation_state" widget="badge"/>
+                <field name="accounting_state" widget="badge" optional="show"/>
                 <field name="instance_id" optional="show"/>
                 <field name="parsing_error_count" optional="hide"/>
             </list>
@@ -65,6 +66,10 @@
                     <button name="action_reconcile" type="object" string="Recalculate"
                             class="btn-primary"
                             groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_create_accounting_entry" type="object"
+                            string="Create Accounting Entry" class="btn-primary"
+                            invisible="account_move_id or accounting_state != 'ready'"
+                            groups="account.group_account_user,account.group_account_manager"/>
                     <field name="reconciliation_state" widget="statusbar"
                            statusbar_visible="pending,matched,mismatch,incomplete,manual_review,error"/>
                 </header>
@@ -79,6 +84,12 @@
                         <button name="action_view_sync_logs" type="object" class="oe_stat_button" icon="fa-list-alt"
                                 groups="sdlc_amazon_connector.group_amazon_manager">
                             <field name="sync_log_count" widget="statinfo" string="Sync Logs"/>
+                        </button>
+                        <button name="action_view_accounting_entry" type="object"
+                                class="oe_stat_button" icon="fa-book"
+                                invisible="not account_move_id"
+                                groups="account.group_account_user,account.group_account_manager">
+                            <field name="account_move_id" widget="statinfo" string="Accounting Entry"/>
                         </button>
                     </div>
                     <widget name="web_ribbon" title="Incomplete" bg_color="text-bg-warning"
@@ -107,6 +118,14 @@
                             <field name="currency_mismatch" invisible="not currency_mismatch"/>
                             <field name="state"/>
                         </group>
+                    </group>
+                    <group string="Accounting"
+                           groups="account.group_account_user,account.group_account_manager">
+                        <field name="accounting_state" widget="badge"/>
+                        <field name="account_move_id"/>
+                        <field name="accounting_date"/>
+                        <field name="accounting_mapping_errors" nolabel="1"
+                               invisible="not accounting_mapping_errors"/>
                     </group>
                     <group string="Financial Breakdown" col="4">
                         <field name="gross_sales_amount"/>

@@ -89,6 +89,36 @@
                             <field name="active"/>
                         </group>
                     </group>
+                    <separator string="Amazon Settlement Accounting"
+                               groups="account.group_account_user,account.group_account_manager"/>
+                    <div class="alert alert-info" role="alert" colspan="2"
+                         groups="account.group_account_user,account.group_account_manager">
+                        Settlement entries are created in draft and use Amazon Clearing. They never post directly to a bank account. Unknown categories block creation.
+                    </div>
+                    <group groups="account.group_account_user,account.group_account_manager">
+                        <group string="Journal and Clearing">
+                            <field name="settlement_journal_id"/>
+                            <field name="amazon_clearing_account_id"/>
+                            <field name="amazon_suspense_account_id"/>
+                        </group>
+                        <group string="Sales, Refunds and Charges">
+                            <field name="amazon_sales_account_id"/>
+                            <field name="amazon_refund_account_id"/>
+                            <field name="amazon_shipping_account_id"/>
+                            <field name="amazon_tax_account_id"/>
+                            <field name="amazon_promotion_account_id"/>
+                        </group>
+                        <group string="Amazon Fees and Compensation">
+                            <field name="amazon_fee_account_id"/>
+                            <field name="amazon_fba_fee_account_id"/>
+                            <field name="amazon_reimbursement_account_id"/>
+                            <field name="amazon_adjustment_account_id"/>
+                        </group>
+                        <group string="Other Settlement Amounts">
+                            <field name="amazon_other_credit_account_id"/>
+                            <field name="amazon_other_debit_account_id"/>
+                        </group>
+                    </group>
                     <separator string="FBA Stock Structure"
                                groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager"/>
                     <group groups="sdlc_amazon_connector.group_amazon_manager,stock.group_stock_manager">
