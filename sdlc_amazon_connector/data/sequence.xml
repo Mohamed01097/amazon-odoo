@@ -6,6 +6,13 @@
         <field name="padding">4</field>
     </record>
 
+    <record id="seq_amazon_payout" model="ir.sequence">
+        <field name="name">Amazon Bank Payout</field>
+        <field name="code">amazon.payout</field>
+        <field name="prefix">PAYOUT/</field>
+        <field name="padding">5</field>
+    </record>
+
     <record id="seq_amazon_return_report" model="ir.sequence">
         <field name="name">Amazon Return Report</field>
         <field name="code">amazon.return.report</field>

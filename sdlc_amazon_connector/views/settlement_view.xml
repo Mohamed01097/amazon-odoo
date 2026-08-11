@@ -70,6 +70,10 @@
                             string="Create Accounting Entry" class="btn-primary"
                             invisible="account_move_id or accounting_state != 'ready'"
                             groups="account.group_account_user,account.group_account_manager"/>
+                    <button name="action_register_payout" type="object"
+                            string="Register Payout" class="btn-primary"
+                            invisible="accounting_state != 'posted' or payout_remaining_amount &lt;= 0"
+                            groups="account.group_account_user,account.group_account_manager"/>
                     <field name="reconciliation_state" widget="statusbar"
                            statusbar_visible="pending,matched,mismatch,incomplete,manual_review,error"/>
                 </header>
@@ -90,6 +94,12 @@
                                 invisible="not account_move_id"
                                 groups="account.group_account_user,account.group_account_manager">
                             <field name="account_move_id" widget="statinfo" string="Accounting Entry"/>
+                        </button>
+                        <button name="action_view_payouts" type="object"
+                                class="oe_stat_button" icon="fa-bank"
+                                invisible="not payout_count"
+                                groups="account.group_account_user,account.group_account_manager">
+                            <field name="payout_count" widget="statinfo" string="Payouts"/>
                         </button>
                     </div>
                     <widget name="web_ribbon" title="Incomplete" bg_color="text-bg-warning"
@@ -126,6 +136,16 @@
                         <field name="accounting_date"/>
                         <field name="accounting_mapping_errors" nolabel="1"
                                invisible="not accounting_mapping_errors"/>
+                    </group>
+                    <group string="Bank Payout &amp; Amazon Clearing"
+                           groups="account.group_account_user,account.group_account_manager">
+                        <field name="payout_state" widget="badge"/>
+                        <field name="expected_payout_amount"/>
+                        <field name="received_payout_amount"/>
+                        <field name="payout_remaining_amount"/>
+                        <field name="payout_difference_amount"/>
+                        <field name="clearing_remaining_amount"/>
+                        <field name="clearing_move_line_id"/>
                     </group>
                     <group string="Financial Breakdown" col="4">
                         <field name="gross_sales_amount"/>

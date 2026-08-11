@@ -73,7 +73,8 @@ FBA_CONFIGURATION_FIELDS = {
     *(definition['field'] for definition in FBA_LOCATION_DEFINITIONS.values()),
 }
 SETTLEMENT_ACCOUNTING_FIELDS = {
-    'settlement_journal_id', 'amazon_clearing_account_id',
+    'settlement_journal_id', 'amazon_payout_bank_journal_id',
+    'amazon_clearing_account_id',
     'amazon_sales_account_id', 'amazon_refund_account_id',
     'amazon_fee_account_id', 'amazon_fba_fee_account_id',
     'amazon_reimbursement_account_id', 'amazon_promotion_account_id',
@@ -278,6 +279,14 @@ class AmazonInstance(models.Model):
         'account.journal', string='Settlement Journal', check_company=True,
         ondelete='restrict', domain="[('company_id', '=', company_id), ('type', '=', 'general')]",
     )
+    amazon_payout_bank_journal_id = fields.Many2one(
+        'account.journal', string='Amazon Payout Bank Journal', check_company=True,
+        ondelete='restrict', domain="[('company_id', '=', company_id), ('type', '=', 'bank')]",
+        help=(
+            'Bank journal used only when an accounting user confirms an actual Amazon '
+            'receipt manually. Settlement deposit dates never create bank entries.'
+        ),
+    )
     amazon_clearing_account_id = fields.Many2one(
         'account.account', string='Amazon Clearing Account', check_company=True,
         ondelete='restrict', domain="[('company_ids', 'in', [company_id])]",
@@ -456,7 +465,8 @@ class AmazonInstance(models.Model):
     )
 
     @api.constrains(
-        'company_id', 'settlement_journal_id', 'amazon_clearing_account_id',
+        'company_id', 'settlement_journal_id', 'amazon_payout_bank_journal_id',
+        'amazon_clearing_account_id',
         'amazon_sales_account_id', 'amazon_refund_account_id',
         'amazon_fee_account_id', 'amazon_fba_fee_account_id',
         'amazon_reimbursement_account_id', 'amazon_promotion_account_id',
@@ -481,6 +491,13 @@ class AmazonInstance(models.Model):
             ):
                 raise ValidationError(_(
                     'The settlement journal must belong to the Amazon instance company.'
+                ))
+            if instance.amazon_payout_bank_journal_id and (
+                instance.amazon_payout_bank_journal_id.company_id != instance.company_id
+                or instance.amazon_payout_bank_journal_id.type != 'bank'
+            ):
+                raise ValidationError(_(
+                    'The Amazon payout journal must be a bank journal of the Amazon instance company.'
                 ))
             for field_name in account_fields:
                 account = instance[field_name]

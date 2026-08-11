@@ -1,0 +1,169 @@
+<odoo>
+    <record id="amazon_payout_action" model="ir.actions.act_window">
+        <field name="name">Amazon Payouts</field>
+        <field name="res_model">amazon.payout</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="amazon_payout_search" model="ir.ui.view">
+        <field name="name">amazon.payout.search</field>
+        <field name="model">amazon.payout</field>
+        <field name="arch" type="xml">
+            <search string="Amazon Payouts">
+                <field name="name"/>
+                <field name="source_reference"/>
+                <field name="external_payout_id"/>
+                <field name="instance_id"/>
+                <field name="bank_statement_line_id"/>
+                <group>
+                    <filter name="group_instance" string="Instance" context="{'group_by': 'instance_id'}"/>
+                    <filter name="group_source" string="Source" context="{'group_by': 'source'}"/>
+                    <filter name="group_currency" string="Currency" context="{'group_by': 'currency_id'}"/>
+                    <filter name="group_month" string="Payout Month" context="{'group_by': 'payout_date:month'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="amazon_payout_list" model="ir.ui.view">
+        <field name="name">amazon.payout.list</field>
+        <field name="model">amazon.payout</field>
+        <field name="arch" type="xml">
+            <list string="Amazon Payouts" delete="0"
+                  decoration-success="state == 'paid'"
+                  decoration-warning="state in ('draft_receipt', 'partially_paid', 'ambiguous')"
+                  decoration-danger="state in ('mismatch', 'error')">
+                <field name="payout_date"/>
+                <field name="name"/>
+                <field name="settlement_ids" widget="many2many_tags"/>
+                <field name="expected_payout_amount" sum="Expected"/>
+                <field name="actual_received_amount" sum="Received"/>
+                <field name="currency_id"/>
+                <field name="difference_amount" sum="Difference"/>
+                <field name="state" widget="badge"/>
+                <field name="source"/>
+                <field name="source_reference" optional="show"/>
+                <field name="instance_id" optional="show"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="amazon_payout_form" model="ir.ui.view">
+        <field name="name">amazon.payout.form</field>
+        <field name="model">amazon.payout</field>
+        <field name="arch" type="xml">
+            <form string="Amazon Payout" delete="0">
+                <header>
+                    <button name="action_create_draft_receipt" type="object"
+                            string="Create Draft Bank Receipt" class="btn-primary"
+                            invisible="source != 'manual_confirmation' or receipt_move_id"
+                            groups="account.group_account_user,account.group_account_manager"/>
+                    <button name="action_confirm_bank_transaction" type="object"
+                            string="Use Existing Bank Transaction" class="btn-primary"
+                            invisible="source != 'bank_transaction' or not bank_statement_line_id or receipt_move_id"
+                            groups="account.group_account_user,account.group_account_manager"/>
+                    <button name="action_reconcile_clearing" type="object"
+                            string="Reconcile Amazon Clearing" class="btn-primary"
+                            invisible="not receipt_move_id or receipt_move_state != 'posted' or reconciled_at"
+                            groups="account.group_account_user,account.group_account_manager"/>
+                    <field name="state" widget="statusbar"
+                           statusbar_visible="pending,matched,draft_receipt,partially_paid,paid,mismatch,ambiguous,error"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_view_settlements" type="object"
+                                class="oe_stat_button" icon="fa-list-alt"
+                                invisible="not settlement_count">
+                            <field name="settlement_count" widget="statinfo" string="Settlements"/>
+                        </button>
+                        <button name="action_view_receipt" type="object"
+                                class="oe_stat_button" icon="fa-bank"
+                                invisible="not receipt_move_id"
+                                groups="account.group_account_user,account.group_account_manager">
+                            <field name="receipt_move_id" widget="statinfo" string="Bank Receipt"/>
+                        </button>
+                        <button name="action_view_bank_transaction" type="object"
+                                class="oe_stat_button" icon="fa-exchange"
+                                invisible="not bank_statement_line_id"
+                                groups="account.group_account_user,account.group_account_manager">
+                            <field name="bank_statement_line_id" widget="statinfo" string="Bank Transaction"/>
+                        </button>
+                    </div>
+                    <div class="oe_title">
+                        <label for="name"/>
+                        <h1><field name="name"/></h1>
+                    </div>
+                    <div class="alert alert-info" role="alert" colspan="2">
+                        Amazon settlement dates and financial APIs are not proof of bank credit.
+                        Use an existing Odoo bank transaction or record the actual receipt reference;
+                        connector-created bank receipts always remain draft until reviewed.
+                    </div>
+                    <group>
+                        <group string="Payout Evidence">
+                            <field name="instance_id" readonly="receipt_move_id"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                            <field name="source" readonly="receipt_move_id"/>
+                            <field name="source_reference"
+                                   required="source == 'manual_confirmation'"
+                                   readonly="receipt_move_id"/>
+                            <field name="external_payout_id" readonly="receipt_move_id"/>
+                            <field name="payout_date" readonly="receipt_move_id"/>
+                            <field name="currency_id" readonly="receipt_move_id"/>
+                        </group>
+                        <group string="Bank">
+                            <field name="bank_journal_id" readonly="receipt_move_id"/>
+                            <field name="bank_statement_line_id"
+                                   invisible="source != 'bank_transaction'"
+                                   readonly="receipt_move_id"/>
+                            <field name="receipt_move_id" readonly="1"/>
+                            <field name="receipt_move_state" readonly="1"/>
+                            <field name="actual_received_amount" readonly="receipt_move_id"/>
+                            <field name="allocated_received_amount"/>
+                            <field name="unallocated_amount"/>
+                        </group>
+                    </group>
+                    <group string="Expected versus Actual" col="4">
+                        <field name="expected_payout_amount"/>
+                        <field name="actual_received_amount"/>
+                        <field name="difference_amount"/>
+                        <field name="matching_state" widget="badge"/>
+                    </group>
+                    <separator string="Settlement Allocations"/>
+                    <field name="allocation_ids" readonly="receipt_move_id">
+                        <list editable="bottom" delete="1">
+                            <field name="instance_id" column_invisible="True"/>
+                            <field name="settlement_id"
+                                   domain="[('instance_id', '=', parent.instance_id), ('account_move_id.state', '=', 'posted')]"/>
+                            <field name="currency_id"/>
+                            <field name="expected_amount" readonly="1"/>
+                            <field name="allocated_amount"/>
+                            <field name="reconciled_amount"/>
+                            <field name="remaining_amount"/>
+                            <field name="settlement_clearing_move_line_id" optional="hide"/>
+                            <field name="receipt_clearing_move_line_id" optional="hide"/>
+                        </list>
+                    </field>
+                    <notebook>
+                        <page string="Matching &amp; Audit">
+                            <group>
+                                <group string="Matching">
+                                    <field name="matching_state"/>
+                                    <field name="matching_explanation" nolabel="1"/>
+                                    <field name="error_message" nolabel="1" invisible="not error_message"/>
+                                </group>
+                                <group string="Audit">
+                                    <field name="confirmed_by_id"/>
+                                    <field name="confirmed_at"/>
+                                    <field name="reconciled_by_id"/>
+                                    <field name="reconciled_at"/>
+                                </group>
+                            </group>
+                            <field name="notes" placeholder="Evidence or investigation notes..."/>
+                        </page>
+                    </notebook>
+                </sheet>
+                <chatter/>
+            </form>
+        </field>
+    </record>
+</odoo>

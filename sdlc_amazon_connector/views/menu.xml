@@ -92,6 +92,7 @@
     <menuitem id="amazon_accounting_menu" parent="amazon_root" name="Accounting" sequence="50"/>
     <menuitem id="amazon_settlement_menu" parent="amazon_accounting_menu" name="Settlement Reports" action="amazon_settlement_action" sequence="10"/>
     <menuitem id="amazon_settlement_line_menu" parent="amazon_accounting_menu" name="Settlement Financial Lines" action="amazon_settlement_line_action" sequence="11"/>
+    <menuitem id="amazon_payout_menu" parent="amazon_accounting_menu" name="Amazon Payouts" action="amazon_payout_action" sequence="12"/>
     <menuitem id="amazon_vcs_menu" parent="amazon_accounting_menu" name="VCS Tax Reports" action="amazon_vcs_action" sequence="20"/>
 
     <!-- Reports -->

@@ -12,3 +12,4 @@ from . import test_fba_removal_disposal
 from . import test_fba_reimbursements
 from . import test_settlement_payout
 from . import test_settlement_accounting
+from . import test_payout_clearing
