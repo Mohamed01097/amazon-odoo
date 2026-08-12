@@ -132,7 +132,9 @@ class TestAmazonPhase7(TransactionCase):
         event = self.env['amazon.return.report.line'].import_row(self.report, self._return_row())
         event._classify_and_apply()
         self.assertEqual(event.operational_disposition, 'sellable')
-        self.assertEqual(event.stock_action_state, 'informational')
+        self.assertEqual(event.stock_action_state, 'manual_review')
+        self.assertTrue(event.manual_review_required)
+        self.assertFalse(event.linked_stock_move_id)
 
     def test_02_unsellable_customer_return(self):
         event = self.env['amazon.return.report.line'].import_row(

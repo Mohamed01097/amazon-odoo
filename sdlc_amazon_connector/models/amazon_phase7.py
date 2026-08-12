@@ -1537,7 +1537,9 @@ class AmazonPhase7Job(models.Model):
         help="Rejected report rows, without customer comments or credentials.",
     )
     amazon_request_id = fields.Char(copy=False, readonly=True)
-    responsible_user_id = fields.Many2one('res.users', default=lambda self: self.env.user, index=True)
+    responsible_user_id = fields.Many2one(
+        'res.users', string='Job Responsible User', default=lambda self: self.env.user, index=True,
+    )
 
     _retry_limits = models.Constraint(
         'CHECK(retry_count >= 0 AND max_retries BETWEEN 1 AND 100 AND batch_size BETWEEN 1 AND 1000)',

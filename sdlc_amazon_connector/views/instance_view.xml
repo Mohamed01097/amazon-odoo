@@ -27,25 +27,25 @@
         <field name="arch" type="xml">
             <form string="Amazon Instance">
                 <header>
-                    <button name="action_test_connection" type="object" string="Test Connection" class="btn-primary"/>
-                    <button name="action_full_sync" type="object" string="Full Sync" class="btn-warning" icon="fa-refresh"/>
-                    <button name="action_sync_products" type="object" string="Sync Products"/>
-                    <button name="action_open_product_setup_wizard" type="object" string="Product Setup" class="btn-secondary"/>
-                    <button name="action_link_products_by_sku" type="object" string="Link Existing Products by SKU"/>
-                    <button name="action_create_missing_odoo_products" type="object" string="Create Missing Odoo Products"/>
-                    <button name="action_import_orders" type="object" string="Import Orders"/>
-                    <button name="action_sync_order_statuses" type="object" string="Sync Order Statuses"/>
-                    <button name="action_export_stock" type="object" string="Export Stock"/>
-                    <button name="action_pull_stock" type="object" string="Reconcile FBA Inventory"/>
-                    <button name="action_update_prices" type="object" string="Push Prices"/>
-                    <button name="action_pull_prices" type="object" string="Pull Prices (Amazon→Odoo)"/>
-                    <button name="action_export_all_products" type="object" string="Export Products"/>
-                    <button name="action_import_settlement_reports" type="object" string="Import Settlements"/>
-                    <button name="action_check_canceled_orders" type="object" string="Check Cancellations"/>
-                    <button name="action_import_removal_orders" type="object" string="Import Removals"/>
-                    <button name="action_import_fba_customer_returns" type="object" string="Import FBA Returns"/>
-                    <button name="action_import_fba_inventory_adjustments" type="object" string="Import Adjustments"/>
-                    <button name="action_import_fba_reimbursements" type="object" string="Import Reimbursements"/>
+                    <button name="action_test_connection" type="object" string="Test Connection" class="btn-primary" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_full_sync" type="object" string="Full Sync" class="btn-warning" icon="fa-refresh" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_sync_products" type="object" string="Sync Products" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_open_product_setup_wizard" type="object" string="Product Setup" class="btn-secondary" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_link_products_by_sku" type="object" string="Link Existing Products by SKU" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_create_missing_odoo_products" type="object" string="Create Missing Odoo Products" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_import_orders" type="object" string="Import Orders" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_sync_order_statuses" type="object" string="Sync Order Statuses" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_export_stock" type="object" string="Export Stock" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_pull_stock" type="object" string="Reconcile FBA Inventory" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_update_prices" type="object" string="Push Prices" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_pull_prices" type="object" string="Pull Prices (Amazon→Odoo)" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_export_all_products" type="object" string="Export Products" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_import_settlement_reports" type="object" string="Import Settlements" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_check_canceled_orders" type="object" string="Check Cancellations" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_import_removal_orders" type="object" string="Import Removals" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_import_fba_customer_returns" type="object" string="Import FBA Returns" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_import_fba_inventory_adjustments" type="object" string="Import Adjustments" groups="sdlc_amazon_connector.group_amazon_manager"/>
+                    <button name="action_import_fba_reimbursements" type="object" string="Import Reimbursements" groups="sdlc_amazon_connector.group_amazon_manager"/>
                 </header>
                 <sheet>
                     <div class="oe_button_box" name="button_box">
@@ -66,12 +66,12 @@
                         </button>
                     </div>
                     <group>
-                        <group string="Credentials">
+                        <group string="Credentials" groups="sdlc_amazon_connector.group_amazon_technical_admin">
                             <field name="name"/>
                             <field name="seller_id"/>
                             <field name="marketplace_id"/>
                             <field name="region"/>
-                            <field name="refresh_token"/>
+                            <field name="refresh_token" password="True"/>
                             <field name="client_id"/>
                             <field name="client_secret" password="True"/>
                             <field name="aws_access_key"/>

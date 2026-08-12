@@ -512,6 +512,19 @@ class AmazonInstance(models.Model):
     )
 
     @api.model
+    def _check_amazon_manager_access(self):
+        if (
+            self.env.su
+            or self.env.user.has_group('sdlc_amazon_connector.group_amazon_manager')
+            or self.env.user.has_group('base.group_system')
+        ):
+            return
+        raise AccessError(_(
+            "Only an Amazon Connector Manager or Technical Administrator can run "
+            "Amazon synchronization operations."
+        ))
+
+    @api.model
     def _check_fba_configuration_access(self):
         if (
             self.env.su
@@ -961,6 +974,7 @@ class AmazonInstance(models.Model):
     def _check_required_fields(self, extra=None):
         """Validate that required API fields are present."""
         self.ensure_one()
+        secure_instance = self.sudo()
         required = {
             'refresh_token': 'Refresh Token',
             'client_id': 'Client ID',
@@ -970,15 +984,19 @@ class AmazonInstance(models.Model):
         }
         if extra:
             required.update(extra)
-        missing = [label for f, label in required.items() if not (self[f] or '').strip()]
+        missing = [
+            label for field_name, label in required.items()
+            if not (secure_instance[field_name] or '').strip()
+        ]
         if missing:
             raise UserError("Missing required fields: %s" % ", ".join(missing))
 
     def _get_access_token_or_raise(self):
         self.ensure_one()
+        self._check_amazon_manager_access()
         api = AmazonAPI()
         try:
-            access_token = api.get_access_token(self)
+            access_token = api.get_access_token(self.sudo())
         except requests.exceptions.ConnectionError as exc:
             raise UserError("Unable to reach Amazon OAuth endpoint.") from exc
         except requests.exceptions.Timeout as exc:
@@ -1028,16 +1046,18 @@ class AmazonInstance(models.Model):
 
     def action_test_connection(self):
         self.ensure_one()
+        self._check_amazon_manager_access()
         self._auto_fix_region()
+        secure_instance = self.sudo()
         sanitized = {}
         for f in ("seller_id", "marketplace_id", "refresh_token", "client_id", "client_secret", "aws_access_key", "aws_secret_key"):
-            value = self[f]
+            value = secure_instance[f]
             if isinstance(value, str):
                 stripped = value.strip()
                 if stripped != value:
                     sanitized[f] = stripped
         if sanitized:
-            self.write(sanitized)
+            secure_instance.write(sanitized)
 
         self._check_required_fields()
         self._get_access_token_or_raise()

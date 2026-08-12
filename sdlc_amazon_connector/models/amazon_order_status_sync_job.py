@@ -226,8 +226,8 @@ class AmazonOrderStatusSyncJob(models.Model):
             instance._check_required_fields()
             access_token = instance._get_access_token_or_raise()
 
-            last_updated_after = False
-            last_updated_before = False
+            last_updated_after = _datetime_to_spapi(self.date_from)
+            last_updated_before = _datetime_to_spapi(self.effective_date_to)
             if not self.next_token:
                 effective_to = self._get_amazon_safe_before_dt(self.date_to)
                 requested_to = amazon_to_utc_naive(self.date_to)
@@ -255,6 +255,7 @@ class AmazonOrderStatusSyncJob(models.Model):
                 fulfillment_channels=self.fulfillment_channel or None,
                 next_token=self.next_token or None,
                 max_results_per_page=self.batch_size or 10,
+                included_data=('FULFILLMENT',),
             )
         except requests.exceptions.HTTPError as exc:
             if self._is_rate_limit_error(exc):

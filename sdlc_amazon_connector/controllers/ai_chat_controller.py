@@ -13,7 +13,7 @@ _logger = logging.getLogger(__name__)
 
 class AmazonAIChatController(http.Controller):
 
-    @http.route('/amazon/ai/chat', type='json', auth='user', methods=['POST'])
+    @http.route('/amazon/ai/chat', type='jsonrpc', auth='user', methods=['POST'])
     def ai_chat(self, message='', config_id=None, chat_id=None):
         """
         Send a message to the Amazon AI assistant.
@@ -71,7 +71,7 @@ class AmazonAIChatController(http.Controller):
             'suggestions': suggestions,
         }
 
-    @http.route('/amazon/ai/chat/history', type='json', auth='user', methods=['POST'])
+    @http.route('/amazon/ai/chat/history', type='jsonrpc', auth='user', methods=['POST'])
     def ai_chat_history(self, chat_id=None):
         """Get chat history for an existing conversation."""
         if not chat_id:
@@ -87,7 +87,7 @@ class AmazonAIChatController(http.Controller):
             'history': chat._get_history(),
         }
 
-    @http.route('/amazon/ai/dashboard-stats', type='json', auth='user', methods=['POST'])
+    @http.route('/amazon/ai/dashboard-stats', type='jsonrpc', auth='user', methods=['POST'])
     def dashboard_stats(self, instance_id=None):
         """Get real-time dashboard stats for the Amazon connector."""
         env = request.env

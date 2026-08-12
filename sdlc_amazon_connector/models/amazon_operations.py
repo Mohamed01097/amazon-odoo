@@ -1613,7 +1613,7 @@ class AmazonInventoryReconciliationRunOperations(models.Model):
 
     last_activity_at = fields.Datetime(default=fields.Datetime.now, index=True)
     responsible_user_id = fields.Many2one('res.users', default=lambda self: self.env.user, index=True)
-    amazon_request_id = fields.Char(index=True, copy=False)
+    amazon_request_id = fields.Char('Latest Amazon Request ID', index=True, copy=False)
     started_at = fields.Datetime(index=True)
     finished_at = fields.Datetime(index=True)
 

@@ -189,7 +189,7 @@ class AmazonOrderImportJob(models.Model):
             access_token = instance._get_access_token_or_raise()
 
             created_after = _datetime_to_spapi(self.date_from)
-            created_before = False
+            created_before = _datetime_to_spapi(self.effective_date_to)
             if not self.next_token:
                 created_before_dt = self._get_amazon_safe_before_dt(self.date_to)
                 created_before = _datetime_to_spapi(created_before_dt)
@@ -319,17 +319,22 @@ class AmazonOrderImportJob(models.Model):
 
         should_fetch_items = created or not order_rec.order_line_ids
         if should_fetch_items:
-            time.sleep(random.uniform(0.15, 0.45))
-            try:
-                items_data = api.get_order_items(instance, access_token, amazon_order_id)
-            except requests.exceptions.HTTPError as exc:
-                if self._is_rate_limit_error(exc):
-                    raise AmazonRateLimitDeferred(
-                        AmazonAPI.format_exception(exc),
-                        retry_after_seconds=self._retry_after_seconds(exc),
-                    ) from exc
-                raise
-            self._upsert_order_items(order_rec, items_data.get('payload', {}).get('OrderItems', []) or [])
+            embedded_items = order_data.get('OrderItems')
+            if isinstance(embedded_items, list):
+                self._upsert_order_items(order_rec, embedded_items)
+            else:
+                # Compatibility for an already-running legacy job payload.
+                time.sleep(random.uniform(0.15, 0.45))
+                try:
+                    items_data = api.get_order_items(instance, access_token, amazon_order_id)
+                except requests.exceptions.HTTPError as exc:
+                    if self._is_rate_limit_error(exc):
+                        raise AmazonRateLimitDeferred(
+                            AmazonAPI.format_exception(exc),
+                            retry_after_seconds=self._retry_after_seconds(exc),
+                        ) from exc
+                    raise
+                self._upsert_order_items(order_rec, items_data.get('payload', {}).get('OrderItems', []) or [])
 
         sale_order_created = sale_order_skipped = False
         if not order_rec.sale_order_id and order_rec.order_line_ids:

@@ -56,13 +56,13 @@ class AmazonProduct(models.Model):
     has_variations = fields.Boolean('This product has variations')
     var_team_name = fields.Boolean('Team Name')
     var_athlete = fields.Boolean('Athlete')
-    var_color = fields.Boolean('Color')
-    var_number_of_items = fields.Boolean('Number of Items')
-    var_footwear_size = fields.Boolean('Footwear Size')
-    var_size = fields.Boolean('Size')
-    var_material = fields.Boolean('Material')
-    var_pattern = fields.Boolean('Pattern')
-    var_style = fields.Boolean('Style')
+    var_color = fields.Boolean('Variation: Color')
+    var_number_of_items = fields.Boolean('Variation: Number of Items')
+    var_footwear_size = fields.Boolean('Variation: Footwear Size')
+    var_size = fields.Boolean('Variation: Size')
+    var_material = fields.Boolean('Variation: Material')
+    var_pattern = fields.Boolean('Variation: Pattern')
+    var_style = fields.Boolean('Variation: Style')
     variation_theme = fields.Char('Variation Theme', compute='_compute_variation_theme', store=True, readonly=False)
     is_parent = fields.Boolean('Is Parent Listing', default=False)
     parent_asin = fields.Char('Parent ASIN')
@@ -431,9 +431,10 @@ class AmazonProduct(models.Model):
     odoo_stock = fields.Float('Odoo Stock', compute='_compute_odoo_fields')
     odoo_price = fields.Float('Odoo Price', compute='_compute_odoo_fields')
 
-    _sql_constraints = [
-        ('unique_sku_instance', 'unique(sku, instance_id)', 'SKU must be unique per Amazon instance.'),
-    ]
+    _unique_sku_instance = models.Constraint(
+        'UNIQUE(sku, instance_id)',
+        'SKU must be unique per Amazon instance.',
+    )
 
     def _compute_odoo_fields(self):
         for rec in self:

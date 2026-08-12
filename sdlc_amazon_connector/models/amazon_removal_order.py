@@ -37,7 +37,7 @@ class AmazonRemovalOrder(models.Model):
     removal_order_id = fields.Char('Amazon Removal Order ID', copy=False, index=True, tracking=True)
     amazon_removal_order_id = fields.Char(
         related='removal_order_id', readonly=False, store=True,
-        string='Amazon Removal Order ID',
+        string='Legacy Amazon Removal Order ID',
     )
     removal_type = fields.Selection([
         ('return_to_address', 'Return to Address'),

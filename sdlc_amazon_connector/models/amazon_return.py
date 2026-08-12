@@ -128,10 +128,10 @@ class AmazonReturnReportLine(models.Model):
         related='instance_id.marketplace_id', store=True, readonly=True, index=True,
     )
     event_key = fields.Char(required=True, copy=False, index=True, readonly=True)
-    amazon_order_id = fields.Char(index=True, tracking=True)
+    amazon_order_id = fields.Char('Amazon Order ID', index=True, tracking=True)
     amazon_order_item_id = fields.Char(index=True)
     order_id = fields.Many2one(
-        'amazon.sale.order', string='Amazon Order',
+        'amazon.sale.order', string='Amazon Order Record',
         ondelete='set null', index=True,
     )
     amazon_order_line_id = fields.Many2one(

@@ -40,6 +40,153 @@
         <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
     </record>
 
+    <record id="rule_amazon_product_company" model="ir.rule">
+        <field name="name">Amazon products by company</field>
+        <field name="model_id" ref="model_amazon_product"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_product_bullet_company" model="ir.rule">
+        <field name="name">Amazon product bullets by company</field>
+        <field name="model_id" ref="model_amazon_product_bullet_point"/>
+        <field name="domain_force">[('product_id.instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_product_image_company" model="ir.rule">
+        <field name="name">Amazon product images by company</field>
+        <field name="model_id" ref="model_amazon_product_image"/>
+        <field name="domain_force">[('product_id.instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_sale_order_company" model="ir.rule">
+        <field name="name">Amazon orders by company</field>
+        <field name="model_id" ref="model_amazon_sale_order"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_sale_order_line_company" model="ir.rule">
+        <field name="name">Amazon order lines by company</field>
+        <field name="model_id" ref="model_amazon_sale_order_line"/>
+        <field name="domain_force">[('order_id.instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+
+    <record id="rule_amazon_legacy_inventory_report_company" model="ir.rule">
+        <field name="name">Amazon legacy inventory reports by company</field>
+        <field name="model_id" ref="model_amazon_fba_inventory_report"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_legacy_inventory_line_company" model="ir.rule">
+        <field name="name">Amazon legacy inventory report lines by company</field>
+        <field name="model_id" ref="model_amazon_fba_inventory_report_line"/>
+        <field name="domain_force">[('report_id.instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_rating_report_company" model="ir.rule">
+        <field name="name">Amazon rating reports by company</field>
+        <field name="model_id" ref="model_amazon_rating_report"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_rating_line_company" model="ir.rule">
+        <field name="name">Amazon rating lines by company</field>
+        <field name="model_id" ref="model_amazon_rating_report_line"/>
+        <field name="domain_force">[('report_id.instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_vcs_report_company" model="ir.rule">
+        <field name="name">Amazon VCS reports by company</field>
+        <field name="model_id" ref="model_amazon_vcs_tax_report"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_vcs_line_company" model="ir.rule">
+        <field name="name">Amazon VCS report lines by company</field>
+        <field name="model_id" ref="model_amazon_vcs_tax_report_line"/>
+        <field name="domain_force">[('report_id.instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_outbound_order_company" model="ir.rule">
+        <field name="name">Amazon outbound orders by company</field>
+        <field name="model_id" ref="model_amazon_outbound_order"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_outbound_line_company" model="ir.rule">
+        <field name="name">Amazon outbound order lines by company</field>
+        <field name="model_id" ref="model_amazon_outbound_order_line"/>
+        <field name="domain_force">[('order_id.instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+
+    <record id="rule_amazon_ai_pricing_company" model="ir.rule">
+        <field name="name">Amazon AI pricing by company</field>
+        <field name="model_id" ref="model_amazon_ai_pricing"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_ai_listing_company" model="ir.rule">
+        <field name="name">Amazon AI listings by company</field>
+        <field name="model_id" ref="model_amazon_ai_listing"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_demand_forecast_company" model="ir.rule">
+        <field name="name">Amazon forecasts by company</field>
+        <field name="model_id" ref="model_amazon_demand_forecast"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_review_analysis_company" model="ir.rule">
+        <field name="name">Amazon review analysis by company</field>
+        <field name="model_id" ref="model_amazon_review_analysis"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_ai_chat_company" model="ir.rule">
+        <field name="name">Amazon AI chats by company</field>
+        <field name="model_id" ref="model_amazon_ai_chat"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_product_health_company" model="ir.rule">
+        <field name="name">Amazon product health by company</field>
+        <field name="model_id" ref="model_amazon_product_health"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_profit_calculator_company" model="ir.rule">
+        <field name="name">Amazon profit calculations by company</field>
+        <field name="model_id" ref="model_amazon_profit_calculator"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_competitor_monitor_company" model="ir.rule">
+        <field name="name">Amazon competitor monitoring by company</field>
+        <field name="model_id" ref="model_amazon_competitor_monitor"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_keyword_tracker_company" model="ir.rule">
+        <field name="name">Amazon keyword tracking by company</field>
+        <field name="model_id" ref="model_amazon_keyword_tracker"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_return_analyzer_company" model="ir.rule">
+        <field name="name">Amazon return analysis by company</field>
+        <field name="model_id" ref="model_amazon_return_analyzer"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+    <record id="rule_amazon_sales_insights_company" model="ir.rule">
+        <field name="name">Amazon sales insights by company</field>
+        <field name="model_id" ref="model_amazon_sales_insights"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+
     <record id="rule_amazon_sync_log_company" model="ir.rule">
         <field name="name">Amazon sync logs by company</field>
         <field name="model_id" ref="model_amazon_sync_log"/>

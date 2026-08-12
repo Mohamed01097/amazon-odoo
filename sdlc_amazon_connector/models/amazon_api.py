@@ -34,6 +34,24 @@ REGION_ENDPOINTS = {
     'fe': 'https://sellingpartnerapi-fe.amazon.com',
 }
 
+ORDERS_API_VERSION = '2026-01-01'
+ORDERS_INCLUDED_DATA = ('RECIPIENT', 'FULFILLMENT', 'PROCEEDS')
+ORDERS_STATUS_TO_2026 = {
+    'PendingAvailability': 'PENDING_AVAILABILITY',
+    'Pending': 'PENDING',
+    'Unshipped': 'UNSHIPPED',
+    'PartiallyShipped': 'PARTIALLY_SHIPPED',
+    'Shipped': 'SHIPPED',
+    'InvoiceUnconfirmed': 'INVOICE_UNCONFIRMED',
+    'Canceled': 'CANCELLED',
+    'Cancelled': 'CANCELLED',
+    'Unfulfillable': 'UNFULFILLABLE',
+}
+ORDERS_STATUS_FROM_2026 = {value: key for key, value in ORDERS_STATUS_TO_2026.items()}
+ORDERS_STATUS_FROM_2026['CANCELLED'] = 'Canceled'
+ORDERS_FULFILLED_BY_TO_2026 = {'MFN': 'MERCHANT', 'AFN': 'AMAZON'}
+ORDERS_FULFILLED_BY_FROM_2026 = {value: key for key, value in ORDERS_FULFILLED_BY_TO_2026.items()}
+
 
 def amazon_to_utc_naive(value):
     """Normalize Odoo/Amazon datetime values to UTC-naive datetimes."""
@@ -762,49 +780,176 @@ class AmazonAPI():
     # Orders API
     # ══════════════════════════════════════════════════
 
+    @staticmethod
+    def _orders_list_param(value):
+        if not value:
+            return []
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(',') if part.strip()]
+        return list(value)
+
+    @staticmethod
+    def _orders_money_to_v0(value):
+        value = value if isinstance(value, dict) else {}
+        return {
+            'Amount': value.get('amount'),
+            'CurrencyCode': value.get('currencyCode'),
+        }
+
+    @classmethod
+    def _normalize_order_item_2026(cls, item):
+        """Map the current Orders API item into the connector's stable schema."""
+        item = item if isinstance(item, dict) else {}
+        product = item.get('product') or {}
+        proceeds = item.get('proceeds') or {}
+        breakdowns = proceeds.get('breakdowns') or []
+
+        def subtotal(kind):
+            match = next(
+                (entry for entry in breakdowns if (entry.get('type') or '').upper() == kind),
+                {},
+            )
+            return cls._orders_money_to_v0(match.get('subtotal'))
+
+        def detailed(kind, subtype):
+            match = next(
+                (entry for entry in breakdowns if (entry.get('type') or '').upper() == kind),
+                {},
+            )
+            detail = next(
+                (
+                    entry for entry in (match.get('detailedBreakdowns') or [])
+                    if (entry.get('subtype') or '').upper() == subtype
+                ),
+                {},
+            )
+            return cls._orders_money_to_v0(detail.get('value'))
+
+        return {
+            'OrderItemId': item.get('orderItemId'),
+            'SellerSKU': product.get('sellerSku'),
+            'ASIN': product.get('asin'),
+            'Title': product.get('title'),
+            'QuantityOrdered': item.get('quantityOrdered', 0),
+            'ItemPrice': subtotal('ITEM'),
+            'ShippingPrice': subtotal('SHIPPING'),
+            'ItemTax': detailed('TAX', 'ITEM'),
+            'PromotionDiscount': subtotal('DISCOUNT'),
+        }
+
+    @classmethod
+    def _normalize_order_2026(cls, order):
+        """Translate v2026-01-01 fields once so existing Odoo logic stays stable."""
+        order = order if isinstance(order, dict) else {}
+        fulfillment = order.get('fulfillment') or {}
+        sales_channel = order.get('salesChannel') or {}
+        proceeds = order.get('proceeds') or {}
+        programs = set(order.get('programs') or [])
+        recipient = order.get('recipient') or {}
+        address = recipient.get('deliveryAddress') or {}
+        status = fulfillment.get('fulfillmentStatus')
+        fulfilled_by = fulfillment.get('fulfilledBy')
+        return {
+            'AmazonOrderId': order.get('orderId'),
+            'PurchaseDate': order.get('createdTime'),
+            'LastUpdateDate': order.get('lastUpdatedTime'),
+            'OrderStatus': ORDERS_STATUS_FROM_2026.get(status, status),
+            'FulfillmentChannel': ORDERS_FULFILLED_BY_FROM_2026.get(fulfilled_by, fulfilled_by),
+            'OrderType': 'Preorder' if 'PREORDER' in programs else 'StandardOrder',
+            'SalesChannel': sales_channel.get('marketplaceName') or sales_channel.get('channelName'),
+            'IsPrime': 'PRIME' in programs,
+            'IsBusinessOrder': 'AMAZON_BUSINESS' in programs,
+            'OrderTotal': cls._orders_money_to_v0(proceeds.get('grandTotal')),
+            'ShipServiceLevel': fulfillment.get('fulfillmentServiceLevel'),
+            'ShippingAddress': {
+                'Name': address.get('name'),
+                'AddressLine1': address.get('addressLine1'),
+                'AddressLine2': address.get('addressLine2'),
+                'City': address.get('city'),
+                'StateOrRegion': address.get('stateOrRegion'),
+                'PostalCode': address.get('postalCode'),
+                'CountryCode': address.get('countryCode'),
+            } if address else {},
+            # searchOrders includes orderItems. Keeping them on the normalized
+            # order removes the legacy per-order getOrderItems request.
+            'OrderItems': [cls._normalize_order_item_2026(item) for item in order.get('orderItems') or []],
+        }
+
+    @classmethod
+    def _normalize_search_orders_2026(cls, data, request_id=''):
+        data = data if isinstance(data, dict) else {}
+        result = {
+            'payload': {
+                'Orders': [cls._normalize_order_2026(order) for order in data.get('orders') or []],
+                'NextToken': (data.get('pagination') or {}).get('nextToken'),
+            },
+        }
+        if request_id:
+            result['_amazon_request_id'] = request_id
+        return result
+
     def get_orders(self, instance, access_token, created_after=None, created_before=None,
                    last_updated_after=None, last_updated_before=None, order_statuses=None,
-                   fulfillment_channels=None, next_token=None, max_results_per_page=None):
+                   fulfillment_channels=None, next_token=None, max_results_per_page=None,
+                   included_data=None):
         endpoint = self._get_endpoint(instance)
-        url = f"{endpoint}/orders/v0/orders"
+        url = f"{endpoint}/orders/{ORDERS_API_VERSION}/orders"
+        if bool(created_after) == bool(last_updated_after):
+            raise ValueError("Orders API requires exactly one of created_after or last_updated_after.")
+        # OpenAPI v2 array query parameters use CSV encoding.
+        params = {'marketplaceIds': instance.marketplace_id}
+        if created_after:
+            params['createdAfter'] = created_after
+        if created_before:
+            params['createdBefore'] = amazon_safe_before_iso(created_before)
+        if last_updated_after:
+            params['lastUpdatedAfter'] = last_updated_after
+        if last_updated_before:
+            params['lastUpdatedBefore'] = amazon_safe_before_iso(last_updated_before)
+        statuses = self._orders_list_param(order_statuses)
+        if statuses:
+            params['fulfillmentStatuses'] = ','.join(
+                ORDERS_STATUS_TO_2026.get(status, status) for status in statuses
+            )
+        channels = self._orders_list_param(fulfillment_channels)
+        if channels:
+            params['fulfilledBy'] = ','.join(
+                ORDERS_FULFILLED_BY_TO_2026.get(channel, channel) for channel in channels
+            )
+        if max_results_per_page:
+            params['maxResultsPerPage'] = max_results_per_page
         if next_token:
-            params = {"NextToken": next_token}
-        else:
-            params = {"MarketplaceIds": instance.marketplace_id}
-            if created_after:
-                params["CreatedAfter"] = created_after
-            if created_before:
-                params["CreatedBefore"] = amazon_safe_before_iso(created_before)
-            if last_updated_after:
-                params["LastUpdatedAfter"] = last_updated_after
-            if last_updated_before:
-                params["LastUpdatedBefore"] = amazon_safe_before_iso(last_updated_before)
-            if order_statuses:
-                params["OrderStatuses"] = order_statuses
-            if fulfillment_channels:
-                params["FulfillmentChannels"] = fulfillment_channels
-            if max_results_per_page:
-                params["MaxResultsPerPage"] = max_results_per_page
+            params['paginationToken'] = next_token
+        params['includedData'] = ','.join(included_data or ORDERS_INCLUDED_DATA)
         resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
-        return resp.json()
+        return self._normalize_search_orders_2026(
+            resp.json(), request_id=self._amazon_request_id(resp),
+        )
 
     def get_order(self, instance, access_token, order_id):
         endpoint = self._get_endpoint(instance)
-        url = f"{endpoint}/orders/v0/orders/{order_id}"
-        resp = self._amazon_request(instance, access_token, 'GET', url)
-        return resp.json()
+        url = f"{endpoint}/orders/{ORDERS_API_VERSION}/orders/{quote(str(order_id), safe='')}"
+        resp = self._amazon_request(
+            instance, access_token, 'GET', url,
+            params={'includedData': ','.join(ORDERS_INCLUDED_DATA)},
+        )
+        response_data = resp.json()
+        data = response_data if isinstance(response_data, dict) else {}
+        result = {'payload': self._normalize_order_2026(data.get('order') or {})}
+        request_id = self._amazon_request_id(resp)
+        if request_id:
+            result['_amazon_request_id'] = request_id
+        return result
 
     def get_order_items(self, instance, access_token, order_id):
-        endpoint = self._get_endpoint(instance)
-        url = f"{endpoint}/orders/v0/orders/{order_id}/orderItems"
-        resp = self._amazon_request(instance, access_token, 'GET', url)
-        return resp.json()
+        # v2026-01-01 removed getOrderItems; items are always embedded in getOrder.
+        order = self.get_order(instance, access_token, order_id)
+        return {'payload': {'OrderItems': (order.get('payload') or {}).get('OrderItems') or []}}
 
     def get_order_address(self, instance, access_token, order_id):
-        endpoint = self._get_endpoint(instance)
-        url = f"{endpoint}/orders/v0/orders/{order_id}/address"
-        resp = self._amazon_request(instance, access_token, 'GET', url)
-        return resp.json()
+        # v2026-01-01 removed getOrderAddress; RECIPIENT is requested by getOrder.
+        order = self.get_order(instance, access_token, order_id)
+        return {'payload': {'ShippingAddress': (order.get('payload') or {}).get('ShippingAddress') or {}}}
 
     # ══════════════════════════════════════════════════
     # Feeds API (for price update, stock update, shipping confirm, invoice upload)

@@ -2,9 +2,15 @@ id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_amazon_instance_user,amazon.instance user,model_amazon_instance,sdlc_amazon_connector.group_amazon_user,1,0,0,0
 access_amazon_instance_manager,amazon.instance manager,model_amazon_instance,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
 access_amazon_instance_technical,amazon.instance technical,model_amazon_instance,sdlc_amazon_connector.group_amazon_technical_admin,1,1,1,1
-access_amazon_product,amazon.product,model_amazon_product,,1,1,1,1
-access_amazon_sale_order,amazon.sale.order,model_amazon_sale_order,,1,1,1,1
-access_amazon_sale_order_line,amazon.sale.order.line,model_amazon_sale_order_line,,1,1,1,1
+access_amazon_product_user,amazon.product user,model_amazon_product,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_product_manager,amazon.product manager,model_amazon_product,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
+access_amazon_product_technical,amazon.product technical,model_amazon_product,sdlc_amazon_connector.group_amazon_technical_admin,1,1,1,1
+access_amazon_sale_order_user,amazon.sale.order user,model_amazon_sale_order,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_sale_order_manager,amazon.sale.order manager,model_amazon_sale_order,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
+access_amazon_sale_order_technical,amazon.sale.order technical,model_amazon_sale_order,sdlc_amazon_connector.group_amazon_technical_admin,1,1,1,1
+access_amazon_sale_order_line_user,amazon.sale.order.line user,model_amazon_sale_order_line,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_sale_order_line_manager,amazon.sale.order.line manager,model_amazon_sale_order_line,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
+access_amazon_sale_order_line_technical,amazon.sale.order.line technical,model_amazon_sale_order_line,sdlc_amazon_connector.group_amazon_technical_admin,1,1,1,1
 access_amazon_order_import_job_user,amazon.order.import.job user,model_amazon_order_import_job,sdlc_amazon_connector.group_amazon_user,1,0,0,0
 access_amazon_order_import_job_manager,amazon.order.import.job manager,model_amazon_order_import_job,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
 access_amazon_order_status_sync_job_user,amazon.order.status.sync.job user,model_amazon_order_status_sync_job,sdlc_amazon_connector.group_amazon_user,1,0,0,0
@@ -75,27 +81,37 @@ access_amazon_inventory_reconciliation_run_user,amazon.inventory.reconciliation.
 access_amazon_inventory_reconciliation_run_manager,amazon.inventory.reconciliation.run manager,model_amazon_inventory_reconciliation_run,sdlc_amazon_connector.group_amazon_manager,1,1,1,1
 access_amazon_inventory_reconciliation_user,amazon.inventory.reconciliation user,model_amazon_inventory_reconciliation,sdlc_amazon_connector.group_amazon_user,1,0,0,0
 access_amazon_inventory_reconciliation_manager,amazon.inventory.reconciliation manager,model_amazon_inventory_reconciliation,sdlc_amazon_connector.group_amazon_manager,1,1,1,1
-access_amazon_fba_inventory_report,amazon.fba.inventory.report,model_amazon_fba_inventory_report,,1,1,1,1
-access_amazon_fba_inventory_report_line,amazon.fba.inventory.report.line,model_amazon_fba_inventory_report_line,,1,1,1,1
-access_amazon_rating_report,amazon.rating.report,model_amazon_rating_report,,1,1,1,1
-access_amazon_rating_report_line,amazon.rating.report.line,model_amazon_rating_report_line,,1,1,1,1
-access_amazon_vcs_tax_report,amazon.vcs.tax.report,model_amazon_vcs_tax_report,,1,1,1,1
-access_amazon_vcs_tax_report_line,amazon.vcs.tax.report.line,model_amazon_vcs_tax_report_line,,1,1,1,1
-access_amazon_outbound_order,amazon.outbound.order,model_amazon_outbound_order,,1,1,1,1
-access_amazon_outbound_order_line,amazon.outbound.order.line,model_amazon_outbound_order_line,,1,1,1,1
-access_amazon_product_import_wizard,amazon.product.import.wizard,model_amazon_product_import_wizard,,1,1,1,1
-access_amazon_product_setup_wizard,amazon.product.setup.wizard,model_amazon_product_setup_wizard,,1,1,1,1
-access_amazon_product_bullet_point,amazon.product.bullet.point,model_amazon_product_bullet_point,,1,1,1,1
-access_amazon_product_image,amazon.product.image,model_amazon_product_image,,1,1,1,1
+access_amazon_fba_inventory_report_user,amazon.fba.inventory.report user,model_amazon_fba_inventory_report,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_fba_inventory_report_manager,amazon.fba.inventory.report manager,model_amazon_fba_inventory_report,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
+access_amazon_fba_inventory_report_line_user,amazon.fba.inventory.report.line user,model_amazon_fba_inventory_report_line,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_fba_inventory_report_line_manager,amazon.fba.inventory.report.line manager,model_amazon_fba_inventory_report_line,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
+access_amazon_rating_report_user,amazon.rating.report user,model_amazon_rating_report,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_rating_report_manager,amazon.rating.report manager,model_amazon_rating_report,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
+access_amazon_rating_report_line_user,amazon.rating.report.line user,model_amazon_rating_report_line,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_rating_report_line_manager,amazon.rating.report.line manager,model_amazon_rating_report_line,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
+access_amazon_vcs_tax_report_user,amazon.vcs.tax.report user,model_amazon_vcs_tax_report,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_vcs_tax_report_manager,amazon.vcs.tax.report manager,model_amazon_vcs_tax_report,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
+access_amazon_vcs_tax_report_line_user,amazon.vcs.tax.report.line user,model_amazon_vcs_tax_report_line,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_vcs_tax_report_line_manager,amazon.vcs.tax.report.line manager,model_amazon_vcs_tax_report_line,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
+access_amazon_outbound_order_user,amazon.outbound.order user,model_amazon_outbound_order,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_outbound_order_manager,amazon.outbound.order manager,model_amazon_outbound_order,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
+access_amazon_outbound_order_line_user,amazon.outbound.order.line user,model_amazon_outbound_order_line,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_outbound_order_line_manager,amazon.outbound.order.line manager,model_amazon_outbound_order_line,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
+access_amazon_product_import_wizard_manager,amazon.product.import.wizard manager,model_amazon_product_import_wizard,sdlc_amazon_connector.group_amazon_manager,1,1,1,1
+access_amazon_product_setup_wizard_manager,amazon.product.setup.wizard manager,model_amazon_product_setup_wizard,sdlc_amazon_connector.group_amazon_manager,1,1,1,1
+access_amazon_product_bullet_point_user,amazon.product.bullet.point user,model_amazon_product_bullet_point,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_product_bullet_point_manager,amazon.product.bullet.point manager,model_amazon_product_bullet_point,sdlc_amazon_connector.group_amazon_manager,1,1,1,1
+access_amazon_product_image_user,amazon.product.image user,model_amazon_product_image,sdlc_amazon_connector.group_amazon_user,1,0,0,0
+access_amazon_product_image_manager,amazon.product.image manager,model_amazon_product_image,sdlc_amazon_connector.group_amazon_manager,1,1,1,1
 access_amazon_sync_log_user,amazon.sync.log user,model_amazon_sync_log,sdlc_amazon_connector.group_amazon_user,1,0,0,0
 access_amazon_sync_log_technical,amazon.sync.log technical,model_amazon_sync_log,sdlc_amazon_connector.group_amazon_technical_admin,1,1,1,1
-access_amazon_ai_pricing,amazon.ai.pricing,model_amazon_ai_pricing,,1,1,1,1
-access_amazon_ai_pricing_wizard,amazon.ai.pricing.wizard,model_amazon_ai_pricing_wizard,,1,1,1,1
-access_amazon_ai_listing,amazon.ai.listing,model_amazon_ai_listing,,1,1,1,1
-access_amazon_demand_forecast,amazon.demand.forecast,model_amazon_demand_forecast,,1,1,1,1
-access_amazon_review_analysis,amazon.review.analysis,model_amazon_review_analysis,,1,1,1,1
-access_amazon_ai_chat,amazon.ai.chat,model_amazon_ai_chat,,1,1,1,1
-access_amazon_product_health,amazon.product.health,model_amazon_product_health,,1,1,1,1
+access_amazon_ai_pricing_user,amazon.ai.pricing user,model_amazon_ai_pricing,sdlc_amazon_connector.group_amazon_user,1,1,1,1
+access_amazon_ai_pricing_wizard_user,amazon.ai.pricing.wizard user,model_amazon_ai_pricing_wizard,sdlc_amazon_connector.group_amazon_user,1,1,1,1
+access_amazon_ai_listing_user,amazon.ai.listing user,model_amazon_ai_listing,sdlc_amazon_connector.group_amazon_user,1,1,1,1
+access_amazon_demand_forecast_user,amazon.demand.forecast user,model_amazon_demand_forecast,sdlc_amazon_connector.group_amazon_user,1,1,1,1
+access_amazon_review_analysis_user,amazon.review.analysis user,model_amazon_review_analysis,sdlc_amazon_connector.group_amazon_user,1,1,1,1
+access_amazon_ai_chat_user,amazon.ai.chat user,model_amazon_ai_chat,sdlc_amazon_connector.group_amazon_user,1,1,1,1
+access_amazon_product_health_user,amazon.product.health user,model_amazon_product_health,sdlc_amazon_connector.group_amazon_user,1,1,1,1
 access_amazon_smart_alert_user,amazon.smart.alert user,model_amazon_smart_alert,sdlc_amazon_connector.group_amazon_user,1,0,0,0
 access_amazon_smart_alert_manager,amazon.smart.alert manager,model_amazon_smart_alert,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
 access_amazon_operation_control_user,amazon.operation.control user,model_amazon_operation_control,sdlc_amazon_connector.group_amazon_user,1,0,0,0
@@ -106,9 +122,9 @@ access_amazon_operations_dashboard_user,amazon.operations.dashboard user,model_a
 access_amazon_operations_dashboard_manager,amazon.operations.dashboard manager,model_amazon_operations_dashboard,sdlc_amazon_connector.group_amazon_manager,1,1,1,0
 access_amazon_api_operation_metric_user,amazon.api.operation.metric user,model_amazon_api_operation_metric,sdlc_amazon_connector.group_amazon_user,1,0,0,0
 access_amazon_api_operation_metric_technical,amazon.api.operation.metric technical,model_amazon_api_operation_metric,sdlc_amazon_connector.group_amazon_technical_admin,1,1,1,1
-access_amazon_profit_calculator,amazon.profit.calculator,model_amazon_profit_calculator,,1,1,1,1
-access_amazon_competitor_monitor,amazon.competitor.monitor,model_amazon_competitor_monitor,,1,1,1,1
-access_amazon_keyword_tracker,amazon.keyword.tracker,model_amazon_keyword_tracker,,1,1,1,1
-access_amazon_return_analyzer,amazon.return.analyzer,model_amazon_return_analyzer,,1,1,1,1
-access_amazon_sales_insights,amazon.sales.insights,model_amazon_sales_insights,,1,1,1,1
-access_amazon_user_guidance,amazon.user.guidance,model_amazon_user_guidance,,1,1,1,1
+access_amazon_profit_calculator_user,amazon.profit.calculator user,model_amazon_profit_calculator,sdlc_amazon_connector.group_amazon_user,1,1,1,1
+access_amazon_competitor_monitor_user,amazon.competitor.monitor user,model_amazon_competitor_monitor,sdlc_amazon_connector.group_amazon_user,1,1,1,1
+access_amazon_keyword_tracker_user,amazon.keyword.tracker user,model_amazon_keyword_tracker,sdlc_amazon_connector.group_amazon_user,1,1,1,1
+access_amazon_return_analyzer_user,amazon.return.analyzer user,model_amazon_return_analyzer,sdlc_amazon_connector.group_amazon_user,1,1,1,1
+access_amazon_sales_insights_user,amazon.sales.insights user,model_amazon_sales_insights,sdlc_amazon_connector.group_amazon_user,1,1,1,1
+access_amazon_user_guidance_user,amazon.user.guidance user,model_amazon_user_guidance,sdlc_amazon_connector.group_amazon_user,1,1,1,1

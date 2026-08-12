@@ -255,20 +255,20 @@ class TestFbaShippingPhase4(TransactionCase):
         self.assertEqual(self._quantity_at(transit), 0)
         self.assertEqual(self._quantity_at(sellable), sellable_before)
 
-        with self.assertRaisesRegex(UserError, 'after placement is confirmed|already exists'):
-            self.shipment.action_create_picking()
+        action = self.shipment.action_create_picking()
+        self.assertEqual(action.get('res_id'), picking.id)
         self.assertEqual(len(self.shipment.picking_ids), 1)
 
-    def test_02_insufficient_stock_creates_no_picking(self):
+    def test_02_insufficient_stock_creates_unreserved_picking(self):
         shipment = self._create_phase4_shipment('P4-PLAN-002', quantity=20)
         source_before = self._quantity_at(self.instance.fba_source_location_id)
 
-        with self.assertRaisesRegex(UserError, 'Insufficient stock'):
-            shipment.action_create_picking()
+        shipment.action_create_picking()
 
-        self.assertEqual(shipment.state, 'placement_confirmed')
-        self.assertFalse(shipment.picking_ids)
-        self.assertFalse(shipment.picking_id)
+        self.assertEqual(shipment.state, 'picking_created')
+        self.assertEqual(len(shipment.picking_ids), 1)
+        self.assertEqual(shipment.picking_id, shipment.picking_ids)
+        self.assertNotEqual(shipment.picking_id.state, 'assigned')
         self.assertEqual(
             self._quantity_at(self.instance.fba_source_location_id), source_before,
         )

@@ -22,7 +22,7 @@
         - VCS tax report processing
         - Seller rating reports
         - Invoice upload to Amazon
-        - Full automation with 15 scheduled actions
+        - Full automation with configurable scheduled actions
 
         AI-POWERED FEATURES (10 Features | 4 Providers | 3 Categories):
 

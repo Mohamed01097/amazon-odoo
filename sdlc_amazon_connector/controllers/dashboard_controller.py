@@ -10,12 +10,12 @@ _logger = logging.getLogger(__name__)
 
 class AmazonDashboardController(http.Controller):
 
-    @http.route('/amazon/dashboard/instances', type='json', auth='user')
+    @http.route('/amazon/dashboard/instances', type='jsonrpc', auth='user')
     def get_instances(self):
         instances = request.env['amazon.instance'].search([('active', '=', True)])
         return {'instances': [{'id': i.id, 'name': i.name} for i in instances]}
 
-    @http.route('/amazon/dashboard/data', type='json', auth='user')
+    @http.route('/amazon/dashboard/data', type='jsonrpc', auth='user')
     def dashboard_data(self, instance_id=None, date_range='30', custom_from=None, custom_to=None):
         env = request.env
         today = date.today()
@@ -129,7 +129,7 @@ class AmazonDashboardController(http.Controller):
             'recent_syncs': recent_syncs,
         }
 
-    @http.route('/amazon/dashboard/ai-insights', type='json', auth='user')
+    @http.route('/amazon/dashboard/ai-insights', type='jsonrpc', auth='user')
     def ai_insights(self, instance_id=None):
         env = request.env
         if instance_id:
@@ -161,7 +161,7 @@ class AmazonDashboardController(http.Controller):
         except Exception as e:
             return {'insights': 'AI Error: %s' % str(e)[:200]}
 
-    @http.route('/amazon/dashboard/optimize-store', type='json', auth='user')
+    @http.route('/amazon/dashboard/optimize-store', type='jsonrpc', auth='user')
     def optimize_store(self, instance_id=None):
         env = request.env
         if instance_id:

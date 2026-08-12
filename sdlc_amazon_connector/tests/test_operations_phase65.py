@@ -294,6 +294,48 @@ class TestAmazonOperationsPhase65(TransactionCase):
         visible = self.env['amazon.operations.dashboard'].with_user(user).search([])
         self.assertEqual(visible, first)
 
+        own_product = self.env['amazon.product'].sudo().create({
+            'name': 'Company Product', 'sku': 'P65-COMPANY-SKU',
+            'instance_id': self.instance.id,
+        })
+        self.env['amazon.product'].sudo().create({
+            'name': 'Other Company Product', 'sku': 'P65-OTHER-COMPANY-SKU',
+            'instance_id': self.other_instance.id,
+        })
+        own_order = self.env['amazon.sale.order'].sudo().create({
+            'amazon_order_ref': 'P65-COMPANY-ORDER', 'instance_id': self.instance.id,
+        })
+        self.env['amazon.sale.order'].sudo().create({
+            'amazon_order_ref': 'P65-OTHER-COMPANY-ORDER',
+            'instance_id': self.other_instance.id,
+        })
+        self.assertEqual(
+            self.env['amazon.product'].with_user(user).search([
+                ('sku', 'like', 'P65-%COMPANY-SKU'),
+            ]),
+            own_product,
+        )
+        self.assertEqual(
+            self.env['amazon.sale.order'].with_user(user).search([
+                ('amazon_order_ref', 'like', 'P65-%COMPANY-ORDER'),
+            ]),
+            own_order,
+        )
+        with self.assertRaises(AccessError):
+            own_product.with_user(user).write({'name': 'Unauthorized Change'})
+        with self.assertRaises(AccessError):
+            self.instance.with_user(user)._get_access_token_or_raise()
+
+        internal_user = self.env['res.users'].sudo().create({
+            'name': 'Internal Non-Amazon User',
+            'login': 'internal-non-amazon-user',
+            'company_id': self.company.id,
+            'company_ids': [Command.set([self.company.id])],
+            'group_ids': [Command.set([self.env.ref('base.group_user').id])],
+        })
+        with self.assertRaises(AccessError):
+            self.env['amazon.product'].with_user(internal_user).search([])
+
         own_job = self.env['amazon.order.import.job'].sudo().create({
             'instance_id': self.instance.id,
             'state': 'draft',

@@ -1052,8 +1052,8 @@ class AmazonSettlementReportLine(models.Model):
     line_key = fields.Char(readonly=True, copy=False, index=True)
     active = fields.Boolean(default=True, index=True)
 
-    amazon_order_id = fields.Char(index=True)
-    order_id_ref = fields.Char('Amazon Order ID', index=True)
+    amazon_order_id = fields.Char('Amazon Order ID', index=True)
+    order_id_ref = fields.Char('Settlement Order Reference', index=True)
     merchant_order_id = fields.Char(index=True)
     adjustment_id = fields.Char(index=True)
     shipment_id = fields.Char(index=True)
@@ -1095,7 +1095,7 @@ class AmazonSettlementReportLine(models.Model):
     ], index=True)
 
     amazon_order_record_id = fields.Many2one(
-        'amazon.sale.order', string='Amazon Order', ondelete='set null',
+        'amazon.sale.order', string='Amazon Order Record', ondelete='set null',
         index=True,
     )
     sale_order_id = fields.Many2one(

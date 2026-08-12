@@ -56,6 +56,7 @@ class AmazonInventoryReconciliationRun(models.Model):
         groups='sdlc_amazon_connector.group_amazon_manager',
     )
     amazon_request_ids = fields.Text(
+        string='Amazon Request IDs',
         copy=False, readonly=True,
         groups='sdlc_amazon_connector.group_amazon_manager',
     )
