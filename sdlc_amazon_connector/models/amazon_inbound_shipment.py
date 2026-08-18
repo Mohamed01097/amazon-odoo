@@ -1649,11 +1649,31 @@ class AmazonInboundShipmentLine(models.Model):
     quantity_in_case = fields.Float('Qty Per Case')
     quantity_discrepancy = fields.Float('Discrepancy', compute='_compute_discrepancy', store=True)
 
+    @api.model
+    def _values_from_amazon_product(self, amazon_product_id):
+        product = self.env['amazon.product'].browse(amazon_product_id).exists()
+        return {
+            'sku': product.sku or False,
+            'odoo_product_id': product.odoo_product_id.id or False,
+        }
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            if vals.get('amazon_product_id'):
+                vals.update(self._values_from_amazon_product(vals['amazon_product_id']))
+        return super().create(vals_list)
+
+    def write(self, vals):
+        if 'amazon_product_id' in vals:
+            vals = dict(vals)
+            vals.update(self._values_from_amazon_product(vals['amazon_product_id']))
+        return super().write(vals)
+
     @api.onchange('amazon_product_id')
     def _onchange_amazon_product_id(self):
-        if self.amazon_product_id:
-            self.sku = self.amazon_product_id.sku or False
-            self.odoo_product_id = self.amazon_product_id.odoo_product_id
+        self.sku = self.amazon_product_id.sku or False
+        self.odoo_product_id = self.amazon_product_id.odoo_product_id
 
     @api.constrains('planned_quantity')
     def _check_planned_quantity(self):

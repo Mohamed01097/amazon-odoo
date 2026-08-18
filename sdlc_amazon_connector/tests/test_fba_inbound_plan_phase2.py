@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import requests
 
-from odoo import api
+from odoo import Command, api
 from odoo.exceptions import UserError, ValidationError
 from odoo.tests import TransactionCase, tagged
 
@@ -71,6 +71,20 @@ class TestFbaInboundPlanPhase2(TransactionCase):
             'operationId': OPERATION_ID,
             '_amazon_request_id': 'phase2-create-request-id',
         }
+
+    def _create_mapped_product(self, amazon_sku, default_code):
+        odoo_product = self.env['product.product'].sudo().with_company(self.company).create({
+            'name': amazon_sku,
+            'default_code': default_code,
+            'company_id': self.company.id,
+        })
+        amazon_product = self.env['amazon.product'].sudo().create({
+            'name': amazon_sku,
+            'instance_id': self.instance.id,
+            'sku': amazon_sku,
+            'odoo_product_id': odoo_product.id,
+        })
+        return amazon_product, odoo_product
 
     def _start_plan(self):
         with (
@@ -388,6 +402,70 @@ class TestFbaInboundPlanPhase2(TransactionCase):
         self.assertFalse(self.shipment.inbound_plan_id)
         self.assertEqual(len(self.shipment.operation_job_ids), 1)
         create_mock.assert_not_called()
+
+    def test_25_line_create_derives_marketplace_sku_and_odoo_product(self):
+        amazon_product, odoo_product = self._create_mapped_product(
+            'AMAZON-MSKU-003', 'ODOO-INTERNAL-003',
+        )
+        with patch.object(AmazonAPI, '_amazon_request', autospec=True) as api_mock:
+            line = self.env['amazon.inbound.shipment.line'].sudo().create({
+                'shipment_id': self.shipment.id,
+                'amazon_product_id': amazon_product.id,
+                'planned_quantity': 1,
+                'prep_owner': 'SELLER',
+                'label_owner': 'SELLER',
+            })
+
+        self.assertEqual(line.sku, 'AMAZON-MSKU-003')
+        self.assertNotEqual(line.sku, odoo_product.default_code)
+        self.assertEqual(line.odoo_product_id, odoo_product)
+        api_mock.assert_not_called()
+
+    def test_26_parent_one2many_create_derives_required_sku(self):
+        amazon_product, odoo_product = self._create_mapped_product(
+            'AMAZON-MSKU-004', 'ODOO-INTERNAL-004',
+        )
+        with patch.object(AmazonAPI, '_amazon_request', autospec=True) as api_mock:
+            shipment = self.env['amazon.inbound.shipment'].sudo().create({
+                'shipment_name': 'One2many SKU Regression',
+                'instance_id': self.instance.id,
+                'line_ids': [Command.create({
+                    'amazon_product_id': amazon_product.id,
+                    'planned_quantity': 1,
+                    'prep_owner': 'SELLER',
+                    'label_owner': 'SELLER',
+                })],
+            })
+
+        self.assertEqual(shipment.line_ids.sku, 'AMAZON-MSKU-004')
+        self.assertEqual(shipment.line_ids.odoo_product_id, odoo_product)
+        api_mock.assert_not_called()
+
+    def test_27_changing_amazon_product_replaces_stale_mapped_values(self):
+        amazon_product, odoo_product = self._create_mapped_product(
+            'AMAZON-MSKU-005', 'ODOO-INTERNAL-005',
+        )
+        with patch.object(AmazonAPI, '_amazon_request', autospec=True) as api_mock:
+            self.line.write({
+                'amazon_product_id': amazon_product.id,
+                'sku': 'STALE-SKU',
+                'odoo_product_id': self.odoo_product.id,
+            })
+
+        self.assertEqual(self.line.sku, 'AMAZON-MSKU-005')
+        self.assertEqual(self.line.odoo_product_id, odoo_product)
+        api_mock.assert_not_called()
+
+        onchange_line = self.env['amazon.inbound.shipment.line'].new({
+            'amazon_product_id': amazon_product.id,
+        })
+        onchange_line._onchange_amazon_product_id()
+        self.assertEqual(onchange_line.sku, 'AMAZON-MSKU-005')
+        self.assertEqual(onchange_line.odoo_product_id, odoo_product)
+        onchange_line.amazon_product_id = False
+        onchange_line._onchange_amazon_product_id()
+        self.assertFalse(onchange_line.sku)
+        self.assertFalse(onchange_line.odoo_product_id)
 
     def test_18_full_mock_lifecycle_has_zero_stock_side_effect(self):
         Picking = self.env['stock.picking'].sudo()
