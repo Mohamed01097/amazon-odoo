@@ -19,6 +19,7 @@ SHIPMENT_ID_1 = 'sh1234abcd-1234-abcd-5678-1234abcd5678'
 SHIPMENT_ID_2 = 'sh5678abcd-1234-abcd-5678-1234abcd5678'
 PACKING_GENERATE_OPERATION = '11111111-1111-1111-1111-111111111111'
 PACKING_CONFIRM_OPERATION = '22222222-2222-2222-2222-222222222222'
+PACKING_INFORMATION_OPERATION = '77777777-7777-7777-7777-777777777777'
 PLACEMENT_GENERATE_OPERATION = '33333333-3333-3333-3333-333333333333'
 PLACEMENT_CONFIRM_OPERATION = '44444444-4444-4444-4444-444444444444'
 PACKING_REGENERATE_OPERATION = '55555555-5555-5555-5555-555555555555'
@@ -316,7 +317,49 @@ class TestFbaPackingPlacementPhase3(TransactionCase):
             job._process_operation()
         return job
 
+    def _set_packing_information(self):
+        option = self.shipment.packing_option_ids.filtered('selected')
+        if not option.box_ids:
+            self.env['amazon.fba.box'].sudo().create({
+                'packing_option_id': option.id,
+                'amazon_packing_group_id': PACKING_GROUP_1,
+                'length': 30,
+                'width': 20,
+                'height': 10,
+                'dimension_unit': 'CM',
+                'weight': 5.5,
+                'weight_unit': 'KG',
+                'line_ids': [
+                    (0, 0, {
+                        'amazon_product_id': self.amazon_product.id,
+                        'msku': 'SKU-A',
+                        'quantity': self.line_a.planned_quantity,
+                    }),
+                    (0, 0, {
+                        'amazon_product_id': self.amazon_product_b.id,
+                        'msku': 'SKU-B',
+                        'quantity': self.line_b.planned_quantity,
+                    }),
+                ],
+            })
+        with patch.object(
+            AmazonAPI, 'set_packing_information', autospec=True,
+            return_value={'operationId': PACKING_INFORMATION_OPERATION},
+        ) as set_mock:
+            self.shipment.action_set_packing_information()
+        job = self.shipment.operation_job_ids.filtered(
+            lambda item: item.operation_type == 'set_packing_information'
+        )
+        with patch.object(
+            AmazonAPI, 'get_inbound_operation_status', autospec=True,
+            return_value=self._success_operation(PACKING_INFORMATION_OPERATION),
+        ):
+            job._process_operation()
+        return set_mock.call_args.args[-1]
+
     def _generate_placement(self):
+        if self.shipment.packing_information_status != 'success':
+            self._set_packing_information()
         with (
             patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
             patch.object(
@@ -1094,6 +1137,27 @@ class TestFbaPackingPlacementPhase3(TransactionCase):
         self.assertEqual(line.inbound_shipment_id, self.shipment)
         self.assertEqual(line.company_id, self.company)
 
+    def test_07a_packing_information_is_required_and_uses_official_box_schema(self):
+        self._generate_packing()
+        self._confirm_packing()
+        with self.assertRaisesRegex(UserError, 'box-level packing information'):
+            self.shipment.action_generate_placement_options()
+        body = self._set_packing_information()
+        grouping = body['packageGroupings'][0]
+        self.assertEqual(grouping['packingGroupId'], PACKING_GROUP_1)
+        self.assertNotIn('shipmentId', grouping)
+        box = grouping['boxes'][0]
+        self.assertEqual(box['contentInformationSource'], 'BOX_CONTENT_PROVIDED')
+        self.assertEqual(box['quantity'], 1)
+        self.assertEqual(box['dimensions']['unitOfMeasurement'], 'CM')
+        self.assertEqual(box['weight'], {'unit': 'KG', 'value': 5.5})
+        self.assertEqual(
+            {(item['msku'], item['quantity'], item['prepOwner'], item['labelOwner'])
+             for item in box['items']},
+            {('SKU-A', 20, 'SELLER', 'SELLER'), ('SKU-B', 10, 'SELLER', 'SELLER')},
+        )
+        self.assertEqual(self.shipment.packing_information_status, 'success')
+
     def test_08_full_phase_does_not_change_stock(self):
         Picking = self.env['stock.picking'].sudo()
         Move = self.env['stock.move'].sudo()
@@ -1144,6 +1208,12 @@ class TestFbaPackingPlacementPhase3(TransactionCase):
             self.assertTrue(request_mock.call_args.args[3].endswith(
                 '/packingOptions/%s/confirmation' % PACKING_OPTION_1
             ))
+            self.assertEqual(request_mock.call_args.kwargs['max_retries'], 0)
+
+            api_client.set_packing_information(
+                self.instance, 'test-token', PLAN_ID, {'packageGroupings': []},
+            )
+            self.assertTrue(request_mock.call_args.args[3].endswith('/packingInformation'))
             self.assertEqual(request_mock.call_args.kwargs['max_retries'], 0)
 
             self.real_list_packing_group_items(

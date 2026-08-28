@@ -67,6 +67,7 @@ class TestFbaDispatch(TransactionCase):
             'inbound_plan_id': PLAN_ID,
             'create_operation_status': 'success',
             'packing_confirmation_status': 'success',
+            'packing_information_status': 'success',
             'placement_confirmation_status': 'success',
             'state': 'placement_confirmed',
             'line_ids': [Command.create({
@@ -96,6 +97,9 @@ class TestFbaDispatch(TransactionCase):
                 'shipment_confirmation_id': 'FBA-DISPATCH-%s' % index,
                 'destination_fc': 'CAI%s' % index,
                 'status': 'WORKING',
+                'transportation_confirmation_status': 'success',
+                'labels_status': 'success',
+                'label_download_url': 'https://example.test/fba-labels.pdf',
                 'line_ids': [Command.create({
                     'amazon_product_id': products[sku].id,
                     'msku': sku,
@@ -238,6 +242,21 @@ class TestFbaDispatch(TransactionCase):
         self.assertEqual(self._quantity(self.product_a, source), source_before - 3)
         self.assertEqual(self._quantity(self.product_a, transit), transit_before + 3)
         self.assertEqual(self._quantity(self.product_a, sellable), sellable_before)
+
+    def test_validation_blocks_until_transportation_and_labels_are_ready(self):
+        _plan, physical = self._create_plan([(SHIPMENT_A, [('SKU-A', 1)])])
+        self._receive(self.product_a, 1)
+        physical.action_create_dispatch_picking()
+        source_before = self._quantity(self.product_a, self.instance.fba_source_location_id)
+        physical.write({'transportation_confirmation_status': False})
+        with self.assertRaisesRegex(UserError, 'Confirm Amazon transportation'):
+            physical.picking_id.button_validate()
+        physical.write({'transportation_confirmation_status': 'success', 'labels_status': False})
+        with self.assertRaisesRegex(UserError, 'box/shipping labels'):
+            physical.picking_id.button_validate()
+        self.assertEqual(
+            self._quantity(self.product_a, self.instance.fba_source_location_id), source_before,
+        )
 
     def test_dispatch_code_has_no_direct_quant_write(self):
         model = type(self.env['amazon.fba.physical.shipment'])

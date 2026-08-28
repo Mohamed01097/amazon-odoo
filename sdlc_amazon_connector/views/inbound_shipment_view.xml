@@ -58,6 +58,12 @@
                             class="btn-primary"
                             groups="sdlc_amazon_connector.group_amazon_manager"
                             invisible="state != 'packing_generated' or packing_confirmation_operation_id"/>
+                    <button name="action_set_packing_information"
+                            type="object"
+                            string="Submit Box Information"
+                            class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="state != 'packing_confirmed' or packing_information_status in ('pending', 'in_progress', 'success')"/>
                     <button name="action_generate_placement_options"
                             type="object"
                             string="Generate Placement"
@@ -92,7 +98,7 @@
                             string="Confirm Shipment"
                             class="btn-primary"
                             groups="sdlc_amazon_connector.group_amazon_manager"
-                            invisible="state != 'ready_to_ship' and not (state == 'shipment_confirmed' and shipment_confirmation_status == 'failed')"/>
+                            invisible="True"/>
                     <button name="action_refresh_shipment_status"
                             type="object"
                             string="Refresh Shipment Status"
@@ -174,6 +180,8 @@
                                     <field name="packing_generation_status" readonly="1"/>
                                     <field name="packing_confirmation_operation_id" readonly="1"/>
                                     <field name="packing_confirmation_status" readonly="1"/>
+                                    <field name="packing_information_operation_id" readonly="1"/>
+                                    <field name="packing_information_status" readonly="1"/>
                                     <field name="packing_last_refresh_at" readonly="1"/>
                                 </group>
                                 <group string="Packing Diagnostics"
@@ -233,7 +241,7 @@
                                                 </sheet>
                                             </form>
                                         </field>
-                                        <separator string="Local Box Details (not submitted in Phase 3)"/>
+                                        <separator string="Box Details Submitted to Amazon"/>
                                         <field name="box_ids">
                                             <list editable="bottom">
                                                 <field name="amazon_box_id" optional="hide"/>
@@ -371,7 +379,7 @@
                                                             string="Create Dispatch Picking"
                                                             class="btn-primary"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"
-                                                            invisible="picking_id"/>
+                                                            invisible="picking_id or transportation_confirmation_status != 'success' or labels_status != 'success'"/>
                                                     <button name="action_open_dispatch_picking"
                                                             type="object"
                                                             string="Open Picking"
@@ -381,12 +389,28 @@
                                                             type="object"
                                                             string="Generate Transportation Options"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"
-                                                            invisible="dispatch_state != 'dispatched' or transportation_generation_status in ('pending', 'in_progress')"/>
+                                                            invisible="transportation_generation_status in ('pending', 'in_progress', 'success') or transportation_confirmation_status in ('pending', 'in_progress', 'success')"/>
                                                     <button name="action_refresh_transportation_options"
                                                             type="object"
                                                             string="Refresh Transportation Options"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"
-                                                            invisible="dispatch_state != 'dispatched'"/>
+                                                            invisible="transportation_generation_status != 'success'"/>
+                                                    <button name="action_generate_delivery_window_options"
+                                                            type="object"
+                                                            string="Generate Delivery Windows"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="not delivery_window_required or delivery_window_generation_status in ('pending', 'in_progress', 'success') or delivery_window_confirmation_status in ('pending', 'in_progress', 'success')"/>
+                                                    <button name="action_refresh_delivery_window_options"
+                                                            type="object"
+                                                            string="Refresh Delivery Windows"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="not delivery_window_required or delivery_window_generation_status != 'success'"/>
+                                                    <button name="action_confirm_delivery_window"
+                                                            type="object"
+                                                            string="Confirm Delivery Window"
+                                                            class="btn-primary"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="not selected_delivery_window_option_id or delivery_window_confirmation_status in ('pending', 'in_progress', 'success')"/>
                                                     <button name="action_confirm_transportation"
                                                             type="object"
                                                             string="Confirm Transportation"
@@ -397,7 +421,12 @@
                                                             type="object"
                                                             string="Submit/Update Tracking"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"
-                                                            invisible="transportation_confirmation_status != 'success' or tracking_status in ('pending', 'in_progress')"/>
+                                                            invisible="transportation_confirmation_status != 'success' or tracking_status in ('pending', 'in_progress', 'success')"/>
+                                                    <button name="action_get_shipping_labels"
+                                                            type="object"
+                                                            string="Get Box Labels"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="transportation_confirmation_status != 'success'"/>
                                                     <button name="action_refresh_physical_shipment_status"
                                                             type="object"
                                                             string="Refresh Shipment Status"
@@ -450,6 +479,12 @@
                                                             <field name="transportation_last_sync_at" readonly="1"/>
                                                             <field name="selected_transportation_option_id" readonly="1"/>
                                                             <field name="shipping_mode" readonly="1"/>
+                                                            <field name="delivery_window_required" readonly="1"/>
+                                                            <field name="delivery_window_generation_operation_id" readonly="1"/>
+                                                            <field name="delivery_window_generation_status" readonly="1"/>
+                                                            <field name="delivery_window_confirmation_operation_id" readonly="1"/>
+                                                            <field name="delivery_window_confirmation_status" readonly="1"/>
+                                                            <field name="selected_delivery_window_option_id" readonly="1"/>
                                                         </group>
                                                         <group string="Carrier &amp; Tracking">
                                                             <field name="carrier_type"/>
@@ -463,6 +498,10 @@
                                                             <field name="tracking_operation_id" readonly="1"/>
                                                             <field name="tracking_status" readonly="1"/>
                                                             <field name="tracking_last_synced_at" readonly="1"/>
+                                                            <field name="label_page_type"/>
+                                                            <field name="labels_status" readonly="1"/>
+                                                            <field name="label_download_url" widget="url" readonly="1"/>
+                                                            <field name="labels_last_synced_at" readonly="1"/>
                                                         </group>
                                                     </group>
                                                     <field name="transportation_option_ids" readonly="1">
@@ -476,11 +515,36 @@
                                                             <field name="estimated_cost"/>
                                                             <field name="currency_id"/>
                                                             <field name="valid_until"/>
+                                                            <field name="requires_delivery_window"/>
                                                             <button name="action_select_transportation_option"
                                                                     type="object"
                                                                     string="Select"
                                                                     groups="sdlc_amazon_connector.group_amazon_manager"
                                                                     invisible="selected"/>
+                                                        </list>
+                                                    </field>
+                                                    <separator string="Delivery Window Options" invisible="not delivery_window_required"/>
+                                                    <field name="delivery_window_option_ids" readonly="1"
+                                                           invisible="not delivery_window_required">
+                                                        <list create="0" delete="0">
+                                                            <field name="selected"/>
+                                                            <field name="amazon_delivery_window_option_id"/>
+                                                            <field name="start_date"/>
+                                                            <field name="end_date"/>
+                                                            <field name="availability_type"/>
+                                                            <field name="valid_until"/>
+                                                            <button name="action_select_delivery_window"
+                                                                    type="object" string="Select"
+                                                                    groups="sdlc_amazon_connector.group_amazon_manager"
+                                                                    invisible="selected or availability_type == 'BLOCKED'"/>
+                                                        </list>
+                                                    </field>
+                                                    <separator string="Amazon Shipment Boxes"/>
+                                                    <field name="shipment_box_ids" readonly="1">
+                                                        <list create="0" delete="0">
+                                                            <field name="amazon_box_id"/>
+                                                            <field name="package_id"/>
+                                                            <field name="quantity"/>
                                                         </list>
                                                     </field>
                                                     <group groups="sdlc_amazon_connector.group_amazon_manager">

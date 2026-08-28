@@ -1482,6 +1482,15 @@ class AmazonAPI():
         resp = self._amazon_request(instance, access_token, 'POST', url, max_retries=0)
         return self._json_response_with_request_id(resp)
 
+    def set_packing_information(self, instance, access_token, plan_id, body):
+        """Submit official box-level packing information for an inbound plan."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/packingInformation"
+        resp = self._amazon_request(
+            instance, access_token, 'POST', url, body=body, max_retries=0,
+        )
+        return self._json_response_with_request_id(resp)
+
     def list_packing_group_items(self, instance, access_token, plan_id, packing_group_id,
                                  page_size=20, pagination_token=None):
         """Return one official listPackingGroupItems page."""
@@ -1541,7 +1550,46 @@ class AmazonAPI():
             f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
             f"/shipments/{shipment_id}/trackingDetails"
         )
-        resp = self._amazon_request(instance, access_token, 'PUT', url, body=body)
+        # No idempotency key is available. Never replay an ambiguous write.
+        resp = self._amazon_request(
+            instance, access_token, 'PUT', url, body=body, max_retries=0,
+        )
+        return self._json_response_with_request_id(resp)
+
+    def generate_delivery_window_options(self, instance, access_token, plan_id, shipment_id):
+        """Start official delivery-window generation for one physical shipment."""
+        endpoint = self._get_endpoint(instance)
+        url = (
+            f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
+            f"/shipments/{shipment_id}/deliveryWindowOptions"
+        )
+        resp = self._amazon_request(instance, access_token, 'POST', url, max_retries=0)
+        return self._json_response_with_request_id(resp)
+
+    def list_delivery_window_options(self, instance, access_token, plan_id, shipment_id,
+                                     page_size=20, pagination_token=None):
+        """Return one official listDeliveryWindowOptions page."""
+        endpoint = self._get_endpoint(instance)
+        url = (
+            f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
+            f"/shipments/{shipment_id}/deliveryWindowOptions"
+        )
+        params = {'pageSize': page_size}
+        if pagination_token:
+            params['paginationToken'] = pagination_token
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
+        return self._json_response_with_request_id(resp)
+
+    def confirm_delivery_window_option(self, instance, access_token, plan_id, shipment_id,
+                                       delivery_window_option_id):
+        """Start confirmation of one official shipment delivery window."""
+        endpoint = self._get_endpoint(instance)
+        url = (
+            f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
+            f"/shipments/{shipment_id}/deliveryWindowOptions/"
+            f"{delivery_window_option_id}/confirmation"
+        )
+        resp = self._amazon_request(instance, access_token, 'POST', url, max_retries=0)
         return self._json_response_with_request_id(resp)
 
     def generate_transportation_options(self, instance, access_token, plan_id, body):
@@ -1589,6 +1637,31 @@ class AmazonAPI():
         params = {'pageSize': page_size}
         if pagination_token:
             params['paginationToken'] = pagination_token
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
+        return self._json_response_with_request_id(resp)
+
+    def list_shipment_boxes(self, instance, access_token, plan_id, shipment_id,
+                            page_size=20, pagination_token=None):
+        """Return one official listShipmentBoxes page."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/shipments/{shipment_id}/boxes"
+        params = {'pageSize': page_size}
+        if pagination_token:
+            params['paginationToken'] = pagination_token
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
+        return self._json_response_with_request_id(resp)
+
+    def get_inbound_labels_v0(self, instance, access_token, shipment_confirmation_id,
+                              page_type, label_type='UNIQUE', number_of_packages=None,
+                              package_labels_to_print=None):
+        """Return package/pallet label metadata from the preserved v0 operation."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/fba/inbound/v0/shipments/{shipment_confirmation_id}/labels"
+        params = {'PageType': page_type, 'LabelType': label_type}
+        if number_of_packages is not None:
+            params['NumberOfPackages'] = number_of_packages
+        if package_labels_to_print:
+            params['PackageLabelsToPrint'] = package_labels_to_print
         resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return self._json_response_with_request_id(resp)
 

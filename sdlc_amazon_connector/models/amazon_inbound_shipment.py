@@ -97,6 +97,13 @@ class AmazonInboundShipment(models.Model):
         ('success', 'Success'),
         ('failed', 'Failed'),
     ], copy=False, index=True)
+    packing_information_operation_id = fields.Char(copy=False, index=True)
+    packing_information_status = fields.Selection([
+        ('pending', 'Pending'),
+        ('in_progress', 'In Progress'),
+        ('success', 'Success'),
+        ('failed', 'Failed'),
+    ], copy=False, index=True)
     packing_last_refresh_at = fields.Datetime(copy=False)
     packing_error_code = fields.Char(
         copy=False, groups='sdlc_amazon_connector.group_amazon_manager',
@@ -721,6 +728,14 @@ class AmazonInboundShipment(models.Model):
                 'response_field': 'packing_response',
                 'label': 'Packing option confirmation',
             },
+            'set_packing_information': {
+                'operation_field': 'packing_information_operation_id',
+                'status_field': 'packing_information_status',
+                'error_code_field': 'packing_error_code',
+                'error_message_field': 'packing_error_message',
+                'response_field': 'packing_response',
+                'label': 'Packing information submission',
+            },
             'generate_placement_options': {
                 'operation_field': 'placement_generation_operation_id',
                 'status_field': 'placement_generation_status',
@@ -1287,14 +1302,39 @@ class AmazonInboundShipment(models.Model):
 
         access_token = self.instance_id._get_access_token_or_raise()
         api = AmazonAPI()
-        result = self.instance_id._api_call_safe(
-            getattr(api, api_method_name),
-            self.instance_id,
-            access_token,
-            self.inbound_plan_id,
-            *api_args,
-            error_msg=_("Failed to start %s", config['label']),
-        )
+        try:
+            result = self.instance_id._api_call_safe(
+                getattr(api, api_method_name),
+                self.instance_id,
+                access_token,
+                self.inbound_plan_id,
+                *api_args,
+                error_msg=_("Failed to start %s", config['label']),
+            )
+        except UserError as exc:
+            cause = getattr(exc, '__cause__', None)
+            response = getattr(cause, 'response', None)
+            status_code = getattr(response, 'status_code', None)
+            if status_code is not None and status_code < 500:
+                raise
+            response_text = self._merge_phase3_response(
+                config['response_field'], api_method_name,
+                {'error': str(exc), 'outcome': 'UNKNOWN'},
+            )
+            self.sudo().write({
+                status_field: 'failed',
+                config['error_code_field']: 'WRITE_OUTCOME_UNKNOWN',
+                config['error_message_field']: _(
+                    "Amazon may have accepted this write, but no operationId was received. "
+                    "Do not retry until the plan is reconciled in Amazon."
+                ),
+                config['response_field']: response_text,
+            })
+            return self.instance_id._notify(
+                config['label'],
+                _("Amazon write outcome is unknown. No automatic retry will be attempted."),
+                'danger', sticky=True,
+            )
         if not isinstance(result, dict):
             result = {'unexpectedResponse': result}
         operation_id = str(result.get('operationId') or '').strip()
@@ -1337,6 +1377,8 @@ class AmazonInboundShipment(models.Model):
         elif operation_type == 'confirm_packing_option':
             self._refresh_packing_options()
             state = 'packing_confirmed'
+        elif operation_type == 'set_packing_information':
+            state = self.state
         elif operation_type == 'generate_placement_options':
             if not self._refresh_placement_options():
                 raise UserError(_("Amazon completed placement generation but no placement options are available yet."))
@@ -1454,6 +1496,84 @@ class AmazonInboundShipment(models.Model):
             or selected.status != 'ACCEPTED'
         ):
             raise UserError(_("Placement options require one successfully confirmed packing option."))
+        if self.packing_information_status != 'success':
+            raise UserError(_(
+                "Submit box-level packing information successfully before generating placement options."
+            ))
+
+    def _prepare_packing_information_payload(self):
+        """Validate local cartons and build the official SetPackingInformationRequest."""
+        self.ensure_one()
+        selected = self.packing_option_ids.filtered('selected')
+        if (
+            self.packing_confirmation_status != 'success'
+            or len(selected) != 1
+            or selected.status != 'ACCEPTED'
+        ):
+            raise UserError(_("Confirm exactly one Amazon packing option before submitting boxes."))
+        groups = selected.packing_group_ids
+        if not groups:
+            raise UserError(_("The accepted packing option has no Amazon packing groups."))
+        boxes = selected.box_ids
+        if not boxes:
+            raise UserError(_("Enter at least one box with dimensions, weight, and contents."))
+
+        inbound_lines = {(line.sku or '').strip(): line for line in self.line_ids}
+        package_groupings = []
+        for group in groups:
+            group_id = (group.amazon_packing_group_id or '').strip()
+            group_boxes = boxes.filtered(
+                lambda box: (box.amazon_packing_group_id or '').strip() == group_id
+            )
+            if not group_boxes:
+                raise UserError(_("Packing group %s has no local box information.", group_id))
+            expected = {(item.msku or '').strip(): item.quantity for item in group.item_ids}
+            actual = {}
+            box_values = []
+            for box in group_boxes:
+                if not box.line_ids:
+                    raise UserError(_("Every box in packing group %s must contain at least one item.", group_id))
+                item_values = []
+                for box_line in box.line_ids:
+                    msku = (box_line.msku or '').strip()
+                    inbound_line = inbound_lines.get(msku)
+                    if not inbound_line:
+                        raise UserError(_("Box MSKU %s is not present on the inbound plan.", msku))
+                    actual[msku] = actual.get(msku, 0) + box_line.quantity
+                    item_values.append({
+                        'msku': msku,
+                        'quantity': box_line.quantity,
+                        'prepOwner': inbound_line.prep_owner,
+                        'labelOwner': inbound_line.label_owner,
+                    })
+                box_values.append({
+                    'contentInformationSource': 'BOX_CONTENT_PROVIDED',
+                    'dimensions': {
+                        'unitOfMeasurement': box.dimension_unit,
+                        'length': box.length,
+                        'width': box.width,
+                        'height': box.height,
+                    },
+                    'weight': {'unit': box.weight_unit, 'value': box.weight},
+                    'quantity': 1,
+                    'items': item_values,
+                })
+            if actual != expected:
+                raise UserError(_(
+                    "Box contents for packing group %s must exactly match Amazon's group items. "
+                    "Expected %s; found %s.", group_id, expected, actual,
+                ))
+            package_groupings.append({
+                'packingGroupId': group_id,
+                'boxes': box_values,
+            })
+        assigned_groups = {
+            (box.amazon_packing_group_id or '').strip() for box in boxes
+        }
+        expected_groups = set(groups.mapped('amazon_packing_group_id'))
+        if assigned_groups != expected_groups:
+            raise UserError(_("Every local box must reference a packing group from the accepted option."))
+        return {'packageGroupings': package_groupings}
 
     def action_generate_packing_options(self):
         self.ensure_one()
@@ -1518,6 +1638,20 @@ class AmazonInboundShipment(models.Model):
         return self._start_phase3_operation(
             'confirm_packing_option', 'confirm_packing_option',
             api_args=(selected.amazon_packing_option_id,), option=selected,
+        )
+
+    def action_set_packing_information(self):
+        self.ensure_one()
+        self._check_inbound_manager_access()
+        self._lock_phase3_workflow()
+        body = self._prepare_packing_information_payload()
+        if self.packing_information_status == 'success':
+            return self.instance_id._notify(
+                _("Packing Information"), _("Box-level packing information is already confirmed."),
+                'warning',
+            )
+        return self._start_phase3_operation(
+            'set_packing_information', 'set_packing_information', api_args=(body,),
         )
 
     def action_generate_placement_options(self):

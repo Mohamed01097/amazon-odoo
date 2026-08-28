@@ -86,6 +86,7 @@ class TestFbaReceivingPhase5(TransactionCase):
             'shipment_id': shipment_ids[0] if len(shipment_ids) == 1 else False,
             'create_operation_status': 'success',
             'packing_confirmation_status': 'success',
+            'packing_information_status': 'success',
             'placement_confirmation_status': 'success',
             'state': 'placement_confirmed',
             'line_ids': [Command.create({
@@ -113,6 +114,9 @@ class TestFbaReceivingPhase5(TransactionCase):
                 'amazon_shipment_id': shipment_ids[index - 1],
                 'shipment_confirmation_id': 'FBA19RC%04d%02d' % (sequence, index),
                 'status': 'SHIPPED',
+                'transportation_confirmation_status': 'success',
+                'labels_status': 'success',
+                'label_download_url': 'https://example.test/fba-labels.pdf',
                 'destination_fc': 'CAI1',
                 'line_ids': [Command.create({
                     'amazon_product_id': amazon_product.id,

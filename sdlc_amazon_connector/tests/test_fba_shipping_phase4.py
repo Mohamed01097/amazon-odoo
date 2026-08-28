@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from odoo import Command, fields
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
@@ -14,6 +16,10 @@ SHIPMENT_ID = 'sh1234abcd-1234-abcd-5678-1234abcd5678'
 TRANSPORTATION_OPTION_ID = 'to1234abcd-1234-abcd-5678-1234abcd5678'
 TRACKING_OPERATION_ID = '77777777-7777-7777-7777-777777777777'
 TRANSPORTATION_OPERATION_ID = '88888888-8888-8888-8888-888888888888'
+DELIVERY_GENERATE_OPERATION_ID = '99999999-9999-9999-9999-999999999999'
+DELIVERY_CONFIRM_OPERATION_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+DELIVERY_OPTION_ID = 'dw1234abcd-1234-abcd-5678-1234abcd5678'
+SHIPMENT_ID_2 = 'sh5678abcd-1234-abcd-5678-1234abcd5678'
 
 
 @tagged('post_install', '-at_install')
@@ -43,6 +49,11 @@ class TestFbaShippingPhase4(TransactionCase):
             'fba_source_location_id': self.source_warehouse.lot_stock_id.id,
         })
         self.instance.action_create_fba_stock_structure()
+        token_patcher = patch.object(
+            type(self.instance), '_get_access_token_or_raise', return_value='test-token',
+        )
+        token_patcher.start()
+        self.addCleanup(token_patcher.stop)
         self.product = self.env['product.product'].sudo().with_company(self.company).create({
             'name': 'Phase 4 Storable Product',
             'default_code': 'P4-MSKU-001',
@@ -69,6 +80,7 @@ class TestFbaShippingPhase4(TransactionCase):
             ),
             'create_operation_status': 'success',
             'packing_confirmation_status': 'success',
+            'packing_information_status': 'success',
             'placement_confirmation_status': 'success',
             'state': state,
             'line_ids': [Command.create({
@@ -125,6 +137,13 @@ class TestFbaShippingPhase4(TransactionCase):
                 'msku': self.amazon_product.sku,
                 'quantity': quantity,
             })],
+        })
+        self.env['amazon.fba.shipment.box'].sudo().create({
+            'instance_id': self.instance.id,
+            'inbound_shipment_id': shipment.id,
+            'physical_shipment_id': physical.id,
+            'amazon_box_id': 'FBA10ABC0YY100001',
+            'quantity': 1,
         })
         shipment.write({'shipment_confirmation_id': physical.shipment_confirmation_id})
         return shipment
@@ -211,6 +230,11 @@ class TestFbaShippingPhase4(TransactionCase):
     def _prepare_dispatched_physical(self):
         physical = self.shipment.physical_shipment_ids
         physical.action_create_dispatch_picking()
+        physical.write({
+            'transportation_confirmation_status': 'success',
+            'labels_status': 'success',
+            'label_download_url': 'https://example.test/labels.pdf',
+        })
         result = physical.picking_id.with_context(
             picking_ids_not_to_backorder=physical.picking_id.ids,
         ).button_validate()
@@ -279,7 +303,7 @@ class TestFbaShippingPhase4(TransactionCase):
             self.shipment.action_create_picking()
         self.assertFalse(self.shipment.picking_ids)
 
-    def test_04_confirmation_moves_only_source_to_transit_and_tracks(self):
+    def test_04_legacy_combined_dispatch_and_tracking_is_disabled(self):
         source = self.instance.fba_source_location_id
         transit = self.instance.fba_transit_location_id
         sellable = self.instance.fba_sellable_location_id
@@ -287,69 +311,14 @@ class TestFbaShippingPhase4(TransactionCase):
         transit_before = self._quantity_at(transit)
         sellable_before = self._quantity_at(sellable)
         self._prepare_ready_shipment()
-
-        self.shipment.action_confirm_shipment()
-
-        picking = self.shipment.picking_ids
-        self.assertEqual(picking.state, 'done')
-        self.assertEqual(self.shipment.state, 'shipment_confirmed')
-        self.assertEqual(self.shipment.shipment_confirmation_status, 'pending')
-        self.assertEqual(self.shipment.line_ids.quantity_shipped, 4)
-        self.assertEqual(self._quantity_at(source), source_before - 4)
-        self.assertEqual(self._quantity_at(transit), transit_before + 4)
-        self.assertEqual(self._quantity_at(sellable), sellable_before)
-
-        job = self.shipment.operation_job_ids.filtered(
-            lambda item: item.operation_type == 'confirm_shipment'
-        )
-        self.assertEqual(len(job), 1)
-        with (
-            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
-            patch.object(
-                AmazonAPI, 'update_shipment_tracking_details', autospec=True,
-                return_value={
-                    'operationId': TRACKING_OPERATION_ID,
-                    '_amazon_request_id': 'phase4-update-tracking-request',
-                },
-            ) as update_tracking,
-        ):
-            job._process_operation()
-        self.assertEqual(job.operation_id, TRACKING_OPERATION_ID)
-        self.assertEqual(job.state, 'in_progress')
-        body = update_tracking.call_args.args[-1]
-        self.assertEqual(
-            body['trackingDetails']['spdTrackingDetail']['spdTrackingItems'],
-            [{'boxId': 'FBA10ABC0YY100001', 'trackingId': '1Z999PHASE4'}],
-        )
-
-        with (
-            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
-            patch.object(
-                AmazonAPI, 'get_inbound_operation_status', autospec=True,
-                return_value={
-                    'operationId': TRACKING_OPERATION_ID,
-                    'operationStatus': 'SUCCESS',
-                    'operationProblems': [],
-                },
-            ),
-            patch.object(
-                AmazonAPI, 'get_shipment', autospec=True,
-                return_value=self._get_shipment_response(status='SHIPPED'),
-            ),
-        ):
-            job._process_operation()
-        self.assertEqual(job.state, 'done')
-        self.assertEqual(self.shipment.state, 'waiting_receiving')
-        self.assertEqual(self.shipment.shipment_confirmation_status, 'success')
-        self.assertEqual(self.shipment.shipment_confirmation_id, 'FBA1234ABCD')
-        self.assertEqual(self.shipment.shipment_status, 'SHIPPED')
-        self.assertEqual(self.shipment.tracking_id, '1Z999PHASE4')
-        self.assertEqual(self._quantity_at(sellable), sellable_before)
-
-        with self.assertRaisesRegex(UserError, 'already queued or completed'):
+        with self.assertRaisesRegex(UserError, 'legacy combined'):
             self.shipment.action_confirm_shipment()
-        self.assertEqual(self._quantity_at(source), source_before - 4)
-        self.assertEqual(self._quantity_at(transit), transit_before + 4)
+        self.assertEqual(self._quantity_at(source), source_before)
+        self.assertEqual(self._quantity_at(transit), transit_before)
+        self.assertEqual(self._quantity_at(sellable), sellable_before)
+        self.assertFalse(self.shipment.operation_job_ids.filtered(
+            lambda item: item.operation_type == 'confirm_shipment'
+        ))
 
     def test_05_status_refresh_is_idempotent_and_does_not_move_stock(self):
         self.shipment.action_create_picking()
@@ -383,37 +352,15 @@ class TestFbaShippingPhase4(TransactionCase):
         self.assertEqual(self._quantity_at(self.instance.fba_transit_location_id), transit_before)
         self.assertEqual(self._quantity_at(self.instance.fba_sellable_location_id), sellable_before)
 
-    def test_06_failed_confirmation_can_retry_without_moving_twice(self):
+    def test_06_legacy_combined_action_never_moves_stock(self):
         self._prepare_ready_shipment()
-        self.shipment.action_confirm_shipment()
-        job = self.shipment.operation_job_ids.filtered(
-            lambda item: item.operation_type == 'confirm_shipment'
-        )
-        job.max_retries = 1
-        source_after_ship = self._quantity_at(self.instance.fba_source_location_id)
-        transit_after_ship = self._quantity_at(self.instance.fba_transit_location_id)
-        with (
-            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
-            patch.object(
-                AmazonAPI, 'update_shipment_tracking_details', autospec=True,
-                side_effect=RuntimeError('temporary tracking failure'),
-            ),
-        ):
-            job._process_operation()
-        self.assertEqual(job.state, 'failed')
-        self.assertEqual(self.shipment.shipment_confirmation_status, 'failed')
-
-        self.shipment.action_confirm_shipment()
-
-        self.assertEqual(job.state, 'pending')
-        self.assertEqual(job.retry_count, 0)
-        self.assertEqual(self.shipment.picking_ids.state, 'done')
-        self.assertEqual(
-            self._quantity_at(self.instance.fba_source_location_id), source_after_ship,
-        )
-        self.assertEqual(
-            self._quantity_at(self.instance.fba_transit_location_id), transit_after_ship,
-        )
+        source_before = self._quantity_at(self.instance.fba_source_location_id)
+        transit_before = self._quantity_at(self.instance.fba_transit_location_id)
+        with self.assertRaisesRegex(UserError, 'legacy combined'):
+            self.shipment.action_confirm_shipment()
+        self.assertEqual(self.shipment.picking_ids.state, 'assigned')
+        self.assertEqual(self._quantity_at(self.instance.fba_source_location_id), source_before)
+        self.assertEqual(self._quantity_at(self.instance.fba_transit_location_id), transit_before)
 
     def test_07_ltl_tracking_payload_uses_official_fields(self):
         self.shipment.write({
@@ -452,6 +399,7 @@ class TestFbaShippingPhase4(TransactionCase):
             % (PLAN_ID, SHIPMENT_ID)
         ))
         self.assertEqual(request.call_args.kwargs['body'], payload)
+        self.assertEqual(request.call_args.kwargs['max_retries'], 0)
 
         response.json.return_value = self._get_shipment_response()
         with patch.object(api, '_amazon_request', return_value=response) as request:
@@ -465,14 +413,67 @@ class TestFbaShippingPhase4(TransactionCase):
             % (PLAN_ID, SHIPMENT_ID)
         ))
 
-    def test_09_transportation_requires_done_physical_dispatch(self):
+        response.json.return_value = {'operationId': DELIVERY_GENERATE_OPERATION_ID}
+        with patch.object(api, '_amazon_request', return_value=response) as request:
+            api.generate_delivery_window_options(
+                self.instance, 'test-token', PLAN_ID, SHIPMENT_ID,
+            )
+        self.assertEqual(request.call_args.args[2], 'POST')
+        self.assertTrue(request.call_args.args[3].endswith(
+            '/shipments/%s/deliveryWindowOptions' % SHIPMENT_ID
+        ))
+        self.assertEqual(request.call_args.kwargs['max_retries'], 0)
+
+        response.json.return_value = {'deliveryWindowOptions': []}
+        with patch.object(api, '_amazon_request', return_value=response) as request:
+            api.list_delivery_window_options(
+                self.instance, 'test-token', PLAN_ID, SHIPMENT_ID, 20, 'next-page',
+            )
+        self.assertEqual(request.call_args.args[2], 'GET')
+        self.assertEqual(request.call_args.kwargs['params']['paginationToken'], 'next-page')
+
+        response.json.return_value = {'operationId': DELIVERY_CONFIRM_OPERATION_ID}
+        with patch.object(api, '_amazon_request', return_value=response) as request:
+            api.confirm_delivery_window_option(
+                self.instance, 'test-token', PLAN_ID, SHIPMENT_ID, DELIVERY_OPTION_ID,
+            )
+        self.assertTrue(request.call_args.args[3].endswith(
+            '/deliveryWindowOptions/%s/confirmation' % DELIVERY_OPTION_ID
+        ))
+        self.assertEqual(request.call_args.kwargs['max_retries'], 0)
+
+        response.json.return_value = {'boxes': []}
+        with patch.object(api, '_amazon_request', return_value=response) as request:
+            api.list_shipment_boxes(self.instance, 'test-token', PLAN_ID, SHIPMENT_ID)
+        self.assertTrue(request.call_args.args[3].endswith('/shipments/%s/boxes' % SHIPMENT_ID))
+
+        response.json.return_value = {'payload': {'DownloadURL': 'https://example.test/labels.pdf'}}
+        with patch.object(api, '_amazon_request', return_value=response) as request:
+            api.get_inbound_labels_v0(
+                self.instance, 'test-token', 'FBA1234ABCD', 'PackageLabel_A4_2',
+                'UNIQUE', 1, ['BOX-1'],
+            )
+        self.assertTrue(request.call_args.args[3].endswith(
+            '/fba/inbound/v0/shipments/FBA1234ABCD/labels'
+        ))
+        self.assertEqual(request.call_args.kwargs['params']['PackageLabelsToPrint'], ['BOX-1'])
+
+    def test_09_transportation_precedes_physical_dispatch(self):
         physical = self.shipment.physical_shipment_ids
-        with self.assertRaisesRegex(UserError, 'dispatch picking is done'):
+        with patch.object(
+            AmazonAPI, 'generate_transportation_options', autospec=True,
+            return_value={'operationId': TRANSPORTATION_OPERATION_ID},
+        ):
             physical.action_generate_transportation_options()
-        self.assertFalse(physical.transportation_option_ids)
+            job = self.shipment.operation_job_ids.filtered(
+                lambda item: item.operation_type == 'generate_transportation_options'
+            )
+            job._process_operation()
+        self.assertEqual(job.operation_id, TRANSPORTATION_OPERATION_ID)
+        self.assertFalse(physical.picking_id)
 
     def test_10_generate_and_list_transportation_options_are_idempotent(self):
-        physical = self._prepare_dispatched_physical()
+        physical = self.shipment.physical_shipment_ids
         with (
             patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
             patch.object(
@@ -520,7 +521,7 @@ class TestFbaShippingPhase4(TransactionCase):
         self.assertEqual(len(physical.transportation_option_ids), 2)
 
     def test_11_selection_is_one_option_and_does_not_confirm(self):
-        physical = self._prepare_dispatched_physical()
+        physical = self.shipment.physical_shipment_ids
         option_a = self.env['amazon.fba.transportation.option'].sudo().create({
             'instance_id': self.instance.id,
             'inbound_shipment_id': self.shipment.id,
@@ -549,7 +550,7 @@ class TestFbaShippingPhase4(TransactionCase):
         self.assertFalse(physical.transportation_confirmation_operation_id)
 
     def test_12_confirm_transportation_payload_and_async_success(self):
-        physical = self._prepare_dispatched_physical()
+        physical = self.shipment.physical_shipment_ids
         option = self.env['amazon.fba.transportation.option'].sudo().create({
             'instance_id': self.instance.id,
             'inbound_shipment_id': self.shipment.id,
@@ -602,7 +603,7 @@ class TestFbaShippingPhase4(TransactionCase):
             physical.action_confirm_transportation()
 
     def test_13_transportation_async_in_progress_and_failure(self):
-        physical = self._prepare_dispatched_physical()
+        physical = self.shipment.physical_shipment_ids
         job = self.env['amazon.inbound.operation.job'].sudo().create({
             'inbound_shipment_id': self.shipment.id,
             'physical_shipment_id': physical.id,
@@ -633,7 +634,7 @@ class TestFbaShippingPhase4(TransactionCase):
         self.assertIn('Bad option', physical.transportation_error_message)
 
     def test_14_blank_tracking_blocked_and_payload_is_shipment_level(self):
-        physical = self._prepare_dispatched_physical()
+        physical = self.shipment.physical_shipment_ids
         option = self.env['amazon.fba.transportation.option'].sudo().create({
             'instance_id': self.instance.id,
             'inbound_shipment_id': self.shipment.id,
@@ -667,3 +668,193 @@ class TestFbaShippingPhase4(TransactionCase):
             body['trackingDetails']['spdTrackingDetail']['spdTrackingItems'][0]['trackingId'],
             '1Z999PHASE4',
         )
+
+    def test_15_required_delivery_window_blocks_transport_until_confirmed(self):
+        physical = self.shipment.physical_shipment_ids
+        option = self.env['amazon.fba.transportation.option'].sudo().create({
+            'instance_id': self.instance.id,
+            'inbound_shipment_id': self.shipment.id,
+            'physical_shipment_id': physical.id,
+            'amazon_transportation_option_id': TRANSPORTATION_OPTION_ID,
+            'shipment_id': SHIPMENT_ID,
+            'shipping_mode': 'GROUND_SMALL_PARCEL',
+            'shipping_solution': 'USE_YOUR_OWN_CARRIER',
+            'requires_delivery_window': True,
+        })
+        option.action_select_transportation_option()
+        with self.assertRaisesRegex(UserError, 'Confirm a delivery window'):
+            physical.action_confirm_transportation()
+
+        with patch.object(
+            AmazonAPI, 'generate_delivery_window_options', autospec=True,
+            return_value={'operationId': DELIVERY_GENERATE_OPERATION_ID},
+        ):
+            physical.action_generate_delivery_window_options()
+            generation_job = self.shipment.operation_job_ids.filtered(
+                lambda item: item.operation_type == 'generate_delivery_window_options'
+            )
+            generation_job._process_operation()
+        with (
+            patch.object(
+                AmazonAPI, 'get_inbound_operation_status', autospec=True,
+                return_value={'operationStatus': 'SUCCESS', 'operationProblems': []},
+            ),
+            patch.object(
+                AmazonAPI, 'list_delivery_window_options', autospec=True,
+                return_value={'deliveryWindowOptions': [{
+                    'deliveryWindowOptionId': DELIVERY_OPTION_ID,
+                    'startDate': '2030-01-01T08:00:00Z',
+                    'endDate': '2030-01-01T12:00:00Z',
+                    'validUntil': '2030-01-01T00:00:00Z',
+                    'availabilityType': 'AVAILABLE',
+                }]},
+            ),
+        ):
+            generation_job._process_operation()
+        window = physical.delivery_window_option_ids
+        window.action_select_delivery_window()
+        with patch.object(
+            AmazonAPI, 'confirm_delivery_window_option', autospec=True,
+            return_value={'operationId': DELIVERY_CONFIRM_OPERATION_ID},
+        ) as confirm_mock:
+            physical.action_confirm_delivery_window()
+            confirmation_job = self.shipment.operation_job_ids.filtered(
+                lambda item: item.operation_type == 'confirm_delivery_window_option'
+            )
+            confirmation_job._process_operation()
+        self.assertEqual(confirm_mock.call_args.args[-1], DELIVERY_OPTION_ID)
+        with patch.object(
+            AmazonAPI, 'get_inbound_operation_status', autospec=True,
+            return_value={'operationStatus': 'SUCCESS', 'operationProblems': []},
+        ):
+            confirmation_job._process_operation()
+        self.assertEqual(physical.delivery_window_confirmation_status, 'success')
+
+    def test_16_multi_shipment_transportation_is_confirmed_once_at_plan_level(self):
+        first = self.shipment.physical_shipment_ids
+        second = self.env['amazon.fba.physical.shipment'].sudo().create({
+            'inbound_shipment_id': self.shipment.id,
+            'placement_option_id': first.placement_option_id.id,
+            'amazon_shipment_id': SHIPMENT_ID_2,
+            'shipment_confirmation_id': 'FBA5678EFGH',
+            'status': 'WORKING',
+            'destination_fc': 'CAI2',
+            'line_ids': [Command.create({
+                'amazon_product_id': self.amazon_product.id,
+                'msku': self.amazon_product.sku,
+                'quantity': 4,
+            })],
+        })
+        options = self.env['amazon.fba.transportation.option'].sudo()
+        for physical, option_id in (
+            (first, TRANSPORTATION_OPTION_ID),
+            (second, 'to5678abcd-1234-abcd-5678-1234abcd5678'),
+        ):
+            options |= self.env['amazon.fba.transportation.option'].sudo().create({
+                'instance_id': self.instance.id,
+                'inbound_shipment_id': self.shipment.id,
+                'physical_shipment_id': physical.id,
+                'amazon_transportation_option_id': option_id,
+                'shipment_id': physical.amazon_shipment_id,
+                'shipping_mode': 'GROUND_SMALL_PARCEL',
+                'shipping_solution': 'USE_YOUR_OWN_CARRIER',
+            })
+        for option in options:
+            option.action_select_transportation_option()
+        with patch.object(
+            AmazonAPI, 'confirm_transportation_options', autospec=True,
+            return_value={'operationId': TRANSPORTATION_OPERATION_ID},
+        ) as confirm_mock:
+            first.action_confirm_transportation()
+            job = self.shipment.operation_job_ids.filtered(
+                lambda item: item.operation_type == 'confirm_transportation_options'
+            )
+            job._process_operation()
+        selections = confirm_mock.call_args.args[-1]['transportationSelections']
+        self.assertEqual({item['shipmentId'] for item in selections}, {SHIPMENT_ID, SHIPMENT_ID_2})
+        self.assertEqual(set((first | second).mapped('transportation_confirmation_status')), {'in_progress'})
+        with self.assertRaisesRegex(UserError, 'already queued or completed'):
+            second.action_confirm_transportation()
+
+    def test_17_shipping_labels_use_confirmation_id_and_official_box_ids(self):
+        physical = self.shipment.physical_shipment_ids
+        physical.write({'transportation_confirmation_status': 'success'})
+        with (
+            patch.object(
+                AmazonAPI, 'list_shipment_boxes', autospec=True,
+                return_value={'boxes': [{
+                    'boxId': 'FBA10ABC0YY100001', 'packageId': 'pkg-1', 'quantity': 1,
+                }]},
+            ),
+            patch.object(
+                AmazonAPI, 'get_inbound_labels_v0', autospec=True,
+                return_value={'payload': {'DownloadURL': 'https://example.test/labels.pdf'}},
+            ) as labels_mock,
+        ):
+            action = physical.action_get_shipping_labels()
+        self.assertEqual(action['url'], 'https://example.test/labels.pdf')
+        self.assertEqual(labels_mock.call_args.args[3], 'FBA1234ABCD')
+        self.assertEqual(labels_mock.call_args.args[-1], ['FBA10ABC0YY100001'])
+        self.assertEqual(physical.labels_status, 'success')
+
+    def test_18_ambiguous_transport_write_is_not_replayed(self):
+        physical = self.shipment.physical_shipment_ids
+        with patch.object(
+            AmazonAPI, 'generate_transportation_options', autospec=True,
+            side_effect=UserError('request timed out after submission'),
+        ) as generate_mock:
+            physical.action_generate_transportation_options()
+            job = self.shipment.operation_job_ids.filtered(
+                lambda item: item.operation_type == 'generate_transportation_options'
+            )
+            job._process_operation()
+            job._process_operation()
+            with self.assertRaisesRegex(UserError, 'unknown Amazon outcome'):
+                physical.action_generate_transportation_options()
+        self.assertEqual(generate_mock.call_count, 1)
+        self.assertEqual(job.state, 'failed')
+        self.assertEqual(physical.transportation_error_code, 'WRITE_OUTCOME_UNKNOWN')
+
+    def test_19_transport_write_http_failures_are_never_automatically_replayed(self):
+        physical = self.shipment.physical_shipment_ids
+        for status_code in (400, 403, 409, 500):
+            with self.subTest(status_code=status_code):
+                physical.write({
+                    'transportation_generation_operation_id': False,
+                    'transportation_generation_status': False,
+                    'transportation_error_code': False,
+                    'transportation_error_message': False,
+                })
+                physical.action_generate_transportation_options()
+                job = self.shipment.operation_job_ids.filtered(
+                    lambda item: item.operation_type == 'generate_transportation_options'
+                    and item.state in ('pending', 'in_progress')
+                )
+                self.assertEqual(len(job), 1)
+
+                response = requests.Response()
+                response.status_code = status_code
+                http_error = requests.HTTPError(
+                    'HTTP %s' % status_code, response=response,
+                )
+
+                def fail_write(*_args, **_kwargs):
+                    try:
+                        raise http_error
+                    except requests.HTTPError as exc:
+                        raise UserError('HTTP Status: %s' % status_code) from exc
+
+                with patch.object(
+                    AmazonAPI, 'generate_transportation_options', autospec=True,
+                    side_effect=fail_write,
+                ) as generate_mock:
+                    job._process_operation()
+                    job._process_operation()
+
+                self.assertEqual(generate_mock.call_count, 1)
+                self.assertEqual(job.state, 'failed')
+                self.assertEqual(
+                    physical.transportation_error_code,
+                    'WRITE_OUTCOME_UNKNOWN' if status_code >= 500 else 'BACKGROUND_JOB_FAILED',
+                )
+                job.unlink()

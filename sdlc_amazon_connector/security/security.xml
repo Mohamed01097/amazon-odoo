@@ -348,6 +348,27 @@
         <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
     </record>
 
+    <record id="rule_amazon_fba_transportation_option_company" model="ir.rule">
+        <field name="name">Amazon FBA transportation options by company</field>
+        <field name="model_id" ref="model_amazon_fba_transportation_option"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+
+    <record id="rule_amazon_fba_delivery_window_option_company" model="ir.rule">
+        <field name="name">Amazon FBA delivery windows by company</field>
+        <field name="model_id" ref="model_amazon_fba_delivery_window_option"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+
+    <record id="rule_amazon_fba_shipment_box_company" model="ir.rule">
+        <field name="name">Amazon FBA shipment boxes by company</field>
+        <field name="model_id" ref="model_amazon_fba_shipment_box"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_amazon_connector.group_amazon_user'))]"/>
+    </record>
+
     <record id="rule_amazon_fba_inventory_discrepancy_company" model="ir.rule">
         <field name="name">Amazon FBA inventory discrepancies by company</field>
         <field name="model_id" ref="model_amazon_fba_inventory_discrepancy"/>

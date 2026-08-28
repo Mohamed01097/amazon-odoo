@@ -29,6 +29,7 @@ class AmazonInboundOperationJob(models.Model):
         ('generate_packing_options', 'Generate Packing Options'),
         ('refresh_packing_options', 'Refresh Packing Options'),
         ('confirm_packing_option', 'Confirm Packing Option'),
+        ('set_packing_information', 'Set Packing Information'),
         ('generate_placement_options', 'Generate Placement Options'),
         ('refresh_placement_options', 'Refresh Placement Options'),
         ('confirm_placement_option', 'Confirm Placement Option'),
