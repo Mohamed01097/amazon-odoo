@@ -1644,12 +1644,12 @@ class AmazonInboundShipment(models.Model):
         self.ensure_one()
         self._check_inbound_manager_access()
         self._lock_phase3_workflow()
-        body = self._prepare_packing_information_payload()
         if self.packing_information_status == 'success':
             return self.instance_id._notify(
                 _("Packing Information"), _("Box-level packing information is already confirmed."),
                 'warning',
             )
+        body = self._prepare_packing_information_payload()
         return self._start_phase3_operation(
             'set_packing_information', 'set_packing_information', api_args=(body,),
         )

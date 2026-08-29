@@ -1,3 +1,4 @@
+import base64
 import inspect
 from unittest.mock import patch
 
@@ -90,7 +91,7 @@ class TestFbaDispatch(TransactionCase):
         })
         physicals = self.env['amazon.fba.physical.shipment']
         for index, (shipment_id, lines) in enumerate(splits, start=1):
-            physicals |= self.env['amazon.fba.physical.shipment'].sudo().create({
+            physical = self.env['amazon.fba.physical.shipment'].sudo().create({
                 'inbound_shipment_id': plan.id,
                 'placement_option_id': placement.id,
                 'amazon_shipment_id': shipment_id,
@@ -99,13 +100,23 @@ class TestFbaDispatch(TransactionCase):
                 'status': 'WORKING',
                 'transportation_confirmation_status': 'success',
                 'labels_status': 'success',
-                'label_download_url': 'https://example.test/fba-labels.pdf',
+                'product_labels_confirmed': True,
                 'line_ids': [Command.create({
                     'amazon_product_id': products[sku].id,
                     'msku': sku,
                     'quantity': quantity,
                 }) for sku, quantity in lines],
             })
+            attachment = self.env['ir.attachment'].sudo().create({
+                'name': 'dispatch-test-labels.pdf',
+                'type': 'binary',
+                'datas': base64.b64encode(b'%PDF-1.4 dispatch test labels'),
+                'mimetype': 'application/pdf',
+                'res_model': physical._name,
+                'res_id': physical.id,
+            })
+            physical.shipping_label_attachment_id = attachment
+            physicals |= physical
         return plan, physicals
 
     def _receive(self, product, quantity):
@@ -159,11 +170,26 @@ class TestFbaDispatch(TransactionCase):
         ])
         self._receive(self.product_a, 20)
         self._receive(self.product_b, 10)
+        source = self.instance.fba_source_location_id
+        transit = self.instance.fba_transit_location_id
+        source_before = {
+            self.product_a: self._quantity(self.product_a, source),
+            self.product_b: self._quantity(self.product_b, source),
+        }
+        transit_before = {
+            self.product_a: self._quantity(self.product_a, transit),
+            self.product_b: self._quantity(self.product_b, transit),
+        }
 
         plan.action_create_picking()
 
         self.assertEqual(len(plan.picking_ids), 2)
         self.assertFalse(plan.picking_id)
+        self.assertEqual(sum(physicals.mapped('dispatch_quantity')), 30)
+        self.assertEqual(self._quantity(self.product_a, source), source_before[self.product_a])
+        self.assertEqual(self._quantity(self.product_b, source), source_before[self.product_b])
+        self.assertEqual(self._quantity(self.product_a, transit), transit_before[self.product_a])
+        self.assertEqual(self._quantity(self.product_b, transit), transit_before[self.product_b])
         by_shipment = {physical.amazon_shipment_id: physical.picking_id for physical in physicals}
         quantities_a = {
             move.product_id.default_code: move.product_uom_qty
@@ -175,6 +201,8 @@ class TestFbaDispatch(TransactionCase):
         }
         self.assertEqual(quantities_a, {'SKU-A': 10, 'SKU-B': 10})
         self.assertEqual(quantities_b, {'SKU-A': 10})
+        self.assertEqual(sum(quantities_a.values()), 20)
+        self.assertEqual(sum(quantities_b.values()), 10)
         self.assertEqual(set(physicals.mapped('destination_fc')), {'CAI1', 'CAI2'})
 
     def test_dispatch_preconditions(self):
@@ -257,6 +285,25 @@ class TestFbaDispatch(TransactionCase):
         self.assertEqual(
             self._quantity(self.product_a, self.instance.fba_source_location_id), source_before,
         )
+
+    def test_validation_blocks_until_seller_product_labels_are_confirmed(self):
+        _plan, physical = self._create_plan([(SHIPMENT_A, [('SKU-A', 1)])])
+        self._receive(self.product_a, 1)
+        physical.action_create_dispatch_picking()
+        physical.product_labels_confirmed = False
+        source_before = self._quantity(self.product_a, self.instance.fba_source_location_id)
+
+        with self.assertRaisesRegex(UserError, 'product/FNSKU labels'):
+            physical.picking_id.button_validate()
+
+        self.assertNotEqual(physical.picking_id.state, 'done')
+        self.assertEqual(
+            self._quantity(self.product_a, self.instance.fba_source_location_id), source_before,
+        )
+        physical.action_confirm_product_labels()
+        self.assertTrue(physical.product_labels_confirmed)
+        self.assertTrue(physical.product_labels_confirmed_at)
+        self.assertEqual(physical.product_labels_confirmed_by_id, self.env.user)
 
     def test_dispatch_code_has_no_direct_quant_write(self):
         model = type(self.env['amazon.fba.physical.shipment'])

@@ -1181,6 +1181,18 @@ class TestFbaPackingPlacementPhase3(TransactionCase):
             before_quantities,
         )
 
+    def test_09_repeated_packing_information_click_does_not_rebuild_payload(self):
+        self._generate_packing()
+        self._confirm_packing()
+        self._set_packing_information()
+        self.shipment.packing_option_ids.filtered('selected').box_ids.unlink()
+
+        with patch.object(AmazonAPI, 'set_packing_information', autospec=True) as set_mock:
+            action = self.shipment.action_set_packing_information()
+
+        self.assertEqual(action['params']['type'], 'warning')
+        set_mock.assert_not_called()
+
     def test_api_wrappers_use_official_v2024_paths(self):
         class Response:
             headers = {'x-amzn-RequestId': 'phase3-wrapper-request'}

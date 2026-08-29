@@ -1,6 +1,10 @@
+import base64
 import json
 import logging
 import re
+from urllib.parse import urlparse
+
+import requests
 
 from odoo import _, Command, api, fields, models
 from odoo.exceptions import UserError, ValidationError
@@ -12,6 +16,7 @@ _logger = logging.getLogger(__name__)
 
 AMAZON_SHIPMENT_ID_RE = INBOUND_PLAN_ID_RE
 AMAZON_FREIGHT_BILL_RE = re.compile(r'^[A-Za-z0-9._ -]{1,64}$')
+MAX_SHIPPING_LABEL_BYTES = 25 * 1024 * 1024
 PHASE4_STATES = {
     'placement_confirmed', 'picking_created', 'ready_to_ship', 'dispatched',
     'shipment_confirmed', 'waiting_receiving', 'partially_received',
@@ -656,7 +661,25 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
         ('success', 'Available'), ('failed', 'Failed'),
     ], copy=False, readonly=True, index=True)
     label_download_url = fields.Char(copy=False, readonly=True)
+    shipping_label_attachment_id = fields.Many2one(
+        'ir.attachment', string='Stored Box/Shipping Labels', copy=False, readonly=True,
+        ondelete='set null',
+    )
+    shipping_label_filename = fields.Char(copy=False, readonly=True)
+    shipping_label_content_type = fields.Char(copy=False, readonly=True)
     labels_last_synced_at = fields.Datetime(copy=False, readonly=True)
+    product_labels_required = fields.Boolean(
+        string='Seller Product/FNSKU Labels Required',
+        compute='_compute_product_labels_required',
+    )
+    product_labels_confirmed = fields.Boolean(
+        string='Product/FNSKU Labels Applied', copy=False, readonly=True,
+    )
+    product_labels_confirmed_at = fields.Datetime(copy=False, readonly=True)
+    product_labels_confirmed_by_id = fields.Many2one(
+        'res.users', string='Product Labels Confirmed By', copy=False, readonly=True,
+        ondelete='set null',
+    )
     carrier_type = fields.Selection([
         ('partnered', 'Amazon Partnered'),
         ('non_partnered', 'Non-Partnered'),
@@ -692,6 +715,50 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
     def _compute_dispatch_quantity(self):
         for physical in self:
             physical.dispatch_quantity = sum(physical.line_ids.mapped('quantity'))
+
+    @api.depends(
+        'line_ids.msku',
+        'inbound_shipment_id.line_ids.sku',
+        'inbound_shipment_id.line_ids.label_owner',
+    )
+    def _compute_product_labels_required(self):
+        for physical in self:
+            seller_labeled_mskus = set(
+                physical.inbound_shipment_id.line_ids.filtered(
+                    lambda line: line.label_owner == 'SELLER'
+                ).mapped('sku')
+            )
+            physical.product_labels_required = any(
+                line.msku in seller_labeled_mskus for line in physical.line_ids
+            )
+
+    def action_confirm_product_labels(self):
+        """Record the operator's physical product/FNSKU labeling checkpoint."""
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self._lock_dispatch()
+        if not self.product_labels_required:
+            return self.instance_id._notify(
+                _("FBA Product Labels"),
+                _("Amazon does not require seller-applied product labels for this shipment."),
+                'warning',
+            )
+        if self.product_labels_confirmed:
+            return self.instance_id._notify(
+                _("FBA Product Labels"),
+                _("Seller-applied product/FNSKU labels are already confirmed."),
+                'warning',
+            )
+        self.sudo().write({
+            'product_labels_confirmed': True,
+            'product_labels_confirmed_at': fields.Datetime.now(),
+            'product_labels_confirmed_by_id': self.env.user.id,
+        })
+        return self.instance_id._notify(
+            _("FBA Product Labels"),
+            _("Seller-applied product/FNSKU labels were recorded as printed and applied."),
+            'success',
+        )
 
     def _lock_dispatch(self):
         self.ensure_one()
@@ -1087,13 +1154,19 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
         return self.shipment_box_ids
 
     def action_get_shipping_labels(self):
-        """Retrieve official box IDs and the preserved v0 label download URL (read-only)."""
+        """Retrieve official box IDs and durably store the Amazon label document."""
         self.ensure_one()
         self.inbound_shipment_id._check_inbound_manager_access()
         if self.transportation_confirmation_status != 'success':
             raise UserError(_("Confirm transportation successfully before requesting box labels."))
         if not (self.shipment_confirmation_id or '').strip():
             raise UserError(_("Amazon shipmentConfirmationId is required for shipping labels."))
+        if self.labels_status == 'success' and self.shipping_label_attachment_id:
+            return {
+                'type': 'ir.actions.act_url',
+                'url': '/web/content/%s?download=true' % self.shipping_label_attachment_id.id,
+                'target': 'new',
+            }
         boxes = self._refresh_shipment_boxes()
         access_token = self.instance_id._get_access_token_or_raise()
         result = self.instance_id._api_call_safe(
@@ -1104,15 +1177,65 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
         )
         payload = result.get('payload') if isinstance(result, dict) else False
         url = str((payload or {}).get('DownloadURL') or '').strip()
-        if not url.startswith('https://'):
+        parsed_url = urlparse(url)
+        if parsed_url.scheme != 'https' or not parsed_url.netloc:
             self.sudo().write({'labels_status': 'failed', 'label_download_url': False})
             raise UserError(_("Amazon did not return a secure shipping-label download URL."))
+        try:
+            response = requests.get(url, timeout=(10, 60), allow_redirects=True)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            self.sudo().write({'labels_status': 'failed', 'label_download_url': False})
+            raise UserError(_("Amazon shipping-label document download failed: %s", exc)) from exc
+        final_url = urlparse(str(response.url or url))
+        if final_url.scheme != 'https' or not final_url.netloc:
+            self.sudo().write({'labels_status': 'failed', 'label_download_url': False})
+            raise UserError(_("Amazon redirected the shipping-label download to an insecure URL."))
+        content = response.content or b''
+        if not content or len(content) > MAX_SHIPPING_LABEL_BYTES:
+            self.sudo().write({'labels_status': 'failed', 'label_download_url': False})
+            raise UserError(_(
+                "Amazon returned an empty or oversized shipping-label document (maximum 25 MiB)."
+            ))
+        safe_reference = re.sub(
+            r'[^A-Za-z0-9._-]+', '_', self.shipment_confirmation_id.strip()
+        )
+        if content.startswith(b'%PDF-'):
+            extension = 'pdf'
+            content_type = 'application/pdf'
+        elif content.startswith(b'PK\x03\x04'):
+            extension = 'zip'
+            content_type = 'application/zip'
+        else:
+            self.sudo().write({'labels_status': 'failed', 'label_download_url': False})
+            raise UserError(_("Amazon returned an unsupported shipping-label document format."))
+        filename = 'amazon_fba_%s_box_labels.%s' % (safe_reference, extension)
+        attachment_vals = {
+            'name': filename,
+            'type': 'binary',
+            'datas': base64.b64encode(content),
+            'mimetype': content_type,
+            'res_model': self._name,
+            'res_id': self.id,
+        }
+        attachment = self.shipping_label_attachment_id.sudo()
+        if attachment:
+            attachment.write(attachment_vals)
+        else:
+            attachment = self.env['ir.attachment'].sudo().create(attachment_vals)
         self.sudo().write({
             'labels_status': 'success',
-            'label_download_url': url,
+            'label_download_url': False,
+            'shipping_label_attachment_id': attachment.id,
+            'shipping_label_filename': filename,
+            'shipping_label_content_type': content_type,
             'labels_last_synced_at': fields.Datetime.now(),
         })
-        return {'type': 'ir.actions.act_url', 'url': url, 'target': 'new'}
+        return {
+            'type': 'ir.actions.act_url',
+            'url': '/web/content/%s?download=true' % attachment.id,
+            'target': 'new',
+        }
 
     def action_submit_tracking(self):
         self.ensure_one()
@@ -1191,6 +1314,7 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             quote = raw.get('quote') or {}
             cost = quote.get('cost') or {}
             appointment = raw.get('carrierAppointment') or {}
+            shipping_solution = str(raw.get('shippingSolution') or '').strip() or False
             vals = {
                 'instance_id': self.instance_id.id,
                 'inbound_shipment_id': self.inbound_shipment_id.id,
@@ -1198,7 +1322,7 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
                 'amazon_transportation_option_id': option_id,
                 'shipment_id': shipment_id,
                 'shipping_mode': str(raw.get('shippingMode') or '').strip() or False,
-                'shipping_solution': str(raw.get('shippingSolution') or '').strip() or False,
+                'shipping_solution': shipping_solution,
                 'carrier_name': str(carrier.get('name') or '').strip() or False,
                 'carrier_alpha_code': str(carrier.get('alphaCode') or '').strip() or False,
                 'estimated_cost': cost.get('amount') or 0.0,
@@ -1208,7 +1332,8 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
                 'appointment_end': self._parse_amazon_datetime(appointment.get('endTime')),
                 'preconditions': json.dumps(raw.get('preconditions') or []),
                 'requires_delivery_window': (
-                    'CONFIRMED_DELIVERY_WINDOW' in (raw.get('preconditions') or [])
+                    shipping_solution == 'USE_YOUR_OWN_CARRIER'
+                    or 'CONFIRMED_DELIVERY_WINDOW' in (raw.get('preconditions') or [])
                 ),
                 'raw_response': self.inbound_shipment_id._sanitized_json(raw),
             }
@@ -1853,10 +1978,15 @@ class StockPickingAmazonInbound(models.Model):
                     "Confirm the required Amazon delivery window before dispatching picking %s.",
                     picking.name,
                 ))
-            if physical.labels_status != 'success' or not physical.label_download_url:
+            if physical.labels_status != 'success' or not physical.shipping_label_attachment_id:
                 raise UserError(_(
                     "Retrieve and print the Amazon box/shipping labels before dispatching picking %s.",
                     picking.name,
+                ))
+            if physical.product_labels_required and not physical.product_labels_confirmed:
+                raise UserError(_(
+                    "Confirm that seller-applied product/FNSKU labels are printed and applied before "
+                    "dispatching picking %s.", picking.name,
                 ))
             option = physical.selected_transportation_option_id
             if option.shipping_solution == 'USE_YOUR_OWN_CARRIER' and physical.tracking_status != 'success':

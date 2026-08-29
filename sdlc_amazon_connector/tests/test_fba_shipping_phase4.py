@@ -1,3 +1,4 @@
+import base64
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -230,10 +231,19 @@ class TestFbaShippingPhase4(TransactionCase):
     def _prepare_dispatched_physical(self):
         physical = self.shipment.physical_shipment_ids
         physical.action_create_dispatch_picking()
+        attachment = self.env['ir.attachment'].sudo().create({
+            'name': 'phase4-test-labels.pdf',
+            'type': 'binary',
+            'datas': base64.b64encode(b'%PDF-1.4 phase4 test labels'),
+            'mimetype': 'application/pdf',
+            'res_model': physical._name,
+            'res_id': physical.id,
+        })
         physical.write({
             'transportation_confirmation_status': 'success',
             'labels_status': 'success',
-            'label_download_url': 'https://example.test/labels.pdf',
+            'shipping_label_attachment_id': attachment.id,
+            'product_labels_confirmed': True,
         })
         result = physical.picking_id.with_context(
             picking_ids_not_to_backorder=physical.picking_id.ids,
@@ -671,17 +681,16 @@ class TestFbaShippingPhase4(TransactionCase):
 
     def test_15_required_delivery_window_blocks_transport_until_confirmed(self):
         physical = self.shipment.physical_shipment_ids
-        option = self.env['amazon.fba.transportation.option'].sudo().create({
-            'instance_id': self.instance.id,
-            'inbound_shipment_id': self.shipment.id,
-            'physical_shipment_id': physical.id,
-            'amazon_transportation_option_id': TRANSPORTATION_OPTION_ID,
-            'shipment_id': SHIPMENT_ID,
-            'shipping_mode': 'GROUND_SMALL_PARCEL',
-            'shipping_solution': 'USE_YOUR_OWN_CARRIER',
-            'requires_delivery_window': True,
-        })
+        option = physical._sync_transportation_options([{
+            'transportationOptionId': TRANSPORTATION_OPTION_ID,
+            'shipmentId': SHIPMENT_ID,
+            'shippingMode': 'GROUND_SMALL_PARCEL',
+            'shippingSolution': 'USE_YOUR_OWN_CARRIER',
+            'preconditions': [],
+        }])
+        self.assertTrue(option.requires_delivery_window)
         option.action_select_transportation_option()
+        self.assertTrue(physical.delivery_window_required)
         with self.assertRaisesRegex(UserError, 'Confirm a delivery window'):
             physical.action_confirm_transportation()
 
@@ -779,6 +788,10 @@ class TestFbaShippingPhase4(TransactionCase):
     def test_17_shipping_labels_use_confirmation_id_and_official_box_ids(self):
         physical = self.shipment.physical_shipment_ids
         physical.write({'transportation_confirmation_status': 'success'})
+        download_response = MagicMock()
+        download_response.url = 'https://example.test/labels.pdf'
+        download_response.content = b'%PDF-1.4 mocked Amazon labels'
+        download_response.headers = {'Content-Type': 'application/pdf'}
         with (
             patch.object(
                 AmazonAPI, 'list_shipment_boxes', autospec=True,
@@ -790,12 +803,29 @@ class TestFbaShippingPhase4(TransactionCase):
                 AmazonAPI, 'get_inbound_labels_v0', autospec=True,
                 return_value={'payload': {'DownloadURL': 'https://example.test/labels.pdf'}},
             ) as labels_mock,
+            patch(
+                'odoo.addons.sdlc_amazon_connector.models.amazon_inbound_shipping.requests.get',
+                return_value=download_response,
+            ) as download_mock,
         ):
             action = physical.action_get_shipping_labels()
-        self.assertEqual(action['url'], 'https://example.test/labels.pdf')
+            repeated_action = physical.action_get_shipping_labels()
+        self.assertEqual(action['url'], repeated_action['url'])
+        self.assertEqual(
+            action['url'],
+            '/web/content/%s?download=true' % physical.shipping_label_attachment_id.id,
+        )
         self.assertEqual(labels_mock.call_args.args[3], 'FBA1234ABCD')
         self.assertEqual(labels_mock.call_args.args[-1], ['FBA10ABC0YY100001'])
+        self.assertEqual(labels_mock.call_count, 1)
+        self.assertEqual(download_mock.call_count, 1)
         self.assertEqual(physical.labels_status, 'success')
+        self.assertEqual(physical.shipping_label_attachment_id.mimetype, 'application/pdf')
+        self.assertEqual(
+            physical.shipping_label_filename,
+            'amazon_fba_FBA1234ABCD_box_labels.pdf',
+        )
+        self.assertFalse(physical.label_download_url)
 
     def test_18_ambiguous_transport_write_is_not_replayed(self):
         physical = self.shipment.physical_shipment_ids

@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -116,7 +117,7 @@ class TestFbaReceivingPhase5(TransactionCase):
                 'status': 'SHIPPED',
                 'transportation_confirmation_status': 'success',
                 'labels_status': 'success',
-                'label_download_url': 'https://example.test/fba-labels.pdf',
+                'product_labels_confirmed': True,
                 'destination_fc': 'CAI1',
                 'line_ids': [Command.create({
                     'amazon_product_id': amazon_product.id,
@@ -125,6 +126,15 @@ class TestFbaReceivingPhase5(TransactionCase):
                     'quantity': quantity,
                 }) for amazon_product, quantity, fnsku in item_group],
             })
+            attachment = self.env['ir.attachment'].sudo().create({
+                'name': 'receiving-test-labels.pdf',
+                'type': 'binary',
+                'datas': base64.b64encode(b'%PDF-1.4 receiving test labels'),
+                'mimetype': 'application/pdf',
+                'res_model': physical._name,
+                'res_id': physical.id,
+            })
+            physical.shipping_label_attachment_id = attachment
             physical_shipments |= physical
         return shipment, physical_shipments
 
@@ -278,6 +288,27 @@ class TestFbaReceivingPhase5(TransactionCase):
         )
         self.assertEqual(
             self._quantity_at(self.product_a, self.instance.fba_received_location_id), 100,
+        )
+
+    def test_d2_cumulative_10_25_30_moves_only_deltas_10_15_5(self):
+        _shipment, physicals = self._create_plan(
+            30,
+            [[(self.amazon_product_a, 30, 'FN-RC-A')]],
+        )
+        physical = physicals[0]
+        self._dispatch_physical_shipments(physical)
+
+        deltas = [
+            self._apply(physical, {'RC-SKU-A': cumulative})['deltaReceived']
+            for cumulative in (10, 25, 30)
+        ]
+
+        self.assertEqual(deltas, [10, 15, 5])
+        self.assertEqual(physical.amazon_received_quantity, 30)
+        self.assertEqual(physical.processed_received_quantity, 30)
+        self.assertCountEqual(
+            self._receiving_pickings(physical).move_ids.mapped('amazon_receiving_delta'),
+            [10, 15, 5],
         )
 
     def test_e_over_receipt_105_creates_no_move_and_discrepancy(self):

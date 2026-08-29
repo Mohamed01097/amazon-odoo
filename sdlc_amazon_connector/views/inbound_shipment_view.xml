@@ -379,7 +379,7 @@
                                                             string="Create Dispatch Picking"
                                                             class="btn-primary"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"
-                                                            invisible="picking_id or transportation_confirmation_status != 'success' or labels_status != 'success'"/>
+                                                            invisible="picking_id or transportation_confirmation_status != 'success' or labels_status != 'success' or not shipping_label_attachment_id or (product_labels_required and not product_labels_confirmed)"/>
                                                     <button name="action_open_dispatch_picking"
                                                             type="object"
                                                             string="Open Picking"
@@ -424,9 +424,14 @@
                                                             invisible="transportation_confirmation_status != 'success' or tracking_status in ('pending', 'in_progress', 'success')"/>
                                                     <button name="action_get_shipping_labels"
                                                             type="object"
-                                                            string="Get Box Labels"
+                                                            string="Get/View Box Labels"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"
                                                             invisible="transportation_confirmation_status != 'success'"/>
+                                                    <button name="action_confirm_product_labels"
+                                                            type="object"
+                                                            string="Confirm Product Labels Applied"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            invisible="not product_labels_required or product_labels_confirmed"/>
                                                     <button name="action_refresh_physical_shipment_status"
                                                             type="object"
                                                             string="Refresh Shipment Status"
@@ -500,8 +505,14 @@
                                                             <field name="tracking_last_synced_at" readonly="1"/>
                                                             <field name="label_page_type"/>
                                                             <field name="labels_status" readonly="1"/>
-                                                            <field name="label_download_url" widget="url" readonly="1"/>
+                                                            <field name="shipping_label_attachment_id" readonly="1"/>
+                                                            <field name="shipping_label_filename" readonly="1"/>
+                                                            <field name="shipping_label_content_type" readonly="1"/>
                                                             <field name="labels_last_synced_at" readonly="1"/>
+                                                            <field name="product_labels_required" readonly="1"/>
+                                                            <field name="product_labels_confirmed" readonly="1"/>
+                                                            <field name="product_labels_confirmed_at" readonly="1"/>
+                                                            <field name="product_labels_confirmed_by_id" readonly="1"/>
                                                         </group>
                                                     </group>
                                                     <field name="transportation_option_ids" readonly="1">

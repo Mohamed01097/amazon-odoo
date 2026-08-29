@@ -884,6 +884,8 @@ class AmazonProduct(models.Model):
             vals['detailed_type'] = 'consu'
         elif 'type' in ProductTemplate._fields:
             vals['type'] = 'consu'
+        if 'is_storable' in ProductTemplate._fields:
+            vals['is_storable'] = True
         return vals
 
     def _create_odoo_product_from_amazon(self):

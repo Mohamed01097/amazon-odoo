@@ -621,3 +621,15 @@ class TestFbaInboundPlanPhase2(TransactionCase):
             with self.assertRaisesRegex(UserError, 'Draft or a retryable Failed state'):
                 self.shipment.action_create_shipment_plan()
         create_mock.assert_not_called()
+
+    def test_28_amazon_product_creation_is_stockable_for_fba(self):
+        amazon_product = self.env['amazon.product'].sudo().create({
+            'name': 'Phase 2 Imported FBA Product',
+            'instance_id': self.instance.id,
+            'sku': 'P2-IMPORTED-STORABLE-001',
+            'fulfillment_channel': 'AFN',
+        })
+
+        odoo_product = amazon_product._create_odoo_product_from_amazon()
+
+        self.assertTrue(odoo_product.product_tmpl_id.is_storable)
