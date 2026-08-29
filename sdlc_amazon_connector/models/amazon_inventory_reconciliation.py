@@ -380,6 +380,38 @@ class AmazonInventoryReconciliationRun(models.Model):
                 suggested = 'manual_review'
                 status = 'unmapped'
                 severity = 'critical'
+            pending_sale_qty = 0.0
+            sale_overlap_state = 'none'
+            overlap_message = False
+            if odoo_product and amazon_returned:
+                sale_events = self.env['amazon.fba.sale.stock.event'].sudo().search([
+                    ('instance_id', '=', self.instance_id.id),
+                    ('product_id', '=', odoo_product.id),
+                    ('state', 'in', ('pending', 'processing', 'manual_review', 'failed')),
+                ])
+                pending_sale_qty = sum(max(
+                    event.amazon_cumulative_fulfilled_qty - event.processed_fulfilled_qty,
+                    0.0,
+                ) for event in sale_events)
+                amazon_disposition = sum(
+                    amazon_values[key] for key in ('sellable', 'reserved', 'unsellable')
+                )
+                odoo_disposition = sum(
+                    odoo_values[key] for key in ('sellable', 'reserved', 'unsellable')
+                )
+                if pending_sale_qty > 0:
+                    sale_overlap_state = 'pending_event'
+                    overlap_message = _(
+                        "The snapshot overlaps %s units of durable, unprocessed Amazon FBA sale events. "
+                        "Do not apply a snapshot transfer.", pending_sale_qty,
+                    )
+                elif amazon_disposition < odoo_disposition:
+                    sale_overlap_state = 'snapshot_outflow'
+                    overlap_message = _(
+                        "Amazon's snapshot shows a net disposition outflow of %s units. Await/import the "
+                        "authoritative order-item fulfillment event; the snapshot cannot consume stock.",
+                        odoo_disposition - amazon_disposition,
+                    )
             values = {
                 'sku': sku,
                 'amazon_returned': amazon_returned,
@@ -415,12 +447,16 @@ class AmazonInventoryReconciliationRun(models.Model):
                 'difference_reserved': differences['reserved'],
                 'difference_unsellable': differences['unsellable'],
                 'difference_inbound': differences['transit'],
+                'pending_sale_event_qty': pending_sale_qty,
+                'sale_overlap_state': sale_overlap_state,
                 'suggested_action': suggested,
                 'status': status,
                 'severity': severity,
                 'raw_response': self._json(summary.get('raw', [])),
             }
-            if status == 'not_returned':
+            if overlap_message:
+                values['error_message'] = overlap_message
+            elif status == 'not_returned':
                 values['error_message'] = _(
                     "Mapped FBA SKU was not returned by this complete Amazon snapshot. "
                     "Amazon does not guarantee omitted SKUs represent zero inventory."
@@ -751,6 +787,15 @@ class AmazonInventoryReconciliation(models.Model):
     difference_reserved = fields.Float(readonly=True)
     difference_unsellable = fields.Float(readonly=True)
     difference_inbound = fields.Float(readonly=True)
+    pending_sale_event_qty = fields.Float(
+        string='Pending FBA Sale Event Qty', readonly=True, copy=False,
+    )
+    sale_overlap_state = fields.Selection([
+        ('none', 'No Sale Event Overlap'),
+        ('pending_event', 'Explained by Pending Sale Event'),
+        ('snapshot_outflow', 'Snapshot Net Outflow / Await Event'),
+        ('resolved', 'Resolved by Sale Event'),
+    ], default='none', readonly=True, copy=False, index=True)
     suggested_action = fields.Selection([
         ('none', 'No Action'),
         ('sellable_to_reserved', 'Sellable → Reserved'),
@@ -834,6 +879,86 @@ class AmazonInventoryReconciliation(models.Model):
             "Only an Amazon Connector Manager or Inventory Administrator can "
             "apply inventory reconciliation actions."
         ))
+
+    def _pending_sale_quantity(self):
+        self.ensure_one()
+        if not self.odoo_product_id:
+            return 0.0
+        events = self.env['amazon.fba.sale.stock.event'].sudo().search([
+            ('instance_id', '=', self.instance_id.id),
+            ('product_id', '=', self.odoo_product_id.id),
+            ('state', 'in', ('pending', 'processing', 'manual_review', 'failed')),
+        ])
+        return sum(max(
+            event.amazon_cumulative_fulfilled_qty - event.processed_fulfilled_qty,
+            0.0,
+        ) for event in events)
+
+    def _refresh_sale_event_overlap(self):
+        """Re-evaluate a stored snapshot against live event-owned stock."""
+        refreshed_runs = self.env['amazon.inventory.reconciliation.run']
+        for line in self:
+            if not line.odoo_product_id or line.status in ('applied', 'ignored'):
+                continue
+            self.env['amazon.fba.sale.stock.event']._advisory_lock(
+                line.instance_id.id, line.odoo_product_id.id,
+            )
+            locations = line.run_id._validate_locations()
+            odoo_values = line.run_id._odoo_quantities(line.odoo_product_id, locations)
+            amazon_values = {
+                'sellable': line.amazon_sellable,
+                'reserved': line.amazon_reserved,
+                'unsellable': line.amazon_unsellable,
+                'transit': line.amazon_inbound,
+            }
+            differences, suggested, status, severity = line.run_id._classification(
+                amazon_values, odoo_values, line.odoo_product_id.uom_id.rounding or 0.01,
+            )
+            pending = line._pending_sale_quantity()
+            amazon_disposition = sum(amazon_values[key] for key in ('sellable', 'reserved', 'unsellable'))
+            odoo_disposition = sum(odoo_values[key] for key in ('sellable', 'reserved', 'unsellable'))
+            overlap = 'none'
+            message = False
+            if status == 'matched':
+                overlap = 'resolved' if line.sale_overlap_state in (
+                    'pending_event', 'snapshot_outflow', 'resolved',
+                ) else 'none'
+            elif pending > 0:
+                overlap = 'pending_event'
+                message = _(
+                    "The snapshot difference overlaps %s units of durable, unprocessed Amazon FBA sale events. "
+                    "Do not apply a snapshot transfer; let the sale event processor consume Sellable first.",
+                    pending,
+                )
+            elif amazon_disposition < odoo_disposition:
+                overlap = 'snapshot_outflow'
+                message = _(
+                    "Amazon's snapshot shows %s fewer disposition units than Odoo. A snapshot is not a unique "
+                    "sale event, so this net outflow cannot be applied as a disposition transfer. Await/import "
+                    "the Amazon order-item fulfillment event or investigate the unexplained loss.",
+                    odoo_disposition - amazon_disposition,
+                )
+            line.with_context(keep_inventory_adjustment_review=True).write({
+                'odoo_received': odoo_values['received'],
+                'odoo_sellable': odoo_values['sellable'],
+                'odoo_reserved': odoo_values['reserved'],
+                'odoo_unsellable': odoo_values['unsellable'],
+                'odoo_transit': odoo_values['transit'],
+                'difference_sellable': differences['sellable'],
+                'difference_reserved': differences['reserved'],
+                'difference_unsellable': differences['unsellable'],
+                'difference_inbound': differences['transit'],
+                'suggested_action': suggested,
+                'status': status,
+                'severity': severity,
+                'pending_sale_event_qty': pending,
+                'sale_overlap_state': overlap,
+                'error_message': message,
+            })
+            refreshed_runs |= line.run_id
+        for run in refreshed_runs:
+            run._refresh_counts()
+        return True
 
     def write(self, vals):
         review_inputs = {
@@ -981,6 +1106,20 @@ class AmazonInventoryReconciliation(models.Model):
                 [self.id],
             )
             self.invalidate_recordset()
+            if self.odoo_product_id:
+                self.env['amazon.fba.sale.stock.event']._advisory_lock(
+                    self.instance_id.id, self.odoo_product_id.id,
+                )
+                self._refresh_sale_event_overlap()
+                self.invalidate_recordset()
+                if self.status == 'matched':
+                    raise UserError(_(
+                        "This snapshot now matches after FBA sale-event processing; no reconciliation transfer is needed."
+                    ))
+                if self.sale_overlap_state in ('pending_event', 'snapshot_outflow'):
+                    raise UserError(self.error_message or _(
+                        "This snapshot overlaps event-owned FBA sale depletion and cannot create a stock transfer."
+                    ))
             if self.status not in ('mismatch', 'pending_review'):
                 raise UserError(_("This reconciliation difference is no longer pending."))
             if self.applied_picking_id:

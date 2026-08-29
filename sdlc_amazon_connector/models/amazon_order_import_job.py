@@ -317,12 +317,12 @@ class AmazonOrderImportJob(models.Model):
             order_rec = order_model.create(vals)
             created = True
 
-        should_fetch_items = created or not order_rec.order_line_ids
-        if should_fetch_items:
-            embedded_items = order_data.get('OrderItems')
-            if isinstance(embedded_items, list):
-                self._upsert_order_items(order_rec, embedded_items)
-            else:
+        embedded_items = order_data.get('OrderItems')
+        if isinstance(embedded_items, list):
+            # v2026 embeds cumulative item fulfillment. Upsert it on every
+            # import; this is the durable evidence for AFN stock ownership.
+            self._upsert_order_items(order_rec, embedded_items)
+        elif created or not order_rec.order_line_ids:
                 # Compatibility for an already-running legacy job payload.
                 time.sleep(random.uniform(0.15, 0.45))
                 try:
@@ -430,6 +430,7 @@ class AmazonOrderImportJob(models.Model):
                 'asin': item.get('ASIN', ''),
                 'title': item.get('Title', ''),
                 'quantity': item.get('QuantityOrdered', 1),
+                'amazon_cumulative_fulfilled_qty': item.get('QuantityShipped', 0) or 0,
                 'item_price': _float_amount(price_info.get('Amount')) if price_info else 0.0,
                 'item_tax': _float_amount(tax_info.get('Amount')) if tax_info else 0.0,
                 'shipping_price': _float_amount(shipping_info.get('Amount')) if shipping_info else 0.0,
@@ -452,8 +453,15 @@ class AmazonOrderImportJob(models.Model):
             ], limit=1)
             if existing_line:
                 existing_line.write(self._changed_values(existing_line, line_vals))
+                order_line = existing_line
             else:
-                line_model.create(line_vals)
+                order_line = line_model.create(line_vals)
+            if order_rec.fulfillment_channel == 'AFN':
+                self.env['amazon.fba.sale.stock.event'].sudo().upsert_from_order_line(
+                    order_line,
+                    item.get('QuantityShipped', 0) or 0,
+                    evidence_updated_at=order_rec.amazon_last_update_date,
+                )
 
     def _resolve_currency(self, amount):
         currency_code = (amount or {}).get('CurrencyCode')

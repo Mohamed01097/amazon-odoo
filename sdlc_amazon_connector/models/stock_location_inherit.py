@@ -13,6 +13,7 @@ class StockLocation(models.Model):
             ('reserved', 'FBA Reserved'),
             ('unsellable', 'FBA Unsellable'),
             ('return_source', 'FBA Customer Return Source'),
+            ('sold_customer', 'FBA Sold / Customers'),
             ('removal_transit', 'FBA Removal Transit'),
             ('disposal', 'FBA Disposal / Inventory Loss'),
         ],
@@ -52,6 +53,7 @@ class StockLocation(models.Model):
             'reserved': 'internal',
             'unsellable': 'internal',
             'return_source': 'customer',
+            'sold_customer': 'customer',
             'removal_transit': 'transit',
             'disposal': 'inventory',
         }

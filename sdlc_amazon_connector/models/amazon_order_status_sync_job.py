@@ -334,6 +334,12 @@ class AmazonOrderStatusSyncJob(models.Model):
             create_chatter=True,
             apply_workflow=True,
         )
+        embedded_items = order_data.get('OrderItems')
+        if isinstance(embedded_items, list):
+            importer = self.env['amazon.order.import.job'].new({
+                'instance_id': self.instance_id.id,
+            })
+            importer._upsert_order_items(order_rec, embedded_items)
         return {
             'changed': bool(result.get('changed')),
             'unchanged': not result.get('changed'),

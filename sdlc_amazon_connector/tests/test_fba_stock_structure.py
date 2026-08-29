@@ -33,7 +33,7 @@ class TestFbaStockStructure(TransactionCase):
             ('amazon_instance_id', '=', self.instance.id),
             ('amazon_fba_location_type', 'in', [
                 'transit', 'sellable', 'reserved', 'unsellable',
-                'return_source', 'removal_transit', 'disposal',
+                'return_source', 'sold_customer', 'removal_transit', 'disposal',
             ]),
         ])
 
@@ -47,6 +47,7 @@ class TestFbaStockStructure(TransactionCase):
         self.assertTrue(self.instance.fba_reserved_location_id)
         self.assertTrue(self.instance.fba_unsellable_location_id)
         self.assertTrue(self.instance.fba_return_source_location_id)
+        self.assertTrue(self.instance.fba_sold_customer_location_id)
         self.assertTrue(self.instance.fba_removal_transit_location_id)
         self.assertTrue(self.instance.fba_disposal_location_id)
         self.assertEqual(self.instance.fba_transit_location_id.usage, 'transit')
@@ -64,6 +65,7 @@ class TestFbaStockStructure(TransactionCase):
         self.assertEqual(self.instance.fba_transit_location_id.amazon_instance_id, self.instance)
         self.assertEqual(self.instance.fba_transit_location_id.amazon_fba_location_type, 'transit')
         self.assertEqual(self.instance.fba_return_source_location_id.usage, 'customer')
+        self.assertEqual(self.instance.fba_sold_customer_location_id.usage, 'customer')
         self.assertEqual(self.instance.fba_removal_transit_location_id.usage, 'transit')
         self.assertEqual(self.instance.fba_disposal_location_id.usage, 'inventory')
 
@@ -71,17 +73,17 @@ class TestFbaStockStructure(TransactionCase):
         self.instance.action_create_fba_stock_structure()
         first_ids = {
             role: self.instance[f'fba_{role}_location_id'].id
-            for role in ('transit', 'sellable', 'reserved', 'unsellable', 'return_source', 'removal_transit', 'disposal')
+            for role in ('transit', 'sellable', 'reserved', 'unsellable', 'return_source', 'sold_customer', 'removal_transit', 'disposal')
         }
 
         self.instance.action_create_fba_stock_structure()
         second_ids = {
             role: self.instance[f'fba_{role}_location_id'].id
-            for role in ('transit', 'sellable', 'reserved', 'unsellable', 'return_source', 'removal_transit', 'disposal')
+            for role in ('transit', 'sellable', 'reserved', 'unsellable', 'return_source', 'sold_customer', 'removal_transit', 'disposal')
         }
 
         self.assertEqual(first_ids, second_ids)
-        self.assertEqual(len(self._managed_locations()), 7)
+        self.assertEqual(len(self._managed_locations()), 8)
 
     def test_03_missing_source_requires_explicit_selection(self):
         instance = self.env['amazon.instance'].sudo().create({
@@ -142,7 +144,7 @@ class TestFbaStockStructure(TransactionCase):
         self.assertEqual(self.instance.fba_sellable_location_id, existing_sellable)
         self.assertEqual(existing_sellable.amazon_instance_id, self.instance)
         self.assertEqual(existing_sellable.amazon_fba_location_type, 'sellable')
-        self.assertEqual(len(self._managed_locations()), 7)
+        self.assertEqual(len(self._managed_locations()), 8)
 
     def test_07_setup_does_not_change_stock(self):
         Picking = self.env['stock.picking'].sudo()

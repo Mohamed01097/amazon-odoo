@@ -33,6 +33,17 @@
         <field name="priority">6</field>
     </record>
 
+    <record id="cron_amazon_process_fba_sale_stock_events" model="ir.cron">
+        <field name="name">Amazon: Process FBA Sale Stock Events</field>
+        <field name="model_id" ref="model_amazon_fba_sale_stock_event"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_process_fba_sale_stock_events()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+        <field name="priority">7</field>
+    </record>
+
     <record id="cron_amazon_sync_products" model="ir.cron">
         <field name="name">Amazon: Sync Products</field>
         <field name="model_id" ref="model_amazon_instance"/>

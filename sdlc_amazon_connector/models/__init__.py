@@ -33,4 +33,5 @@ from . import stock_picking_inherit
 from . import account_move_inherit
 from . import amazon_user_guidance
 from . import amazon_phase7
+from . import amazon_fba_sale_stock
 from . import amazon_operations

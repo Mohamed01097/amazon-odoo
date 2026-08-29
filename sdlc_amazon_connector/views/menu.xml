@@ -55,6 +55,8 @@
     <menuitem id="amazon_fba_menu" parent="amazon_root" name="FBA" sequence="30"/>
     <menuitem id="amazon_inbound_shipment_menu" parent="amazon_fba_menu" name="Inbound Shipments" action="amazon_inbound_shipment_action" sequence="10"/>
     <menuitem id="amazon_inventory_health_menu" parent="amazon_fba_menu" name="Inventory Health" action="amazon_inventory_reconciliation_run_action" sequence="20"/>
+    <menuitem id="amazon_fba_sale_stock_event_menu" parent="amazon_fba_menu"
+              name="Sale Stock Events" action="amazon_fba_sale_stock_event_action" sequence="25"/>
     <menuitem id="amazon_inventory_difference_menu" parent="amazon_fba_menu" name="Inventory Differences" action="amazon_inventory_reconciliation_action" sequence="21"/>
     <menuitem id="amazon_removal_order_menu" parent="amazon_fba_menu" name="Removal Orders" action="amazon_removal_order_action" sequence="30"/>
     <menuitem id="amazon_removal_shipment_menu" parent="amazon_fba_menu" name="Removal Shipments" action="amazon_removal_shipment_action" sequence="31"/>

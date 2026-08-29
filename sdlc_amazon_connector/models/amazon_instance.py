@@ -51,6 +51,12 @@ FBA_LOCATION_DEFINITIONS = {
         'name': 'Amazon FBA Customer Returns',
         'usage': 'customer',
     },
+    'sold_customer': {
+        'field': 'fba_sold_customer_location_id',
+        'label': 'FBA Sold / Customers Location',
+        'name': 'Amazon FBA Sold / Customers',
+        'usage': 'customer',
+    },
     'removal_transit': {
         'field': 'fba_removal_transit_location_id',
         'label': 'FBA Removal Transit Location',
@@ -241,6 +247,14 @@ class AmazonInstance(models.Model):
         'stock.location', string='FBA Customer Return Source', check_company=True,
         domain="[('active', '=', True), ('usage', '=', 'customer'), ('company_id', '=', company_id)]",
         help="Legacy virtual location retained for compatibility. Current FBA return imports never create stock moves.",
+    )
+    fba_sold_customer_location_id = fields.Many2one(
+        'stock.location', string='FBA Sold / Customers Location', check_company=True,
+        domain="[('active', '=', True), ('usage', '=', 'customer'), ('company_id', '=', company_id)]",
+        help=(
+            "Auditable customer-usage destination for quantities Amazon has cumulatively fulfilled. "
+            "It removes company-owned stock from FBA Sellable without touching WH/Stock."
+        ),
     )
     fba_removal_transit_location_id = fields.Many2one(
         'stock.location', string='FBA Removal Transit Location', check_company=True,
@@ -580,6 +594,7 @@ class AmazonInstance(models.Model):
         'fba_reserved_location_id',
         'fba_unsellable_location_id',
         'fba_return_source_location_id',
+        'fba_sold_customer_location_id',
         'fba_removal_transit_location_id',
         'fba_disposal_location_id',
         'fba_removal_return_partner_id',

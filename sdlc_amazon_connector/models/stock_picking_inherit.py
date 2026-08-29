@@ -1,5 +1,6 @@
 import logging
-from odoo import models, fields
+from odoo import _, models, fields
+from odoo.exceptions import UserError
 
 _logger = logging.getLogger(__name__)
 
@@ -46,6 +47,17 @@ class StockPickingInherit(models.Model):
 
     def button_validate(self):
         """Override to auto-push tracking to Amazon and send delivery email."""
+        unsafe_afn = self.filtered(lambda picking: (
+            picking.state not in ('done', 'cancel')
+            and picking.sale_id.is_amazon_order
+            and picking.sale_id.amazon_fulfillment_channel == 'AFN'
+            and not picking.amazon_fba_sale_stock_event_id
+        ))
+        if unsafe_afn:
+            raise UserError(_(
+                "Generic Odoo deliveries cannot validate Amazon FBA orders. "
+                "Amazon item fulfillment events are the only FBA sale stock owner."
+            ))
         res = super().button_validate()
 
         # After successful validation, handle Amazon-linked deliveries

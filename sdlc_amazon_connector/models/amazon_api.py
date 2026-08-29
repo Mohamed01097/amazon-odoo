@@ -831,6 +831,7 @@ class AmazonAPI():
             'ASIN': product.get('asin'),
             'Title': product.get('title'),
             'QuantityOrdered': item.get('quantityOrdered', 0),
+            'QuantityShipped': (item.get('fulfillment') or {}).get('quantityFulfilled', 0),
             'ItemPrice': subtotal('ITEM'),
             'ShippingPrice': subtotal('SHIPPING'),
             'ItemTax': detailed('TAX', 'ITEM'),

@@ -52,6 +52,8 @@
                 <field name="amazon_sellable" string="Amazon Sellable" optional="show"/>
                 <field name="odoo_sellable" string="Odoo Sellable" optional="show"/>
                 <field name="difference_sellable" string="Sellable Diff" optional="show"/>
+                <field name="pending_sale_event_qty" optional="show"/>
+                <field name="sale_overlap_state" optional="show"/>
                 <field name="amazon_reserved" string="Amazon Reserved" optional="hide"/>
                 <field name="odoo_reserved" string="Odoo Reserved" optional="hide"/>
                 <field name="difference_reserved" string="Reserved Diff" optional="show"/>
@@ -119,6 +121,8 @@
                         <group string="Decision">
                             <field name="suggested_action"/>
                             <field name="severity"/>
+                            <field name="pending_sale_event_qty"/>
+                            <field name="sale_overlap_state"/>
                             <field name="applied_picking_id"/>
                             <field name="applied_at"/>
                             <field name="applied_by_id"/>
@@ -315,6 +319,8 @@
                                     <field name="odoo_product_id"/>
                                     <field name="amazon_returned"/>
                                     <field name="difference_sellable" string="Sellable Diff"/>
+                                    <field name="pending_sale_event_qty" optional="show"/>
+                                    <field name="sale_overlap_state" optional="show"/>
                                     <field name="difference_reserved" string="Reserved Diff"/>
                                     <field name="difference_unsellable" string="Unsellable Diff"/>
                                     <field name="difference_inbound" string="Inbound Diff"/>

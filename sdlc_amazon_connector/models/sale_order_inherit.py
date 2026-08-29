@@ -65,3 +65,20 @@ class SaleOrderInherit(models.Model):
             from odoo.exceptions import UserError
             raise UserError("This Sale Order is not linked to an Amazon order.")
         return self.amazon_order_id.action_refresh_status_from_amazon()
+
+
+class SaleOrderLineInherit(models.Model):
+    _inherit = 'sale.order.line'
+
+    def _action_launch_stock_rule(self, *, previous_product_uom_qty=False):
+        """Amazon owns AFN fulfillment; its durable item event owns stock."""
+        afn_lines = self.filtered(lambda line: (
+            line.order_id.is_amazon_order
+            and line.order_id.amazon_fulfillment_channel == 'AFN'
+        ))
+        other_lines = self - afn_lines
+        if other_lines:
+            return super(SaleOrderLineInherit, other_lines)._action_launch_stock_rule(
+                previous_product_uom_qty=previous_product_uom_qty,
+            )
+        return True

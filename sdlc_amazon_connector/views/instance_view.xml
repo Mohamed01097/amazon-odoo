@@ -134,6 +134,7 @@
                             <field name="fba_reserved_location_id"/>
                             <field name="fba_unsellable_location_id"/>
                             <field name="fba_return_source_location_id"/>
+                            <field name="fba_sold_customer_location_id"/>
                             <field name="fba_removal_transit_location_id"/>
                             <field name="fba_disposal_location_id"/>
                             <field name="fba_removal_return_partner_id" context="{'default_company_id': company_id}"/>
@@ -151,6 +152,7 @@
                                 <strong>Sellable</strong> is inventory Amazon has received and can sell.<br/>
                                 <strong>Reserved</strong> is inventory Amazon has reserved.<br/>
                                 <strong>Unsellable</strong> is inventory Amazon holds but cannot sell.
+                                <br/><strong>Sold / Customers</strong> is the customer-usage destination for Amazon-fulfilled order-item deltas.
                                 <br/><strong>Removal Transit</strong> holds dispatched removals until physical receipt.
                                 <br/><strong>Disposal/Loss</strong> is the auditable destination for confirmed loss events.
                             </div>

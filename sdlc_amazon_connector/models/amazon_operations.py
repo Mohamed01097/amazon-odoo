@@ -31,6 +31,7 @@ SOURCE_MODELS = {
     'amazon.inbound.operation.job',
     'amazon.inventory.reconciliation.run',
     'amazon.phase7.job',
+    'amazon.fba.sale.stock.event',
 }
 
 INBOUND_READ_OPERATIONS = {
@@ -146,6 +147,7 @@ class AmazonOperationControl(models.Model):
         if any(token in text for token in (
             'connection reset', 'connection aborted', 'connection error', 'timeout',
             'timed out', 'temporary failure', 'name resolution', 'network error',
+            'local_stock_move_failed',
         )):
             return {'category': 'transient', 'transient': True, 'retry_safe': True}
         if any(token in text for token in (
@@ -166,6 +168,7 @@ class AmazonOperationControl(models.Model):
         if any(token in text for token in (
             'invalid sku', 'unknown sku', 'sku mapping', 'could not be mapped',
             'missing sku', 'duplicate sku', 'missing product mapping',
+            'insufficient_fba_sellable_stock', 'insufficient fba sellable stock',
         )):
             return {'category': 'data', 'transient': False, 'retry_safe': False}
         return {'category': 'unknown', 'transient': False, 'retry_safe': False}
@@ -182,6 +185,8 @@ class AmazonOperationControl(models.Model):
             return source.operation_type or 'inbound_operation'
         if source._name == 'amazon.phase7.job':
             return source.operation_type or 'phase7_job'
+        if source._name == 'amazon.fba.sale.stock.event':
+            return 'fba_sale_stock'
         return source._name
 
     @api.model
@@ -245,6 +250,7 @@ class AmazonOperationControl(models.Model):
             'amazon.order.status.sync.job',
             'amazon.inventory.reconciliation.run',
             'amazon.phase7.job',
+            'amazon.fba.sale.stock.event',
         }:
             return True
         if source._name == 'amazon.inbound.operation.job':
@@ -402,6 +408,7 @@ class AmazonOperationControl(models.Model):
             'amazon.inbound.operation.job': ('pending', 'in_progress'),
             'amazon.inventory.reconciliation.run': ('queued', 'running'),
             'amazon.phase7.job': ('pending', 'running', 'waiting_amazon'),
+            'amazon.fba.sale.stock.event': ('pending', 'processing'),
         }
         if source.state in active_states[source._name] and self.state != 'retry_pending':
             raise UserError(_("This source job is already queued or running."))
@@ -422,6 +429,8 @@ class AmazonOperationControl(models.Model):
             values.update(state='pending', next_run_at=now)
         elif source._name == 'amazon.inventory.reconciliation.run':
             values.update(state='queued', next_run_at=now)
+        elif source._name == 'amazon.fba.sale.stock.event':
+            values.update(state='pending', next_run_at=now)
         else:
             values.update(state='pending', next_run_at=now)
         source.sudo().with_context(skip_amazon_operation_tracking=True).write(values)
@@ -870,9 +879,39 @@ class AmazonOperationJobMonitor(models.Model):
                        COALESCE(c.severity, 'info'), c.id
                   FROM amazon_phase7_job j
                   JOIN amazon_instance i ON i.id = j.instance_id
+              LEFT JOIN amazon_operation_control c
+                     ON c.source_model = 'amazon.phase7.job' AND c.source_id = j.id
+                UNION ALL
+                SELECT j.id * 10 + 6, 'amazon.fba.sale.stock.event', j.id,
+                       (j.amazon_order_ref || ' / ' || j.amazon_order_item_id)::varchar,
+                       j.instance_id, j.company_id, 'fba_sale_stock',
+                       CASE WHEN c.state IN ('retry_pending','manual_review','cancelled','exhausted') THEN c.state
+                            WHEN j.state = 'processing' THEN 'running'
+                            ELSE j.state END,
+                       COALESCE(c.priority, 10),
+                       CASE WHEN j.state = 'done' THEN 100.0
+                            WHEN j.amazon_cumulative_fulfilled_qty > 0
+                            THEN LEAST(100.0, j.processed_fulfilled_qty * 100.0 / j.amazon_cumulative_fulfilled_qty)
+                            WHEN j.state = 'processing' THEN 10.0 ELSE 0.0 END,
+                       CASE WHEN j.processed_fulfilled_qty > 0 THEN 1 ELSE 0 END,
+                       CASE WHEN j.state IN ('failed','manual_review') THEN 1 ELSE 0 END,
+                       COALESCE(c.retry_count, GREATEST(j.attempt_count - 1, 0)),
+                       COALESCE(c.max_retries, j.max_attempts, i.maximum_automatic_retries, 5),
+                       COALESCE(c.next_retry_at, j.next_run_at), j.started_at,
+                       COALESCE(j.last_activity_at, j.write_date, j.create_date), j.finished_at,
+                       CASE WHEN j.started_at IS NULL THEN 0.0
+                            ELSE EXTRACT(EPOCH FROM (COALESCE(j.finished_at, now()) - j.started_at)) END,
+                       COALESCE(c.last_error_code, j.last_error_code),
+                       COALESCE(c.last_error_message, j.last_error_message),
+                       c.last_amazon_request_id,
+                       COALESCE(c.responsible_user_id, j.responsible_user_id, j.create_uid),
+                       c.error_category, COALESCE(c.retry_safe, FALSE), c.waiting_reason,
+                       COALESCE(c.severity, 'info'), c.id
+                  FROM amazon_fba_sale_stock_event j
+                  JOIN amazon_instance i ON i.id = j.instance_id
              LEFT JOIN amazon_operation_control c
-                    ON c.source_model = 'amazon.phase7.job' AND c.source_id = j.id
-            )
+                    ON c.source_model = 'amazon.fba.sale.stock.event' AND c.source_id = j.id
+             )
         """)
 
     def _controls(self):
@@ -1278,6 +1317,7 @@ class AmazonInstanceOperations(models.Model):
         ('configuration', 'Local Configuration Error'),
         ('authorization', 'Authorization Error'),
         ('possible_amazon_incident', 'Possible Amazon Service Incident'),
+        ('fba_sale_stock_blocked', 'FBA Sale Stock Blocked'),
         ('unknown_external', 'Unknown External Failure'),
     ], default='none', readonly=True, index=True)
 
@@ -1665,6 +1705,7 @@ class AmazonSmartAlertOperations(models.Model):
         'repeated_throttling': 'cascade',
         'retry_exhausted': 'cascade',
         'possible_amazon_incident': 'cascade',
+        'fba_sale_stock_blocked': 'cascade',
     })
     company_id = fields.Many2one(
         'res.company', related='instance_id.company_id', store=True,
@@ -1816,6 +1857,19 @@ class AmazonSmartAlertOperations(models.Model):
                         control.recommended_action,
                         source_model=control.source_model, source_id=control.source_id,
                         request_id=control.last_amazon_request_id,
+                        category=control.error_category,
+                    )
+                if control.source_model == 'amazon.fba.sale.stock.event':
+                    upsert(
+                        'fba_sale_stock:%s' % control.source_id,
+                        'fba_sale_stock_blocked', '4_critical',
+                        _('FBA sale stock event blocked: %s', control.source_name),
+                        control.last_error_message,
+                        _(
+                            'Open the FBA Sale Stock Event and Inventory Audit. Correct the Sellable balance or '
+                            'mapping, then retry the same event; never substitute WH/Stock.'
+                        ),
+                        source_model=control.source_model, source_id=control.source_id,
                         category=control.error_category,
                     )
             critical_lines = self.env['amazon.inventory.reconciliation'].sudo().search([
