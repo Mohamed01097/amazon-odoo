@@ -79,6 +79,7 @@ FBA_CONFIGURATION_FIELDS = {
     *(definition['field'] for definition in FBA_LOCATION_DEFINITIONS.values()),
 }
 SETTLEMENT_ACCOUNTING_FIELDS = {
+    'settlement_accounting_strategy', 'settlement_accounting_cutoff_date',
     'settlement_journal_id', 'amazon_payout_bank_journal_id',
     'amazon_clearing_account_id',
     'amazon_sales_account_id', 'amazon_refund_account_id',
@@ -289,6 +290,25 @@ class AmazonInstance(models.Model):
 
     # Settlement accounting. These mappings are intentionally instance- and
     # company-specific; settlement entries never post directly to a bank.
+    settlement_accounting_strategy = fields.Selection([
+        ('settlement_based', 'Settlement-Based'),
+        ('invoice_aware', 'Invoice-Aware'),
+    ], string='Settlement Accounting Strategy', required=True,
+       default='settlement_based',
+       help=(
+           'Settlement-Based recognizes financial components from the matched Amazon '
+           'settlement. Invoice-Aware uses only safely linked posted customer documents '
+           'for sales, refunds, shipping, promotions and tax. Select and validate one '
+           'strategy before financial go-live; the connector never switches per line.'
+       ))
+    settlement_accounting_cutoff_date = fields.Date(
+        string='Settlement Accounting Cut-Off',
+        help=(
+            'Only settlements whose Amazon deposit date is on or after this date may '
+            'create connector accounting entries. Earlier accounting remains the '
+            'legacy responsibility and may still be imported as read-only evidence.'
+        ),
+    )
     settlement_journal_id = fields.Many2one(
         'account.journal', string='Settlement Journal', check_company=True,
         ondelete='restrict', domain="[('company_id', '=', company_id), ('type', '=', 'general')]",
@@ -581,6 +601,36 @@ class AmazonInstance(models.Model):
             self._check_fba_configuration_access()
         if SETTLEMENT_ACCOUNTING_FIELDS.intersection(vals):
             self._check_settlement_accounting_access()
+        protected_financial_fields = {
+            'settlement_accounting_strategy', 'settlement_accounting_cutoff_date',
+        }
+        if protected_financial_fields.intersection(vals):
+            for instance in self:
+                new_strategy = vals.get(
+                    'settlement_accounting_strategy', instance.settlement_accounting_strategy,
+                )
+                new_cutoff = (
+                    fields.Date.to_date(vals['settlement_accounting_cutoff_date'])
+                    if 'settlement_accounting_cutoff_date' in vals
+                    and vals['settlement_accounting_cutoff_date']
+                    else (
+                        False
+                        if 'settlement_accounting_cutoff_date' in vals
+                        else instance.settlement_accounting_cutoff_date
+                    )
+                )
+                if (
+                    new_strategy == instance.settlement_accounting_strategy
+                    and new_cutoff == instance.settlement_accounting_cutoff_date
+                ):
+                    continue
+                if self.env['amazon.settlement.report'].sudo().search_count([
+                    ('instance_id', '=', instance.id), ('account_move_id', '!=', False),
+                ]):
+                    raise UserError(_(
+                        'Settlement accounting strategy and cut-off cannot change after a '
+                        'settlement accounting entry exists. Use a controlled migration.'
+                    ))
         return super().write(vals)
 
     @api.constrains(

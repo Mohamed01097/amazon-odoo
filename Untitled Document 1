@@ -1,5 +1,394 @@
-odoo amazon sync steps 
-1- create the instance (client_id, client_secret, refresh_token, seller_id, market_place_id)
-2- sync products 
-3- create missing odoo products
-4- import orders
+# توثيق سيرفر Odoo 19 - Amazon Connector Module
+
+## الحالة العامة
+
+السيرفر جاهز وظيفيًا لرفع الموديول، لكن قبل اعتباره Production كامل فيه 3 حاجات أساسية:
+
+1. تغيير كلمات المرور التي ظهرت في المحادثة.
+2. تركيب Domain وHTTPS قبل إدخال Amazon credentials.
+3. إعداد Backup تلقائي لقاعدة البيانات والـfilestore بعد رفع الموديول.
+
+أما الآن تقدر ترفع الريبو وتثبت الموديول، لكن لا تدخل بيانات Amazon الحساسة طالما الاتصال ما زال HTTP.
+
+---
+
+## أهم مسارات السيرفر
+
+| الاستخدام | المسار |
+|---|---|
+| Odoo Home | `/opt/odoo19` |
+| Odoo Source | `/opt/odoo19/odoo` |
+| odoo-bin | `/opt/odoo19/odoo/odoo-bin` |
+| Odoo Core Addons | `/opt/odoo19/odoo/odoo/addons` |
+| Additional Core Addons | `/opt/odoo19/odoo/addons` |
+| Custom Addons | `/opt/odoo19/custom-addons` |
+| Python Virtual Environment | `/opt/odoo19/venv` |
+| Python الخاص بـ Odoo | `/opt/odoo19/venv/bin/python` |
+| pip الخاص بـ Odoo | `/opt/odoo19/venv/bin/pip` |
+| ملف إعداد Odoo | `/etc/odoo19.conf` |
+| ملف Systemd Service | `/etc/systemd/system/odoo19.service` |
+| Odoo Data Directory | `/opt/odoo19/data` |
+| Filestore للداتابيز | `/opt/odoo19/data/filestore/amazon_prod` |
+| Odoo Log | `/var/log/odoo19/odoo19.log` |
+| Installation Log | `/var/log/odoo19-install.log` |
+| Nginx Configuration | `/etc/nginx/sites-available/odoo19` |
+| Nginx Enabled Link | `/etc/nginx/sites-enabled/odoo19` |
+| Nginx Access Log | `/var/log/nginx/odoo19_access.log` |
+| Nginx Error Log | `/var/log/nginx/odoo19_error.log` |
+| Logrotate Configuration | `/etc/logrotate.d/odoo19` |
+| كلمات المرور الحالية | `/root/odoo19-install-secrets.txt` |
+| PostgreSQL Data | `/var/lib/postgresql/16/main` |
+| قاعدة البيانات | `amazon_prod` |
+| Odoo Internal Port | `127.0.0.1:8069` |
+| Public Web Port | `80` |
+
+الموديول سيكون هنا:
+```
+/opt/odoo19/custom-addons/sdlc_amazon_connector
+```
+
+---
+
+## أوامر Odoo Service
+
+**عرض الحالة:**
+```bash
+sudo systemctl status odoo19 --no-pager
+```
+
+**Restart:**
+```bash
+sudo systemctl restart odoo19
+```
+
+**Stop:**
+```bash
+sudo systemctl stop odoo19
+```
+
+**Start:**
+```bash
+sudo systemctl start odoo19
+```
+
+**تفعيل التشغيل تلقائيًا:**
+```bash
+sudo systemctl enable odoo19
+```
+
+**التأكد أنه شغال:**
+```bash
+sudo systemctl is-active odoo19
+```
+
+**عرض آخر رسائل الخدمة:**
+```bash
+sudo journalctl -u odoo19 -n 100 --no-pager
+```
+
+**متابعة الـJournal لحظيًا:**
+```bash
+sudo journalctl -u odoo19 -f
+```
+
+**متابعة Odoo log لحظيًا:**
+```bash
+sudo tail -f /var/log/odoo19/odoo19.log
+```
+
+**آخر 200 سطر:**
+```bash
+sudo tail -n 200 /var/log/odoo19/odoo19.log
+```
+
+**البحث عن Errors:**
+```bash
+sudo grep -iE "error|critical|traceback" /var/log/odoo19/odoo19.log | tail -n 100
+```
+
+---
+
+## أوامر ملف إعداد Odoo
+
+**عرض الملف:**
+```bash
+sudo cat /etc/odoo19.conf
+```
+
+**تعديله:**
+```bash
+sudo nano /etc/odoo19.conf
+```
+
+**بعد أي تعديل:**
+```bash
+sudo systemctl restart odoo19
+```
+
+---
+
+## تثبيت وتحديث الموديولات
+
+**تثبيت sdlc_amazon_connector أول مرة:**
+```bash
+sudo systemctl stop odoo19
+sudo -u odoo19 /opt/odoo19/venv/bin/python \
+  /opt/odoo19/odoo/odoo-bin \
+  -c /etc/odoo19.conf \
+  -d amazon_prod \
+  -i sdlc_amazon_connector \
+  --without-demo=all \
+  --stop-after-init
+sudo systemctl start odoo19
+```
+
+**تحديث الموديول بعد تعديل الكود:**
+```bash
+sudo systemctl stop odoo19
+sudo -u odoo19 /opt/odoo19/venv/bin/python \
+  /opt/odoo19/odoo/odoo-bin \
+  -c /etc/odoo19.conf \
+  -d amazon_prod \
+  -u sdlc_amazon_connector \
+  --stop-after-init
+sudo systemctl start odoo19
+```
+
+**متابعة النتيجة:**
+```bash
+sudo tail -n 200 /var/log/odoo19/odoo19.log
+```
+
+**دخول Odoo Shell:**
+```bash
+sudo -u odoo19 /opt/odoo19/venv/bin/python \
+  /opt/odoo19/odoo/odoo-bin shell \
+  -c /etc/odoo19.conf \
+  -d amazon_prod \
+  --no-http
+```
+
+---
+
+## تثبيت Python packages للموديول
+
+استخدم دائمًا pip الموجود داخل بيئة Odoo:
+```bash
+sudo -u odoo19 /opt/odoo19/venv/bin/pip install PACKAGE_NAME
+```
+
+ولو الموديول يحتوي requirements.txt:
+```bash
+sudo -u odoo19 /opt/odoo19/venv/bin/pip install \
+  -r /opt/odoo19/custom-addons/sdlc_amazon_connector/requirements.txt
+```
+
+بعدها:
+```bash
+sudo systemctl restart odoo19
+```
+
+**ممنوع تستخدم:**
+```bash
+sudo pip install
+```
+لأنه يثبت المكتبات على نظام التشغيل وليس داخل Odoo virtual environment.
+
+---
+
+## أوامر PostgreSQL
+
+**الحالة:**
+```bash
+sudo systemctl status postgresql --no-pager
+```
+
+**Restart:**
+```bash
+sudo systemctl restart postgresql
+```
+
+**Stop وStart:**
+```bash
+sudo systemctl stop postgresql
+sudo systemctl start postgresql
+```
+
+**الدخول إلى PostgreSQL:**
+```bash
+sudo -u postgres psql
+```
+
+**عرض قواعد البيانات:**
+```bash
+sudo -u postgres psql -l
+```
+
+**فتح قاعدة Odoo:**
+```bash
+sudo -u postgres psql amazon_prod
+```
+
+**معرفة حجمها:**
+```bash
+sudo -u postgres psql -tAc \
+  "SELECT pg_size_pretty(pg_database_size('amazon_prod'));"
+```
+
+**الخروج من psql:**
+```
+\q
+```
+
+---
+
+## أوامر Nginx
+
+**فحص الإعدادات قبل Restart:**
+```bash
+sudo nginx -t
+```
+
+**Reload بدون قطع الاتصالات:**
+```bash
+sudo systemctl reload nginx
+```
+
+**Restart:**
+```bash
+sudo systemctl restart nginx
+```
+
+**الحالة:**
+```bash
+sudo systemctl status nginx --no-pager
+```
+
+**متابعة الأخطاء:**
+```bash
+sudo tail -f /var/log/nginx/odoo19_error.log
+```
+
+**متابعة الطلبات:**
+```bash
+sudo tail -f /var/log/nginx/odoo19_access.log
+```
+
+---
+
+## أوامر الحماية
+
+**عرض الـFirewall:**
+```bash
+sudo ufw status verbose
+```
+
+**حالة Fail2ban:**
+```bash
+sudo systemctl status fail2ban --no-pager
+```
+
+**عرض SSH jail:**
+```bash
+sudo fail2ban-client status sshd
+```
+
+**عرض البورتات المفتوحة:**
+```bash
+sudo ss -lntup
+```
+
+المفروض:
+- 22 مفتوح للـSSH.
+- 80 مفتوح للويب.
+- 443 مسموح لكنه لن يعمل قبل SSL.
+- 8069 يستمع على 127.0.0.1 فقط.
+- 5432 لا يكون مفتوحًا على Public IP.
+
+تحقق تحديدًا:
+```bash
+sudo ss -lntp | grep -E ':22|:80|:443|:5432|:8069'
+```
+
+---
+
+## أوامر فحص الموارد
+
+**استهلاك الرام والـSwap:**
+```bash
+free -h
+swapon --show
+```
+
+**المساحة:**
+```bash
+df -h
+```
+
+**أكبر المجلدات داخل Odoo:**
+```bash
+sudo du -h --max-depth=2 /opt/odoo19 | sort -h | tail -n 20
+```
+
+**العمليات:**
+```bash
+top
+```
+أو:
+```bash
+ps aux --sort=-%mem | head -n 15
+```
+
+---
+
+## اختبار Odoo
+
+**اختبار من داخل السيرفر:**
+```bash
+curl -I http://127.0.0.1/web/login
+```
+
+**اختبار عبر Nginx:**
+```bash
+curl -I http://127.0.0.1/
+```
+
+**فحص الخدمات الأساسية مرة واحدة:**
+```bash
+sudo systemctl is-active postgresql odoo19 nginx fail2ban
+```
+
+---
+
+## صلاحيات Custom Addons
+
+بعد رفع أو نسخ أي موديول نفّذ:
+```bash
+sudo chown -R odoo19:odoo19 /opt/odoo19/custom-addons
+sudo find /opt/odoo19/custom-addons -type d -exec chmod 750 {} \;
+sudo find /opt/odoo19/custom-addons -type f -exec chmod 640 {} \;
+```
+
+---
+
+## الأشياء المتبقية قبل التشغيل الحقيقي
+
+1. رفع sdlc_amazon_connector.
+2. تثبيت Python dependencies الخاصة به.
+3. تثبيت الموديول واختباره.
+4. إضافة Domain.
+5. تركيب SSL.
+6. تغيير Admin Password وDatabase Master Password.
+7. إعداد Backup يومي لـPostgreSQL والـfilestore.
+8. اختبار إصدار wkhtmltopdf والتقارير:
+   ```bash
+   wkhtmltopdf --version
+   ```
+
+يُفضّل لاحقًا ترقية السيرفر إلى 2 CPU و4GB RAM لو زادت المزامنات أو المستخدمون؛ المواصفات الحالية مناسبة كبداية مع workers = 0.
+
+---
+
+## الخلاصة
+
+تقدر تبدأ رفع الريبو الآن، لكن لا تدخل Amazon credentials قبل HTTPS. والخطوة التالية الأفضل هي تجهيز Deploy Key وتنزيل الريبو بدون استخدام GitHub password أو PAT داخل الأوامر.

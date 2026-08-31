@@ -58,6 +58,7 @@ class TestAmazonSettlementAccounting(TransactionCase):
             'seller_id': 'ACCOUNTING-SELLER-EG',
             'marketplace_id': 'ARBP9OOSHTCHU',
             'region': 'eu',
+            'settlement_accounting_cutoff_date': fields.Date.from_string('2026-08-01'),
             'settlement_journal_id': self.journal.id,
             'amazon_clearing_account_id': self.accounts['clearing'].id,
             'amazon_sales_account_id': self.accounts['sales'].id,
@@ -220,6 +221,7 @@ class TestAmazonSettlementAccounting(TransactionCase):
             self.instance.amazon_fee_account_id = other_account
 
     def test_n_posted_invoice_revenue_is_not_double_booked(self):
+        self.instance.settlement_accounting_strategy = 'invoice_aware'
         partner = self.env['res.partner'].sudo().create({'name': 'Amazon Buyer'})
         partner.with_company(self.company).property_account_receivable_id = self.accounts['receivable']
         invoice = self.env['account.move'].sudo().with_company(self.company).create({
@@ -255,3 +257,129 @@ class TestAmazonSettlementAccounting(TransactionCase):
         )
         self.assertEqual(receivable_line.credit, 100)
         self.assertEqual(invoice.state, 'posted')
+
+    def test_o_settlement_based_blocks_known_posted_invoice_double_revenue(self):
+        partner = self.env['res.partner'].sudo().create({'name': 'Settlement Based Buyer'})
+        partner.with_company(self.company).property_account_receivable_id = self.accounts['receivable']
+        invoice = self.env['account.move'].sudo().with_company(self.company).create({
+            'move_type': 'out_invoice', 'journal_id': self.sales_journal.id,
+            'company_id': self.company.id, 'partner_id': partner.id,
+            'invoice_line_ids': [Command.create({
+                'name': 'Existing invoice', 'account_id': self.accounts['sales'].id,
+                'quantity': 1, 'price_unit': 100,
+            })],
+        })
+        invoice.action_post()
+        amazon_order = self.env['amazon.sale.order'].sudo().create({
+            'instance_id': self.instance.id, 'amazon_order_ref': 'ORDER-SETTLEMENT-BASED',
+            'invoice_id': invoice.id,
+        })
+        settlement = self._settlement([('sale', 100, {
+            'amazon_order_id': amazon_order.amazon_order_ref,
+            'order_link_state': 'linked', 'amazon_order_record_id': amazon_order.id,
+        })])
+        self.assertEqual(self.instance.settlement_accounting_strategy, 'settlement_based')
+        with self.assertRaisesRegex(UserError, 'cannot recognize it again'):
+            self._create_entry(settlement)
+
+    def test_p_invoice_aware_draft_invoice_blocks_accounting(self):
+        self.instance.settlement_accounting_strategy = 'invoice_aware'
+        partner = self.env['res.partner'].sudo().create({'name': 'Draft Invoice Buyer'})
+        partner.with_company(self.company).property_account_receivable_id = self.accounts['receivable']
+        invoice = self.env['account.move'].sudo().with_company(self.company).create({
+            'move_type': 'out_invoice', 'journal_id': self.sales_journal.id,
+            'company_id': self.company.id, 'partner_id': partner.id,
+            'invoice_line_ids': [Command.create({
+                'name': 'Draft invoice', 'account_id': self.accounts['sales'].id,
+                'quantity': 1, 'price_unit': 100,
+            })],
+        })
+        amazon_order = self.env['amazon.sale.order'].sudo().create({
+            'instance_id': self.instance.id, 'amazon_order_ref': 'ORDER-DRAFT-INVOICE',
+            'invoice_id': invoice.id,
+        })
+        settlement = self._settlement([('sale', 100, {
+            'amazon_order_id': amazon_order.amazon_order_ref,
+            'order_link_state': 'linked', 'amazon_order_record_id': amazon_order.id,
+        })])
+        with self.assertRaisesRegex(UserError, 'draft customer document'):
+            self._create_entry(settlement)
+
+    def test_q_invoice_aware_unlinked_sale_blocks_accounting(self):
+        self.instance.settlement_accounting_strategy = 'invoice_aware'
+        settlement = self._settlement([('sale', 100, {
+            'amazon_order_id': 'ORDER-NOT-LINKED', 'order_link_state': 'order_not_found',
+        })])
+        with self.assertRaisesRegex(UserError, 'not safely linked'):
+            self._create_entry(settlement)
+
+    def test_r_accounting_cutoff_blocks_legacy_settlement(self):
+        self.instance.settlement_accounting_cutoff_date = fields.Date.from_string('2026-08-06')
+        settlement = self._settlement([('sale', 100)])
+        with self.assertRaisesRegex(UserError, 'before the configured accounting cut-off'):
+            self._create_entry(settlement)
+
+    def test_s_strategy_or_cutoff_cannot_change_after_entry_exists(self):
+        self._create_entry(self._settlement([('sale', 100)]))
+        with self.assertRaisesRegex(UserError, 'cannot change after a settlement accounting entry exists'):
+            self.instance.settlement_accounting_strategy = 'invoice_aware'
+        with self.assertRaisesRegex(UserError, 'cannot change after a settlement accounting entry exists'):
+            self.instance.settlement_accounting_cutoff_date = fields.Date.from_string('2026-08-02')
+
+    def test_t_exact_700_settlement_creates_expected_balanced_draft_entry(self):
+        settlement = self._settlement([
+            ('sale', 900), ('refund', -180), ('amazon_fee', -120),
+            ('fba_fee', -70), ('reimbursement', 200), ('adjustment', -30),
+        ], reported=700, settlement_id='ACCOUNTING-SETTLEMENT-700')
+        move = self._create_entry(settlement)
+        clearing = move.line_ids.filtered(lambda line: line.account_id == self.accounts['clearing'])
+        self.assertEqual(clearing.debit, 700)
+        self.assertEqual(clearing.credit, 0)
+        self.assertEqual(sum(move.line_ids.mapped('debit')), 1100)
+        self.assertEqual(sum(move.line_ids.mapped('credit')), 1100)
+        self.assertEqual(settlement.reconciliation_state, 'matched')
+
+    def test_u_invoice_aware_ambiguous_posted_documents_block_accounting(self):
+        self.instance.settlement_accounting_strategy = 'invoice_aware'
+        partner = self.env['res.partner'].sudo().create({'name': 'Ambiguous Invoice Buyer'})
+        partner.with_company(self.company).property_account_receivable_id = self.accounts['receivable']
+        product = self.env['product.product'].sudo().create({
+            'name': 'Ambiguous Invoice Product', 'list_price': 100,
+        })
+        sale_order = self.env['sale.order'].sudo().with_company(self.company).create({
+            'partner_id': partner.id,
+        })
+        sale_line = self.env['sale.order.line'].sudo().create({
+            'order_id': sale_order.id, 'product_id': product.id,
+            'product_uom_qty': 1, 'price_unit': 100,
+        })
+        invoice_values = {
+            'move_type': 'out_invoice', 'journal_id': self.sales_journal.id,
+            'company_id': self.company.id, 'partner_id': partner.id,
+            'invoice_line_ids': [Command.create({
+                'name': 'Ambiguous invoice', 'account_id': self.accounts['sales'].id,
+                'quantity': 1, 'price_unit': 100,
+            })],
+        }
+        first_invoice = self.env['account.move'].sudo().with_company(self.company).create(invoice_values)
+        second_invoice = self.env['account.move'].sudo().with_company(self.company).create({
+            **invoice_values,
+            'invoice_line_ids': [Command.create({
+                'name': 'Ambiguous invoice', 'account_id': self.accounts['sales'].id,
+                'quantity': 1, 'price_unit': 100,
+                'sale_line_ids': [(4, sale_line.id)],
+            })],
+        })
+        first_invoice.action_post()
+        second_invoice.action_post()
+        amazon_order = self.env['amazon.sale.order'].sudo().create({
+            'instance_id': self.instance.id, 'amazon_order_ref': 'ORDER-AMBIGUOUS-INVOICE',
+            'invoice_id': first_invoice.id, 'sale_order_id': sale_order.id,
+        })
+        settlement = self._settlement([('sale', 100, {
+            'amazon_order_id': amazon_order.amazon_order_ref,
+            'order_link_state': 'linked', 'amazon_order_record_id': amazon_order.id,
+            'sale_order_id': sale_order.id,
+        })])
+        with self.assertRaisesRegex(UserError, 'ambiguous posted customer documents'):
+            self._create_entry(settlement)

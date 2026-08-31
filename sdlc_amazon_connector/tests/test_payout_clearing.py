@@ -59,6 +59,7 @@ class TestAmazonPayoutClearing(TransactionCase):
             'seller_id': 'PAYOUT-SELLER-EG',
             'marketplace_id': 'ARBP9OOSHTCHU',
             'region': 'eu',
+            'settlement_accounting_cutoff_date': fields.Date.from_string('2026-08-01'),
             'settlement_journal_id': self.settlement_journal.id,
             'amazon_payout_bank_journal_id': self.bank_journal.id,
             'amazon_clearing_account_id': self.clearing_account.id,

@@ -74,6 +74,7 @@ class TestAmazonFinalEndToEnd(TransactionCase):
             'fba_source_location_id': self.customer_warehouse.lot_stock_id.id,
             'fba_ship_from_partner_id': self.ship_from.id,
             'fba_removal_return_partner_id': self.ship_from.id,
+            'settlement_accounting_cutoff_date': fields.Date.from_string('2026-08-01'),
             'settlement_journal_id': self.settlement_journal.id,
             'amazon_payout_bank_journal_id': self.bank_journal.id,
             'amazon_clearing_account_id': self.accounts['clearing'].id,

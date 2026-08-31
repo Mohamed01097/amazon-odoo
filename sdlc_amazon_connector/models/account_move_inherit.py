@@ -14,6 +14,18 @@ class AccountMoveInherit(models.Model):
     is_amazon_invoice = fields.Boolean('Amazon Invoice', default=False)
     amazon_invoice_uploaded = fields.Boolean('Uploaded to Amazon', default=False)
 
+    def action_post(self):
+        """Keep reimbursement financial ownership auditable after normal Odoo posting."""
+        result = super().action_post()
+        settlements = self.env['amazon.settlement.report'].sudo().search([
+            ('account_move_id', 'in', self.ids),
+        ])
+        for settlement in settlements:
+            settlement.line_ids.mapped('reimbursement_id').sudo().write({
+                'financial_state': 'posted_later',
+            })
+        return result
+
     def action_upload_to_amazon(self):
         """Upload this invoice PDF to Amazon."""
         self.ensure_one()

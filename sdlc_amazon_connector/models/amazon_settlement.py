@@ -251,6 +251,8 @@ class AmazonSettlementReport(models.Model):
         'parsing_error_count', 'currency_mismatch', 'currency_id',
         'line_ids.active', 'line_ids.normalized_category', 'line_ids.currency_id',
         'line_ids.order_link_state', 'line_ids.reimbursement_id.financial_state',
+        'instance_id.settlement_accounting_strategy',
+        'instance_id.settlement_accounting_cutoff_date',
         'instance_id.settlement_journal_id',
         'instance_id.amazon_clearing_account_id',
         'instance_id.amazon_sales_account_id',
@@ -351,18 +353,19 @@ class AmazonSettlementReport(models.Model):
     def _invoice_receivable_target(self, line):
         """Return (account, partner, error) for already-booked invoice value."""
         self.ensure_one()
-        if line.normalized_category not in INVOICE_FINANCIAL_CATEGORIES:
+        if (
+            self.instance_id.settlement_accounting_strategy != 'invoice_aware'
+            or line.normalized_category not in INVOICE_FINANCIAL_CATEGORIES
+        ):
             return self.env['account.account'], self.env['res.partner'], False
 
-        documents = self.env['account.move']
-        if line.amazon_order_record_id.invoice_id:
-            documents |= line.amazon_order_record_id.invoice_id
-        if line.sale_order_id:
-            documents |= line.sale_order_id.invoice_ids
-        if line.return_line_id.credit_note_id:
-            documents |= line.return_line_id.credit_note_id
-        documents = documents.exists().filtered(lambda move: move.state != 'cancel')
+        if not line.amazon_order_id or line.order_link_state != 'linked':
+            return self.env['account.account'], self.env['res.partner'], _(
+                'Invoice-aware settlement line %(line)s requires one safely linked Amazon order.',
+                line=line.display_name,
+            )
 
+        documents = self._linked_customer_documents(line)
         refund_transaction = (
             line.normalized_category == 'refund'
             or 'refund' in (line.amazon_transaction_type_raw or '').lower()
@@ -376,7 +379,15 @@ class AmazonSettlementReport(models.Model):
             )
         posted = relevant.filtered(lambda move: move.state == 'posted')
         if not posted:
-            return self.env['account.account'], self.env['res.partner'], False
+            return self.env['account.account'], self.env['res.partner'], _(
+                'Invoice-aware settlement line %(line)s requires one posted customer document.',
+                line=line.display_name,
+            )
+        if len(posted) != 1:
+            return self.env['account.account'], self.env['res.partner'], _(
+                'Invoice-aware settlement line %(line)s has ambiguous posted customer documents.',
+                line=line.display_name,
+            )
         receivable_lines = posted.line_ids.filtered(
             lambda move_line: move_line.account_id.account_type == 'asset_receivable'
         )
@@ -394,6 +405,18 @@ class AmazonSettlementReport(models.Model):
             )
         return accounts, partners[:1], False
 
+    def _linked_customer_documents(self, line):
+        """Return customer documents explicitly linked to settlement evidence."""
+        self.ensure_one()
+        documents = self.env['account.move']
+        if line.amazon_order_record_id.invoice_id:
+            documents |= line.amazon_order_record_id.invoice_id
+        if line.sale_order_id:
+            documents |= line.sale_order_id.invoice_ids
+        if line.return_line_id.credit_note_id:
+            documents |= line.return_line_id.credit_note_id
+        return documents.exists().filtered(lambda move: move.state != 'cancel')
+
     def _accounting_validation_errors(self):
         self.ensure_one()
         errors = []
@@ -408,6 +431,13 @@ class AmazonSettlementReport(models.Model):
             errors.append(_('The settlement has no active financial lines.'))
         if not self.deposit_date and not self.settlement_end_date:
             errors.append(_('The settlement has no deposit date or settlement end date.'))
+        if not instance.settlement_accounting_cutoff_date:
+            errors.append(_('Settlement Accounting Cut-Off is not configured.'))
+        elif self.deposit_date and self.deposit_date.date() < instance.settlement_accounting_cutoff_date:
+            errors.append(_(
+                'Settlement deposit date %(date)s is before the configured accounting cut-off %(cutoff)s.',
+                date=self.deposit_date.date(), cutoff=instance.settlement_accounting_cutoff_date,
+            ))
 
         journal = instance.settlement_journal_id
         if not journal:
@@ -437,14 +467,30 @@ class AmazonSettlementReport(models.Model):
                 ))
                 continue
             if (
-                line.normalized_category in ('sale', 'refund')
-                and line.amazon_order_id and line.order_link_state != 'linked'
+                instance.settlement_accounting_strategy == 'invoice_aware'
+                and line.normalized_category in INVOICE_FINANCIAL_CATEGORIES
+                and (not line.amazon_order_id or line.order_link_state != 'linked')
             ):
                 errors.append(_(
-                    '%(category)s line for Amazon order %(order)s is not safely linked; invoice double-booking cannot be excluded.',
-                    category=line.normalized_category.title(), order=line.amazon_order_id,
+                    '%(category)s line is not safely linked to an Amazon order; invoice double-booking cannot be excluded.',
+                    category=line.normalized_category.title(),
                 ))
                 continue
+            if (
+                instance.settlement_accounting_strategy == 'settlement_based'
+                and line.normalized_category in INVOICE_FINANCIAL_CATEGORIES
+            ):
+                posted_documents = self._linked_customer_documents(line).filtered(
+                    lambda move: move.state == 'posted'
+                )
+                if posted_documents:
+                    errors.append(_(
+                        '%(category)s line is linked to posted customer accounting. '
+                        'Settlement-based accounting cannot recognize it again; use a controlled '
+                        'invoice-aware cut-over instead.',
+                        category=line.normalized_category.title(),
+                    ))
+                    continue
             invoice_account, _partner, invoice_error = self._invoice_receivable_target(line)
             if invoice_error:
                 errors.append(invoice_error)
@@ -475,6 +521,18 @@ class AmazonSettlementReport(models.Model):
                     'Reimbursement %(reimbursement)s is already marked as financially posted.',
                     reimbursement=line.reimbursement_id.reimbursement_id,
                 ))
+            if line.reimbursement_id:
+                prior_financial_line = self.env['amazon.settlement.report.line'].sudo().search([
+                    ('reimbursement_id', '=', line.reimbursement_id.id),
+                    ('report_id', '!=', self.id),
+                    ('report_id.account_move_id', '!=', False),
+                ], limit=1)
+                if prior_financial_line:
+                    errors.append(_(
+                        'Reimbursement %(reimbursement)s is already owned by settlement %(settlement)s.',
+                        reimbursement=line.reimbursement_id.reimbursement_id,
+                        settlement=prior_financial_line.report_id.settlement_id,
+                    ))
         return list(dict.fromkeys(errors))
 
     def _accounting_move_line_values(self, line, move_date):

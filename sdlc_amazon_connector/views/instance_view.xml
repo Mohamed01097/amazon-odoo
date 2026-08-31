@@ -97,6 +97,8 @@
                     </div>
                     <group groups="account.group_account_user,account.group_account_manager">
                         <group string="Journal and Clearing">
+                            <field name="settlement_accounting_strategy"/>
+                            <field name="settlement_accounting_cutoff_date"/>
                             <field name="settlement_journal_id"/>
                             <field name="amazon_payout_bank_journal_id"/>
                             <field name="amazon_clearing_account_id"/>
