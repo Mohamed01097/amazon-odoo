@@ -76,6 +76,7 @@ FBA_CONFIGURATION_FIELDS = {
     'fba_source_location_id',
     'fba_ship_from_partner_id',
     'fba_removal_return_partner_id',
+    'fba_sale_stock_cutover_at',
     *(definition['field'] for definition in FBA_LOCATION_DEFINITIONS.values()),
 }
 SETTLEMENT_ACCOUNTING_FIELDS = {
@@ -270,6 +271,16 @@ class AmazonInstance(models.Model):
         'res.partner', string='FBA Removal Return Address', check_company=True,
         domain="[('active', '=', True), ('company_id', 'in', [company_id, False])]",
         help="Dedicated destination for return-to-address removals. It is never inferred from Ship-From.",
+    )
+    fba_sale_stock_cutover_at = fields.Datetime(
+        string='FBA Sale Stock Cutover',
+        help=(
+            "Amazon fulfilled orders whose Amazon Purchase Date is before this timestamp "
+            "are considered already represented in the opening FBA inventory baseline. "
+            "They must not generate FBA Sellable stock depletion in Odoo. Changing this "
+            "after live FBA sale stock processing is dangerous and is blocked when "
+            "post-cutover event-owned stock movement already exists."
+        ),
     )
     return_stock_policy = fields.Selection([
         ('informational', 'Informational Only'),
@@ -601,6 +612,29 @@ class AmazonInstance(models.Model):
             self._check_fba_configuration_access()
         if SETTLEMENT_ACCOUNTING_FIELDS.intersection(vals):
             self._check_settlement_accounting_access()
+        if 'fba_sale_stock_cutover_at' in vals:
+            new_cutover = (
+                fields.Datetime.to_datetime(vals['fba_sale_stock_cutover_at'])
+                if vals.get('fba_sale_stock_cutover_at')
+                else False
+            )
+            for instance in self:
+                old_cutover = instance.fba_sale_stock_cutover_at
+                if (old_cutover or False) == (new_cutover or False):
+                    continue
+                if old_cutover and instance._has_processed_fba_sale_stock_at_or_after(old_cutover):
+                    raise UserError(_(
+                        "FBA Sale Stock Cutover cannot change after live post-cutover "
+                        "FBA sale stock movement exists. Use a controlled repair or "
+                        "migration process."
+                    ))
+                if new_cutover and instance._has_processed_fba_sale_stock_at_or_after(new_cutover):
+                    raise UserError(_(
+                        "FBA Sale Stock Cutover cannot be set to %(cutover)s because "
+                        "event-owned FBA sale stock movement already exists for orders "
+                        "on or after that timestamp, or for orders without a Purchase Date.",
+                        cutover=new_cutover,
+                    ))
         protected_financial_fields = {
             'settlement_accounting_strategy', 'settlement_accounting_cutoff_date',
         }
@@ -632,6 +666,23 @@ class AmazonInstance(models.Model):
                         'settlement accounting entry exists. Use a controlled migration.'
                     ))
         return super().write(vals)
+
+    def _has_processed_fba_sale_stock_at_or_after(self, cutover_at):
+        """Return whether a cutover edit would reclassify processed live stock."""
+        self.ensure_one()
+        domain = [
+            ('instance_id', '=', self.id),
+            ('state', '!=', 'historical'),
+            ('processed_fulfilled_qty', '>', 0),
+            ('picking_ids.state', '=', 'done'),
+        ]
+        if cutover_at:
+            domain.extend([
+                '|',
+                ('order_id.purchase_date', '=', False),
+                ('order_id.purchase_date', '>=', cutover_at),
+            ])
+        return bool(self.env['amazon.fba.sale.stock.event'].sudo().search_count(domain))
 
     @api.constrains(
         'company_id',

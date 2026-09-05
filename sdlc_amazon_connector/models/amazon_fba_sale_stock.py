@@ -56,6 +56,7 @@ class AmazonFbaSaleStockEvent(models.Model):
     state = fields.Selection([
         ('pending', 'Pending'),
         ('processing', 'Processing'),
+        ('historical', 'Historical Before Cutover'),
         ('done', 'Done'),
         ('manual_review', 'Manual Review'),
         ('failed', 'Failed'),
@@ -76,6 +77,16 @@ class AmazonFbaSaleStockEvent(models.Model):
     started_at = fields.Datetime(readonly=True, copy=False)
     finished_at = fields.Datetime(readonly=True, copy=False)
     last_processed_at = fields.Datetime(readonly=True, copy=False)
+    historical_cutover_at = fields.Datetime(
+        string='Historical Cutover At', readonly=True, copy=False,
+        help="Cutover timestamp that classified this event as historical.",
+    )
+    historical_repaired_at = fields.Datetime(readonly=True, copy=False)
+    historical_repaired_qty = fields.Float(readonly=True, copy=False)
+    historical_reversal_picking_id = fields.Many2one(
+        'stock.picking', readonly=True, copy=False, ondelete='restrict',
+        check_company=True,
+    )
     last_error_code = fields.Char(readonly=True, copy=False, index=True)
     last_error_message = fields.Text(readonly=True, copy=False)
     responsible_user_id = fields.Many2one(
@@ -101,6 +112,57 @@ class AmazonFbaSaleStockEvent(models.Model):
         )
 
     @api.model
+    def _is_order_before_fba_sale_stock_cutover(self, order):
+        order = order.sudo()
+        cutover_at = order.instance_id.fba_sale_stock_cutover_at
+        return bool(cutover_at and order.purchase_date and order.purchase_date < cutover_at)
+
+    def _is_before_fba_sale_stock_cutover(self, cutover_at=False):
+        self.ensure_one()
+        cutover = cutover_at or self.instance_id.fba_sale_stock_cutover_at
+        return bool(cutover and self.order_id.purchase_date and self.order_id.purchase_date < cutover)
+
+    def _mark_historical(self, cumulative_quantity=False, cutover_at=False,
+                         reversal_picking=False, repaired=False,
+                         repaired_quantity=False):
+        self.ensure_one()
+        cumulative = (
+            self.amazon_cumulative_fulfilled_qty
+            if cumulative_quantity is False
+            else cumulative_quantity
+        )
+        now = fields.Datetime.now()
+        values = {
+            'amazon_cumulative_fulfilled_qty': cumulative,
+            'processed_fulfilled_qty': cumulative,
+            'last_delta_qty': 0,
+            'state': 'historical',
+            'next_run_at': False,
+            'last_activity_at': now,
+            'finished_at': now,
+            'historical_cutover_at': cutover_at or self.instance_id.fba_sale_stock_cutover_at,
+            'last_error_code': False,
+            'last_error_message': False,
+        }
+        if reversal_picking:
+            values['historical_reversal_picking_id'] = reversal_picking.id
+        if repaired:
+            values['historical_repaired_at'] = now
+        if repaired_quantity is not False:
+            values['historical_repaired_qty'] = repaired_quantity
+        self.write(values)
+        self.order_line_id.sudo().write({
+            'amazon_cumulative_fulfilled_qty': cumulative,
+            'odoo_processed_fulfilled_qty': cumulative,
+        })
+        control = self.env['amazon.operation.control'].sudo().search([
+            ('source_model', '=', self._name), ('source_id', '=', self.id),
+        ], limit=1)
+        if control:
+            control.mark_source_resolved()
+        return True
+
+    @api.model
     def upsert_from_order_line(self, order_line, cumulative_quantity, evidence_updated_at=False):
         """Persist trusted item-level cumulative fulfillment evidence idempotently."""
         order_line.ensure_one()
@@ -124,6 +186,7 @@ class AmazonFbaSaleStockEvent(models.Model):
                 "Amazon cumulative fulfilled quantity %s exceeds ordered quantity %s for %s.",
                 cumulative, order_line.quantity, order_line.amazon_order_item_id,
             ))
+        historical_before_cutover = self._is_order_before_fba_sale_stock_cutover(order)
         domain = [
             ('instance_id', '=', order.instance_id.id),
             ('amazon_order_ref', '=', order.amazon_order_ref),
@@ -145,11 +208,19 @@ class AmazonFbaSaleStockEvent(models.Model):
                 'amazon_order_ref': order.amazon_order_ref,
                 'amazon_order_item_id': order_line.amazon_order_item_id,
                 'amazon_cumulative_fulfilled_qty': cumulative,
-                'state': 'pending' if cumulative and product and product.is_storable else (
-                    'manual_review' if cumulative else 'done'
+                'processed_fulfilled_qty': cumulative if historical_before_cutover else 0,
+                'state': 'historical' if historical_before_cutover else (
+                    'pending' if cumulative and product and product.is_storable else (
+                        'manual_review' if cumulative else 'done'
+                    )
                 ),
-                'next_run_at': fields.Datetime.now() if cumulative and product and product.is_storable else False,
-                'finished_at': fields.Datetime.now() if not cumulative else False,
+                'next_run_at': (
+                    fields.Datetime.now()
+                    if cumulative and product and product.is_storable and not historical_before_cutover
+                    else False
+                ),
+                'finished_at': fields.Datetime.now() if (not cumulative or historical_before_cutover) else False,
+                'historical_cutover_at': order.instance_id.fba_sale_stock_cutover_at if historical_before_cutover else False,
             })
             try:
                 with self.env.cr.savepoint():
@@ -163,6 +234,14 @@ class AmazonFbaSaleStockEvent(models.Model):
             [event.id],
         )
         event.invalidate_recordset()
+        if historical_before_cutover:
+            historical_values = dict(values, amazon_cumulative_fulfilled_qty=cumulative)
+            event.write(historical_values)
+            event._mark_historical(
+                cumulative_quantity=cumulative,
+                cutover_at=order.instance_id.fba_sale_stock_cutover_at,
+            )
+            return event
         if not product or not product.is_storable:
             message = _(
                 "FBA order item %s (%s) is not mapped to an inventory-tracked Odoo product. "
@@ -281,8 +360,269 @@ class AmazonFbaSaleStockEvent(models.Model):
             raise UserError(_("FBA sale picking %s requires manual stock details.", picking.name))
         return picking
 
+    def _validate_historical_repair_configuration(self):
+        self.ensure_one()
+        instance = self.instance_id
+        source = instance.fba_sold_customer_location_id
+        destination = instance.fba_sellable_location_id
+        picking_type = instance.fba_warehouse_id.in_type_id if instance.fba_warehouse_id else False
+        if not source or source.usage != 'customer':
+            raise UserError(_("Configure the Amazon FBA Sold / Customers location before repairing historical FBA sales."))
+        if not destination or destination.usage != 'internal':
+            raise UserError(_("Configure the Amazon FBA Sellable location before repairing historical FBA sales."))
+        if not picking_type:
+            raise UserError(_("Configure an FBA warehouse with an incoming operation type."))
+        return source, destination, picking_type
+
+    def _quantity_at_location(self, location):
+        self.ensure_one()
+        return self.product_id.sudo().with_company(self.company_id).with_context(
+            location=location.id,
+        ).qty_available
+
+    def _sum_done_picking_quantity(self, pickings, source, destination):
+        self.ensure_one()
+        quantity = 0.0
+        for picking in pickings:
+            if picking.state != 'done':
+                raise UserError(_("Picking %s is not done.", picking.display_name))
+            if picking.company_id != self.company_id:
+                raise UserError(_("Picking %s belongs to a different company.", picking.display_name))
+            if picking.location_id != source or picking.location_dest_id != destination:
+                raise UserError(_(
+                    "Picking %s does not use the expected %s -> %s locations.",
+                    picking.display_name, source.display_name, destination.display_name,
+                ))
+            if not picking.move_ids:
+                raise UserError(_("Picking %s has no stock moves.", picking.display_name))
+            for move in picking.move_ids:
+                if move.state != 'done':
+                    raise UserError(_("Picking %s contains a non-done stock move.", picking.display_name))
+                if move.product_id != self.product_id:
+                    raise UserError(_(
+                        "Picking %s contains product %s instead of %s.",
+                        picking.display_name, move.product_id.display_name, self.product_id.display_name,
+                    ))
+                if move.location_id != source or move.location_dest_id != destination:
+                    raise UserError(_(
+                        "Picking %s contains a stock move with unexpected locations.",
+                        picking.display_name,
+                    ))
+                quantity += move.product_uom._compute_quantity(
+                    move.quantity, self.product_id.uom_id,
+                )
+        return quantity
+
+    def _historical_repair_plan(self, cutover_at):
+        self.ensure_one()
+        if not self._is_before_fba_sale_stock_cutover(cutover_at):
+            raise UserError(_(
+                "FBA sale stock event %s is not historical for cutover %s.",
+                self.display_name, fields.Datetime.to_string(cutover_at),
+            ))
+        if not self.product_id or not self.product_id.is_storable:
+            raise UserError(_("Historical repair requires a mapped storable product."))
+        source, destination, _picking_type = self._validate_historical_repair_configuration()
+        sale_pickings = self.picking_ids.filtered(lambda picking: (
+            picking.state == 'done' and picking.amazon_fba_movement_type == 'fba_sale'
+        ))
+        if not sale_pickings:
+            raise UserError(_(
+                "No completed event-owned FBA sale picking was found for %s.",
+                self.display_name,
+            ))
+        sale_quantity = self._sum_done_picking_quantity(sale_pickings, destination, source)
+        rounding = self.product_id.uom_id.rounding or 0.01
+        if float_compare(sale_quantity, 0.0, precision_rounding=rounding) <= 0:
+            raise UserError(_("Completed FBA sale pickings for %s have no positive quantity.", self.display_name))
+        pending_reversal = self.picking_ids.filtered(lambda picking: (
+            picking.amazon_fba_movement_type == 'fba_sale_historical_reversal'
+            and picking.state != 'done'
+        ))
+        if pending_reversal:
+            raise UserError(_(
+                "Historical reversal picking %s is not done. Review it before rerunning repair.",
+                ", ".join(pending_reversal.mapped('display_name')),
+            ))
+        reversal_pickings = self.picking_ids.filtered(lambda picking: (
+            picking.state == 'done'
+            and picking.amazon_fba_movement_type == 'fba_sale_historical_reversal'
+        ))
+        if reversal_pickings:
+            reversal_quantity = self._sum_done_picking_quantity(reversal_pickings, source, destination)
+            if float_compare(reversal_quantity, sale_quantity, precision_rounding=rounding) != 0:
+                raise UserError(_(
+                    "Existing historical reversal quantity %s does not match original sale quantity %s for %s.",
+                    reversal_quantity, sale_quantity, self.display_name,
+                ))
+            return {
+                'quantity': sale_quantity,
+                'sale_picking_ids': sale_pickings.ids,
+                'already_repaired': True,
+                'reversal_picking_ids': reversal_pickings.ids,
+            }
+
+        available = self._quantity_at_location(source)
+        if float_compare(available, sale_quantity, precision_rounding=rounding) < 0:
+            raise UserError(_(
+                "Cannot safely reverse historical event %s: Sold / Customers has %s available for %s, "
+                "but the event-owned sale picking quantity is %s.",
+                self.display_name, available, self.sku, sale_quantity,
+            ))
+        return {
+            'quantity': sale_quantity,
+            'sale_picking_ids': sale_pickings.ids,
+            'already_repaired': False,
+            'reversal_picking_ids': [],
+        }
+
+    def _create_historical_reversal_picking(self, quantity):
+        self.ensure_one()
+        source, destination, picking_type = self._validate_historical_repair_configuration()
+        picking = self.env['stock.picking'].sudo().with_company(self.company_id).create({
+            'picking_type_id': picking_type.id,
+            'location_id': source.id,
+            'location_dest_id': destination.id,
+            'company_id': self.company_id.id,
+            'origin': 'Historical FBA sale repair / %s / %s' % (
+                self.amazon_order_ref, self.amazon_order_item_id,
+            ),
+            'amazon_instance_id': self.instance_id.id,
+            'amazon_order_ref': self.amazon_order_ref,
+            'amazon_fba_sale_stock_event_id': self.id,
+            'amazon_fba_movement_type': 'fba_sale_historical_reversal',
+            'move_type': 'one',
+            'note': _(
+                "Repair for pre-cutover Amazon AFN sale stock depletion. "
+                "Restores only this event-owned completed movement from Sold / Customers to Sellable."
+            ),
+            'move_ids': [Command.create({
+                'product_id': self.product_id.id,
+                'product_uom_qty': quantity,
+                'product_uom': self.product_id.uom_id.id,
+                'location_id': source.id,
+                'location_dest_id': destination.id,
+                'company_id': self.company_id.id,
+            })],
+        })
+        picking.action_confirm()
+        picking.action_assign()
+        result = picking.with_context(
+            picking_ids_not_to_backorder=picking.ids,
+            skip_backorder=True,
+        ).button_validate()
+        if isinstance(result, dict) or picking.state != 'done':
+            raise UserError(_("Historical FBA sale repair picking %s requires manual stock details.", picking.name))
+        actual_quantity = self._sum_done_picking_quantity(picking, source, destination)
+        rounding = self.product_id.uom_id.rounding or 0.01
+        if float_compare(actual_quantity, quantity, precision_rounding=rounding) != 0:
+            raise UserError(_(
+                "Historical repair picking %s moved %s instead of %s.",
+                picking.display_name, actual_quantity, quantity,
+            ))
+        return picking
+
+    @api.model
+    def repair_historical_processed_events(self, instance, cutover_at, dry_run=True, limit=None):
+        """Repair pre-cutover FBA sale events that already consumed Sellable stock."""
+        self.env['amazon.instance']._check_amazon_manager_access()
+        if not instance:
+            raise UserError(_("Historical FBA sale stock repair requires an Amazon instance."))
+        if isinstance(instance, int):
+            instance = self.env['amazon.instance'].browse(instance)
+        instance = instance.exists()
+        if len(instance) != 1:
+            raise UserError(_("Historical FBA sale stock repair requires exactly one Amazon instance."))
+        cutover = fields.Datetime.to_datetime(cutover_at)
+        if not cutover:
+            raise UserError(_("Historical FBA sale stock repair requires a cutover timestamp."))
+
+        events = self.sudo().search([
+            ('instance_id', '=', instance.id),
+            ('order_id.purchase_date', '<', cutover),
+            ('processed_fulfilled_qty', '>', 0),
+            ('picking_ids.state', '=', 'done'),
+        ], order='id', limit=limit or None)
+        summary = {
+            'dry_run': bool(dry_run),
+            'instance_id': instance.id,
+            'instance_name': instance.display_name,
+            'cutover_at': fields.Datetime.to_string(cutover),
+            'candidate_count': len(events),
+            'would_repair_count': 0,
+            'would_restore_qty': 0.0,
+            'repaired_count': 0,
+            'restored_qty': 0.0,
+            'already_repaired_count': 0,
+            'manual_review_count': 0,
+            'errors': [],
+            'event_ids': events.ids,
+        }
+
+        for event in events:
+            try:
+                with self.env.cr.savepoint():
+                    self.env.cr.execute(
+                        'SELECT id FROM amazon_fba_sale_stock_event WHERE id = %s FOR UPDATE',
+                        [event.id],
+                    )
+                    event.invalidate_recordset()
+                    plan = event._historical_repair_plan(cutover)
+                    quantity = plan['quantity']
+                    if plan['already_repaired']:
+                        summary['already_repaired_count'] += 1
+                        if not dry_run and event.state != 'historical':
+                            reversal = self.env['stock.picking'].sudo().browse(plan['reversal_picking_ids'][:1])
+                            event._mark_historical(
+                                cumulative_quantity=event.amazon_cumulative_fulfilled_qty,
+                                cutover_at=cutover,
+                                reversal_picking=reversal,
+                                repaired_quantity=quantity,
+                            )
+                        continue
+                    if dry_run:
+                        summary['would_repair_count'] += 1
+                        summary['would_restore_qty'] += quantity
+                        continue
+                    reversal_picking = event._create_historical_reversal_picking(quantity)
+                    event._mark_historical(
+                        cumulative_quantity=event.amazon_cumulative_fulfilled_qty,
+                        cutover_at=cutover,
+                        reversal_picking=reversal_picking,
+                        repaired=True,
+                        repaired_quantity=quantity,
+                    )
+                    summary['repaired_count'] += 1
+                    summary['restored_qty'] += quantity
+            except Exception as exc:
+                message = str(exc)
+                summary['manual_review_count'] += 1
+                summary['errors'].append({
+                    'event_id': event.id,
+                    'amazon_order_ref': event.amazon_order_ref,
+                    'amazon_order_item_id': event.amazon_order_item_id,
+                    'sku': event.sku,
+                    'error': message[:1000],
+                })
+                if not dry_run:
+                    event.invalidate_recordset()
+                    event.write({
+                        'state': 'manual_review',
+                        'next_run_at': False,
+                        'last_error_code': 'HISTORICAL_REPAIR_REVIEW',
+                        'last_error_message': message[:5000],
+                        'last_activity_at': fields.Datetime.now(),
+                    })
+                    event._record_manual_review()
+                _logger.warning("Historical FBA sale stock repair skipped event %s: %s", event.id, message)
+
+        return summary
+
     def _process_locked(self):
         self.ensure_one()
+        if self._is_before_fba_sale_stock_cutover():
+            self._mark_historical()
+            return False
         self._advisory_lock(self.instance_id.id, self.product_id.id)
         rounding = self.product_id.uom_id.rounding or 0.01
         delta = self.amazon_cumulative_fulfilled_qty - self.processed_fulfilled_qty
@@ -341,6 +681,9 @@ class AmazonFbaSaleStockEvent(models.Model):
                     [self.id],
                 )
                 self.invalidate_recordset()
+                if self.state == 'historical' or self._is_before_fba_sale_stock_cutover():
+                    self._mark_historical()
+                    return False
                 if self.state == 'done' and self.amazon_cumulative_fulfilled_qty <= self.processed_fulfilled_qty:
                     return False
                 self.write({
@@ -438,4 +781,8 @@ class StockPickingFbaSaleStock(models.Model):
     )
     amazon_fba_movement_type = fields.Selection(selection_add=[
         ('fba_sale', 'Amazon FBA Sale to Customer'),
-    ], ondelete={'fba_sale': 'set null'})
+        ('fba_sale_historical_reversal', 'Amazon FBA Historical Sale Reversal'),
+    ], ondelete={
+        'fba_sale': 'set null',
+        'fba_sale_historical_reversal': 'set null',
+    })

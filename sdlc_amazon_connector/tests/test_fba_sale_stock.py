@@ -2,8 +2,8 @@ import inspect
 from unittest.mock import patch
 
 from odoo import Command, fields
-from odoo.exceptions import UserError
-from odoo.tests import TransactionCase, tagged
+from odoo.exceptions import AccessError, UserError
+from odoo.tests import TransactionCase, new_test_user, tagged
 
 from ..models.amazon_api import AmazonAPI
 from ..models.amazon_fba_sale_stock import AmazonFbaSaleStockEvent
@@ -87,15 +87,19 @@ class TestAmazonFbaSaleStock(TransactionCase):
         product.invalidate_recordset()
         return product.sudo().with_company(self.company).with_context(location=location.id).qty_available
 
-    def _order_line(self, order_ref='ORDER-1', sku='SKU-1', quantity=5, product=None, amazon_product=None):
+    def _order_line(self, order_ref='ORDER-1', sku='SKU-1', quantity=5,
+                    product=None, amazon_product=None, purchase_date=None):
         product = product or self.product
         amazon_product = amazon_product or self.amazon_product
-        order = self.env['amazon.sale.order'].sudo().create({
+        order_vals = {
             'amazon_order_ref': order_ref,
             'instance_id': self.instance.id,
             'fulfillment_channel': 'AFN',
             'amazon_status': 'Unshipped',
-        })
+        }
+        if purchase_date:
+            order_vals['purchase_date'] = fields.Datetime.to_datetime(purchase_date)
+        order = self.env['amazon.sale.order'].sudo().create(order_vals)
         line = self.env['amazon.sale.order.line'].sudo().create({
             'order_id': order.id,
             'amazon_order_item_id': '%s-ITEM-%s' % (order_ref, sku),
@@ -107,12 +111,35 @@ class TestAmazonFbaSaleStock(TransactionCase):
         return order, line
 
     def _event(self, cumulative, order_ref='ORDER-1', sku='SKU-1', quantity=5,
-               product=None, amazon_product=None):
-        order, line = self._order_line(order_ref, sku, quantity, product, amazon_product)
+               product=None, amazon_product=None, purchase_date=None):
+        order, line = self._order_line(
+            order_ref, sku, quantity, product, amazon_product, purchase_date,
+        )
         event = self.env['amazon.fba.sale.stock.event'].sudo().upsert_from_order_line(
             line, cumulative, fields.Datetime.now(),
         )
         return order, line, event
+
+    def _set_cutover(self, cutover='2026-09-05 14:51:51'):
+        cutover_dt = fields.Datetime.to_datetime(cutover)
+        self.instance.sudo().write({'fba_sale_stock_cutover_at': cutover_dt})
+        return cutover_dt
+
+    def _repair_historical(self, cutover, dry_run=False):
+        return self.env['amazon.fba.sale.stock.event'].repair_historical_processed_events(
+            self.instance, cutover, dry_run=dry_run,
+        )
+
+    def _wrongly_processed_historical_event(self, order_ref='ORDER-WRONG', cumulative=1):
+        cutover = fields.Datetime.to_datetime('2026-09-05 14:51:51')
+        _order, _line, event = self._event(
+            cumulative,
+            order_ref=order_ref,
+            purchase_date='2026-09-05 14:00:00',
+        )
+        event._process_one()
+        self._set_cutover(cutover)
+        return cutover, event
 
     def _item_payload(self, line, cumulative):
         return {
@@ -422,3 +449,192 @@ class TestAmazonFbaSaleStock(TransactionCase):
         self.assertNotIn('UPDATE STOCK_QUANT', source.upper())
         self.assertEqual(self._quantity(self.product, self.instance.fba_source_location_id), 70)
         self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 19)
+
+    def test_21_historical_before_cutover_creates_no_picking(self):
+        cutover = self._set_cutover()
+        _order, _line, event = self._event(
+            1, order_ref='ORDER-HISTORICAL',
+            purchase_date='2026-09-05 14:00:00',
+        )
+        event._process_one()
+        self.assertEqual(event.state, 'historical')
+        self.assertEqual(event.historical_cutover_at, cutover)
+        self.assertEqual(event.processed_fulfilled_qty, 1)
+        self.assertFalse(event.picking_ids)
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 24)
+
+    def test_22_live_after_cutover_processes_normally(self):
+        self._set_cutover()
+        _order, _line, event = self._event(
+            1, order_ref='ORDER-LIVE-AFTER',
+            purchase_date='2026-09-05 15:00:00',
+        )
+        picking = event._process_one()
+        self.assertEqual(event.state, 'done')
+        self.assertEqual(event.processed_fulfilled_qty, 1)
+        self.assertEqual(len(event.picking_ids), 1)
+        self.assertEqual(picking.location_id, self.instance.fba_sellable_location_id)
+        self.assertEqual(picking.location_dest_id, self.instance.fba_sold_customer_location_id)
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 23)
+
+    def test_23_cutover_boundary_is_live(self):
+        cutover = self._set_cutover()
+        _order, _line, event = self._event(
+            1, order_ref='ORDER-CUTOVER-BOUNDARY',
+            purchase_date=cutover,
+        )
+        event._process_one()
+        self.assertEqual(event.state, 'done')
+        self.assertEqual(event.processed_fulfilled_qty, 1)
+        self.assertEqual(len(event.picking_ids), 1)
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 23)
+
+    def test_24_repeated_historical_import_never_creates_picking(self):
+        self._set_cutover()
+        order, line = self._order_line(
+            order_ref='ORDER-HIST-REPEAT',
+            purchase_date='2026-09-05 14:00:00',
+        )
+        importer = self.env['amazon.order.import.job'].new({'instance_id': self.instance.id})
+        for _index in range(5):
+            importer._upsert_order_items(order, [self._item_payload(line, 1)])
+            event = self.env['amazon.fba.sale.stock.event'].search([('order_line_id', '=', line.id)])
+            event._process_one()
+        self.assertEqual(len(event), 1)
+        self.assertEqual(event.state, 'historical')
+        self.assertEqual(event.processed_fulfilled_qty, 1)
+        self.assertFalse(event.picking_ids)
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 24)
+
+    def test_25_historical_cumulative_increase_stays_historical(self):
+        self._set_cutover()
+        _order, line, event = self._event(
+            1, order_ref='ORDER-HIST-INCREASE',
+            purchase_date='2026-09-05 14:00:00',
+        )
+        self.env['amazon.fba.sale.stock.event'].upsert_from_order_line(line, 2)
+        event.invalidate_recordset()
+        event._process_one()
+        self.assertEqual(event.state, 'historical')
+        self.assertEqual(event.amazon_cumulative_fulfilled_qty, 2)
+        self.assertEqual(event.processed_fulfilled_qty, 2)
+        self.assertFalse(event.picking_ids)
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 24)
+
+    def test_26_repair_one_wrong_historical_event_restores_sellable(self):
+        cutover, event = self._wrongly_processed_historical_event('ORDER-REPAIR-ONE')
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 23)
+        dry_run = self._repair_historical(cutover, dry_run=True)
+        event.invalidate_recordset()
+        self.assertEqual(dry_run['would_repair_count'], 1)
+        self.assertEqual(dry_run['would_restore_qty'], 1)
+        self.assertFalse(event.picking_ids.filtered(
+            lambda picking: picking.amazon_fba_movement_type == 'fba_sale_historical_reversal'
+        ))
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 23)
+        summary = self._repair_historical(cutover, dry_run=False)
+        event.invalidate_recordset()
+        reversals = event.picking_ids.filtered(
+            lambda picking: picking.amazon_fba_movement_type == 'fba_sale_historical_reversal'
+        )
+        self.assertEqual(summary['repaired_count'], 1)
+        self.assertEqual(summary['restored_qty'], 1)
+        self.assertEqual(len(reversals), 1)
+        self.assertEqual(reversals.location_id, self.instance.fba_sold_customer_location_id)
+        self.assertEqual(reversals.location_dest_id, self.instance.fba_sellable_location_id)
+        self.assertEqual(event.historical_reversal_picking_id, reversals)
+        self.assertEqual(event.historical_repaired_qty, 1)
+        self.assertEqual(event.state, 'historical')
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 24)
+
+    def test_27_repair_rerun_creates_no_duplicate_reversal(self):
+        cutover, event = self._wrongly_processed_historical_event('ORDER-REPAIR-RERUN')
+        self._repair_historical(cutover, dry_run=False)
+        event.invalidate_recordset()
+        reversal_ids = event.picking_ids.filtered(
+            lambda picking: picking.amazon_fba_movement_type == 'fba_sale_historical_reversal'
+        ).ids
+        summary = self._repair_historical(cutover, dry_run=False)
+        event.invalidate_recordset()
+        self.assertEqual(summary['repaired_count'], 0)
+        self.assertEqual(summary['restored_qty'], 0)
+        self.assertEqual(summary['already_repaired_count'], 1)
+        self.assertEqual(event.picking_ids.filtered(
+            lambda picking: picking.amazon_fba_movement_type == 'fba_sale_historical_reversal'
+        ).ids, reversal_ids)
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 24)
+
+    def test_28_mixed_historical_live_repair_touches_only_historical(self):
+        cutover, historical_event = self._wrongly_processed_historical_event('ORDER-REPAIR-HIST')
+        _order, _line, live_event = self._event(
+            2, order_ref='ORDER-REPAIR-LIVE',
+            purchase_date='2026-09-05 15:00:00',
+        )
+        live_event._process_one()
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 21)
+        summary = self._repair_historical(cutover, dry_run=False)
+        historical_event.invalidate_recordset()
+        live_event.invalidate_recordset()
+        self.assertEqual(summary['repaired_count'], 1)
+        self.assertEqual(historical_event.state, 'historical')
+        self.assertEqual(live_event.state, 'done')
+        self.assertFalse(live_event.picking_ids.filtered(
+            lambda picking: picking.amazon_fba_movement_type == 'fba_sale_historical_reversal'
+        ))
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 22)
+
+    def test_29_inconsistent_repair_evidence_goes_manual_review(self):
+        cutover, event = self._wrongly_processed_historical_event('ORDER-REPAIR-BAD')
+        event.picking_ids.write({'amazon_fba_movement_type': False})
+        summary = self._repair_historical(cutover, dry_run=False)
+        event.invalidate_recordset()
+        self.assertEqual(summary['manual_review_count'], 1)
+        self.assertEqual(event.state, 'manual_review')
+        self.assertEqual(event.last_error_code, 'HISTORICAL_REPAIR_REVIEW')
+        self.assertFalse(event.picking_ids.filtered(
+            lambda picking: picking.amazon_fba_movement_type == 'fba_sale_historical_reversal'
+        ))
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 23)
+
+    def test_30_live_cumulative_delta_idempotency_after_cutover(self):
+        self._set_cutover()
+        _order, line, event = self._event(
+            2, order_ref='ORDER-LIVE-CUMULATIVE',
+            purchase_date='2026-09-05 15:00:00',
+        )
+        event._process_one()
+        self.env['amazon.fba.sale.stock.event'].upsert_from_order_line(line, 5)
+        event._process_one()
+        self.env['amazon.fba.sale.stock.event'].upsert_from_order_line(line, 5)
+        event._process_one()
+        sale_pickings = event.picking_ids.filtered(
+            lambda picking: picking.amazon_fba_movement_type == 'fba_sale'
+        )
+        self.assertEqual(sorted(sale_pickings.mapped('move_ids').mapped('quantity')), [2, 3])
+        self.assertEqual(event.processed_fulfilled_qty, 5)
+        self.assertEqual(self._quantity(self.product, self.instance.fba_sellable_location_id), 19)
+
+    def test_31_cutover_change_blocked_after_live_stock_processing(self):
+        self._set_cutover()
+        _order, _line, event = self._event(
+            1, order_ref='ORDER-CUTOVER-LOCKED',
+            purchase_date='2026-09-05 15:00:00',
+        )
+        event._process_one()
+        with self.assertRaises(UserError):
+            self.instance.write({'fba_sale_stock_cutover_at': '2026-09-05 13:00:00'})
+
+    def test_32_historical_repair_requires_amazon_manager(self):
+        cutover, _event = self._wrongly_processed_historical_event('ORDER-REPAIR-ACCESS')
+        amazon_user = new_test_user(
+            self.env,
+            login='fba_sale_repair_user',
+            groups='sdlc_amazon_connector.group_amazon_user',
+            company_id=self.company.id,
+        ).with_company(self.company)
+        with self.assertRaises(AccessError):
+            self.env['amazon.fba.sale.stock.event'].with_user(
+                amazon_user,
+            ).repair_historical_processed_events(
+                self.instance, cutover, dry_run=True,
+            )

@@ -1,7 +1,7 @@
 # Amazon Egypt FBA — Business Flow Summary
 
 **Audience:** business owner, operations manager, warehouse manager and accountant  
-**Odoo connector reviewed:** `sdlc_amazon_connector` 19.0.10.4.0
+**Odoo connector reviewed:** `sdlc_amazon_connector` 19.0.10.5.0
 **Review basis:** current code and safe local/mocked validation; no live Amazon transaction was performed.
 
 ## 1. The Business Cycle
@@ -166,6 +166,25 @@ If Amazon first reports 2 fulfilled and later 5, Odoo moves 2 and then 3—not 2
 
 Inventory snapshots remain a control and reconciliation mechanism. They never automatically consume a sale. If a snapshot reaches 19 before the order event runs, the difference is marked as sale overlap and cannot be approved as a competing outbound adjustment. The event then performs the single sale movement; a refreshed audit matches 19 to 19.
 
+### FBA sale stock cutover
+
+When production starts with an opening FBA Sellable balance, old Amazon fulfilled orders before that opening baseline are already included in the count. They must not consume the same Sellable stock again.
+
+Each Amazon instance has an explicit **FBA Sale Stock Cutover** timestamp. The connector uses the imported Amazon order Purchase Date only:
+
+```text
+Purchase Date before cutover       = historical; no Sellable depletion
+Purchase Date equal/after cutover  = live; normal Sellable -> Sold movement
+```
+
+If the cutover is missing, the connector keeps the previous live-processing behavior. It does not silently make every imported order historical. Configure the cutover before importing or status-syncing historical fulfilled orders for an opening-stock rollout.
+
+For the current Amazon Egypt production incident, the intended cutover is `2026-09-05 14:51:51`. The 46 old events totaling 47 units should be repaired manually after review, not automatically during upgrade.
+
+The module upgrade adds the field and event state only. It does not fill the cutover from sync dates and does not auto-repair production data.
+
+Repair creates a standard Odoo picking from **Amazon FBA Sold / Customers** back to **Amazon FBA Sellable** for only the completed stock movement owned by each historical sale-stock event. It does not write stock quants directly, does not touch WH/Stock, Reserved, Unsellable, accounting or Amazon, and a rerun creates no duplicate restoration.
+
 ## 8. Customer Return
 
 Assume one 180 EGP item is returned. Odoo imports Amazon's FBA customer-return report and records the reason and disposition evidence. This report does not add one unit to WH/Stock and does not automatically create a credit note.
@@ -290,7 +309,7 @@ Lost, damaged and found events then adjust the business total only where custody
 - One active production instance, ship-from address and correct company.
 - Customer warehouse, FBA warehouse and every transit/disposition location.
 - Exact SKU mappings, stockable AFN products, UoM, costs and tax policy.
-- Order and settlement cut-off dates; partner/customer and warehouse strategy.
+- FBA Sale Stock Cutover, order and settlement cut-off dates; partner/customer and warehouse strategy.
 - Approved read-cron activation and intervals; alert recipients and retry ownership.
 - Settlement-based accounting selected for the first go-live; a documented accounting cut-off so legacy settlements are not booked twice.
 - Accountant-approved mappings for clearing, sales, refunds, Amazon fees, FBA fees, reimbursements, adjustments, promotions, shipping, taxes and other categories.
@@ -324,6 +343,19 @@ Lost, damaged and found events then adjust the business total only where custody
 **NOT READY FOR FULL GO-LIVE:** the sale-stock blocker and the settlement-based accounting engine are locally accepted, but the client accountant must still approve the legal tax treatment, production mappings, accounting cut-off and user approvals before financial production operation.
 
 The exact next step is a backed-up staging accounting workshop. Configure settlement-based accounting, the accounting cut-off and all account/bank mappings; then validate the 700 EGP example through a reviewed draft journal entry and clearing reconciliation before production activation. Do not use invoice-aware accounting until its tax evidence gap is separately resolved and accepted.
+
+For the opening FBA stock incident, use this production repair sequence after deploying the fixed code:
+
+1. Upgrade `sdlc_amazon_connector` so the cutover field exists.
+2. Configure `fba_sale_stock_cutover_at`.
+3. Verify the cutover value.
+4. Run dry-run historical repair.
+5. Review expected result: 46 events and 47 quantity.
+6. Run repair once.
+7. Verify Sellable for SKU `24-BHT6-LWJ7` returns from 71 to 118, assuming no valid live event occurred after cutover.
+8. Run fresh FBA Inventory Audit.
+9. Continue opening stock baseline for remaining mapped products.
+10. Only post-cutover Amazon fulfilled events may consume Sellable.
 
 ## 17. Safety Record
 

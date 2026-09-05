@@ -145,6 +145,12 @@
                             <field name="inventory_reconciliation_enabled"/>
                             <field name="last_inventory_audit_at"/>
                         </group>
+                        <group string="FBA Sale Stock">
+                            <field name="fba_sale_stock_cutover_at"/>
+                            <div class="alert alert-warning" role="alert" colspan="2">
+                                Orders with Amazon Purchase Date before this timestamp are already represented in opening FBA inventory and must not deplete FBA Sellable stock. Changing this after live FBA sale stock processing is dangerous.
+                            </div>
+                        </group>
                         <group string="Setup">
                             <div class="alert alert-info" role="alert" colspan="2">
                                 <strong>Source</strong> is the client's warehouse stock location.<br/>

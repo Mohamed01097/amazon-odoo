@@ -4,7 +4,8 @@
         <field name="model">amazon.fba.sale.stock.event</field>
         <field name="arch" type="xml">
             <list decoration-danger="state in ('manual_review', 'failed')"
-                  decoration-warning="state in ('pending', 'processing')">
+                  decoration-warning="state in ('pending', 'processing')"
+                  decoration-muted="state == 'historical'">
                 <field name="instance_id"/>
                 <field name="amazon_order_ref"/>
                 <field name="amazon_order_item_id"/>
@@ -14,6 +15,7 @@
                 <field name="processed_fulfilled_qty"/>
                 <field name="last_delta_qty"/>
                 <field name="state"/>
+                <field name="historical_cutover_at"/>
                 <field name="attempt_count"/>
                 <field name="next_run_at"/>
                 <field name="last_processed_at"/>
@@ -31,9 +33,12 @@
                             class="btn-primary" invisible="state not in ('manual_review', 'failed')"
                             groups="sdlc_amazon_connector.group_amazon_manager"/>
                     <field name="state" widget="statusbar"
-                           statusbar_visible="pending,processing,done,manual_review,failed"/>
+                           statusbar_visible="pending,processing,historical,done,manual_review,failed"/>
                 </header>
                 <sheet>
+                    <div class="alert alert-info" role="alert" invisible="state != 'historical'">
+                        This event is before the configured FBA Sale Stock Cutover. No live FBA Sellable depletion is owed.
+                    </div>
                     <group>
                         <group string="Amazon Evidence">
                             <field name="instance_id"/>
@@ -51,6 +56,10 @@
                             <field name="processed_fulfilled_qty"/>
                             <field name="last_delta_qty"/>
                             <field name="last_picking_id"/>
+                            <field name="historical_cutover_at"/>
+                            <field name="historical_repaired_at"/>
+                            <field name="historical_repaired_qty"/>
+                            <field name="historical_reversal_picking_id"/>
                             <field name="attempt_count"/>
                             <field name="max_attempts"/>
                             <field name="next_run_at"/>

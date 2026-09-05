@@ -1,7 +1,7 @@
 # Amazon Egypt FBA Connector — Implementer Handoff
 
 **Module:** `sdlc_amazon_connector`  
-**Version reviewed:** `19.0.10.4.0`
+**Version reviewed:** `19.0.10.5.0`
 **Database:** `amazon_manual_test`  
 **Odoo:** 19 Community  
 **Marketplace:** Amazon Egypt (`ARBP9OOSHTCHU`, EU SP-API region)  
@@ -23,6 +23,8 @@ This document describes current code, not intended architecture. Status words ha
 The inbound subsystem remains suitable for a controlled, supervised pilot. It supports the Fulfillment Inbound `v2024-03-20` plan, packing, placement and transportation workflow, preserved label/receiving reads, physical-shipment splitting, explicit dispatch, cumulative receiving deltas, and reviewed FBA inventory reconciliation.
 
 The FBA sale-stock blocker is closed. For each Amazon-fulfilled order item, Orders API `fulfillment.quantityFulfilled` is stored as cumulative Amazon evidence. One durable `amazon.fba.sale.stock.event` moves only the positive unprocessed delta from Amazon FBA Sellable to Amazon FBA Sold / Customers with standard Odoo pickings. Generic AFN sale-order procurement is suppressed and its accidental delivery validation is blocked, so WH/Stock is never the sale source and no second delivery can consume stock.
+
+Version `19.0.10.5.0` adds an explicit FBA Sale Stock Cutover on the Amazon instance. Amazon fulfilled orders whose imported `amazon.sale.order.purchase_date` is before that timestamp are treated as historical and do not consume the opening FBA Sellable baseline. The guard is in the event owner itself, so order import and status sync can keep importing historical evidence without creating new live stock depletion.
 
 Full go-live is still not approved. Financial configuration remains a separate gate: the client accountant must select and validate the accounting strategy and tax policy, populate the category accounts, Amazon Clearing and bank journal, and accept the complete order/settlement behavior before unattended production operation.
 
@@ -62,7 +64,7 @@ Durable workers persist jobs/cursors/operation IDs in PostgreSQL. Business confi
 | Customer warehouse stock | Odoo + physical warehouse count | Only standard Odoo stock operations may change it |
 | FBA receipt and disposition | Amazon | Read as cumulative receipt/snapshot; Odoo applies guarded deltas/reviewed transfers |
 | Order status | Amazon Orders API | Raw status mirrored; local workflow changes only when configured |
-| FBA sale depletion | Amazon Orders API item-level cumulative `quantityFulfilled` | Durable event consumes only the unprocessed delta from FBA Sellable; inventory snapshots are reconciliation evidence, not competing sale events |
+| FBA sale depletion | Amazon Orders API item-level cumulative `quantityFulfilled`, guarded by imported `amazon.sale.order.purchase_date` | Durable event consumes only the unprocessed post-cutover delta from FBA Sellable; pre-cutover events become `historical`; inventory snapshots are reconciliation evidence, not competing sale events |
 | Sale price policy | Client decision | Both pull and push exist; recommend Odoo master and controlled push |
 | Refund/fee/reimbursement/settlement amount | Amazon V2 settlement report | Signed lines retained and reconciled to reported payout |
 | Bank receipt | Odoo bank transaction or explicit bank evidence | Amazon deposit date is not receipt proof |
@@ -182,7 +184,7 @@ All XML IDs are prefixed `sdlc_amazon_connector.`. “Active” is the module/da
 |---|---|---|---|---|
 | `amazon.order.import.job` | draft, running, done, partial, failed | Durable `next_token`, `next_run_at`; 429 uses `Retry-After` + jitter; date-bound correction max 3 | `FOR UPDATE SKIP LOCKED LIMIT 1`; one active job per instance | Failed/partial visible in Jobs/Retry Center; requeue same source safely |
 | `amazon.order.status.sync.job` | draft, pending, running, done, partial, failed | `retry_count`, `next_run_at`; 429 deferral and safe date bounds | Row `SKIP LOCKED`; one active job per instance | Permanent conflicts create review/activity rather than destructive workflow |
-| `amazon.fba.sale.stock.event` | pending, processing, done, manual_review, failed | max 5; persisted attempts and exponential local retry capped at 60m | Unique instance+order+item; row `FOR UPDATE`; instance/product advisory lock; cron `SKIP LOCKED`; cumulative minus processed delta | Unmapped SKU, decreased evidence or insufficient Sellable requires review; retry is visible through Jobs/Retry Center/Alerts |
+| `amazon.fba.sale.stock.event` | pending, processing, historical, done, manual_review, failed | max 5; persisted attempts and exponential local retry capped at 60m | Unique instance+order+item; row `FOR UPDATE`; instance/product advisory lock; cron `SKIP LOCKED`; cumulative minus processed delta; pre-cutover purchase dates never validate pickings | Historical events are terminal and not retried; unmapped SKU, decreased live evidence or insufficient Sellable requires review; retry is visible through Jobs/Retry Center/Alerts |
 | `amazon.inbound.operation.job` | pending, in_progress, done, failed | max 12; 1/2/4/8/15-minute capped poll backoff | Row `SKIP LOCKED`; unique operation type + operation ID; shipment locks | Stored operation ID is resumable; unknown write outcome is manual review, never blind replay |
 | `amazon.inventory.reconciliation.run` | queued, running, completed, failed | max 5; exponential delay capped 60m; `Retry-After` can extend | Job row lock plus transaction advisory lock per instance; one active run | Incomplete snapshot never becomes an adjustment basis; explicit retry |
 | `amazon.phase7.job` | pending, running, waiting_amazon, done, failed | max 12; 429/5xx/timeout retries; `Retry-After` or exponential capped 60m | `SKIP LOCKED`; active operation dedupe by instance/type and by source for writes | Role/configuration/permanent errors fail and alert; manual retry after correction |
@@ -291,6 +293,63 @@ Current behavior:
 For an AFN item, `(instance, Amazon order ID, Amazon order item ID)` identifies one stock event. `quantityFulfilled` is cumulative: if Amazon first reports 2 and later 5, the standard Sellable→Sold/Customers pickings are 2 and 3. The processed quantity advances in the same transaction as successful picking validation. Re-importing or re-syncing 5 produces zero delta. Zero fulfillment, cancellation before fulfillment and financial refunds create no stock move. Missing mappings, decreasing cumulative evidence and insufficient Sellable stock stop in manual review rather than using WH/Stock or allowing negative stock.
 
 The linked draft quotation remains commercial evidence. It cannot create a competing AFN delivery: procurement is suppressed for its AFN lines and stock validation has a defensive event-link guard.
+
+### FBA Sale Stock Cutover
+
+`amazon.instance.fba_sale_stock_cutover_at` is the explicit operational boundary between opening FBA inventory and live connector-owned sale depletion. The rule uses only the imported Amazon order business timestamp:
+
+```text
+if amazon.sale.order.purchase_date < instance.fba_sale_stock_cutover_at:
+    historical; do not create or validate Sellable -> Sold stock movement
+else:
+    live; process the cumulative fulfilled delta normally
+```
+
+The boundary is inclusive for live processing: a purchase date exactly equal to the cutover is live. When no cutover is configured, existing behavior is preserved; the connector does not silently classify all orders as historical. Missing `purchase_date` is also not treated as historical.
+
+Configure the cutover immediately after the module version that adds the field is deployed and before enabling order import/status workers for historical ranges. Do not derive the value from `last_stock_sync`, `last_order_sync`, record creation dates or evidence-update timestamps. Changing the cutover after post-cutover event-owned stock movement exists is blocked because it can corrupt ownership of already-processed Sellable stock.
+
+Module upgrade only adds the field/state support. It does not auto-populate the cutover and does not auto-repair existing events.
+
+For the Amazon Egypt production opening adjustment described in the current incident, the intended cutover is:
+
+```text
+2026-09-05 14:51:51
+```
+
+Opening stock sequence:
+
+1. Load the physical opening FBA Sellable baseline once through standard Odoo inventory adjustment or another approved stock operation.
+2. Configure `fba_sale_stock_cutover_at` to the exact baseline timestamp.
+3. Import historical Amazon orders only after the cutover is configured; those old fulfilled orders become `historical` events and do not consume the opening baseline.
+4. Only orders with `purchase_date` on or after the cutover may consume FBA Sellable.
+
+### Historical Repair Procedure
+
+Version `19.0.10.5.0` includes a manager-gated shell-callable repair method:
+
+```python
+env['amazon.fba.sale.stock.event'].repair_historical_processed_events(instance, cutover_at, dry_run=True)
+```
+
+The method requires an explicit instance and cutover timestamp. It never runs automatically during module upgrade. It selects only events for that instance where `order.purchase_date < cutover`, `processed_fulfilled_qty > 0`, and an event-owned completed stock picking exists. It reverses only completed event-owned `fba_sale` pickings by creating one standard `fba_sale_historical_reversal` picking from Amazon FBA Sold / Customers back to Amazon FBA Sellable. It does not write `stock.quant`, touch WH/Stock, Reserved, Unsellable, accounting or Amazon, and it does not touch unrelated pickings.
+
+The repair is idempotent and resumable. A completed reversal picking linked to the same event is proof that the event was already restored, so a rerun creates zero additional movement. After a real repair, the event is normalized to terminal `historical`, `processed_fulfilled_qty` is set to the Amazon cumulative fulfilled quantity to show no live post-cutover depletion remains owed, and the reversal picking/quantity/timestamp are retained for audit. If movement evidence is inconsistent, the method does not guess; it leaves or marks the event in `manual_review` with a controlled error.
+
+Recommended production sequence after this fix:
+
+1. Upgrade module to make `fba_sale_stock_cutover_at` available.
+2. Configure `fba_sale_stock_cutover_at`.
+3. Verify cutover value.
+4. Run dry-run historical repair.
+5. Review expected result: 46 events and 47 quantity.
+6. Run repair once.
+7. Verify Sellable for SKU `24-BHT6-LWJ7` returns from 71 to 118, assuming no valid live event occurred after cutover.
+8. Run fresh FBA Inventory Audit.
+9. Continue opening stock baseline for remaining mapped products.
+10. Only post-cutover Amazon fulfilled events may consume Sellable.
+
+Do not run live Amazon writes, create inbound plans, push inventory to Amazon, post accounting entries, activate unrelated crons, or modify production data automatically during upgrade.
 
 ## 12. Returns
 
@@ -570,10 +629,11 @@ The sale difference is now closed by the authoritative event. Lost/found timing 
 - [ ] Production database backup
 - [ ] Correct Amazon production instance; no duplicate active instance
 - [ ] Credentials, Egypt marketplace and Amazon roles verified
-- [ ] Module version `19.0.10.4.0` verified
+- [ ] Module version `19.0.10.5.0` verified
 - [ ] Product mappings unique; all AFN products stockable; UoM/cost/tax reviewed
 - [ ] Warehouse/FBA structure, source WH/Stock and ship-from verified
 - [ ] Opening-stock policy agreed and loaded once
+- [ ] FBA Sale Stock Cutover configured before historical order/event processing
 - [ ] Order start date and settlement start date agreed
 - [ ] Partner strategy and order batch/overlap agreed
 - [ ] Read crons enabled/staggered; write crons remain disabled
