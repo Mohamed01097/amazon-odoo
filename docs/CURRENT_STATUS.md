@@ -15,7 +15,7 @@ No Python code, XML, manifests, security files, dependencies, database data, liv
 ## Verified Existing Functionality
 
 - Main module exists at `sdlc_amazon_connector/`.
-- Manifest version is `19.0.10.4.0`.
+- Manifest version is `19.0.10.6.1`.
 - Manifest declares Odoo Community modules only among dependencies: `sale_management`, `stock`, `contacts`, `account`, `mail`, `purchase`, and `delivery`.
 - Source files exist for Amazon API, instance configuration, products, orders, order import jobs, order status jobs, settlements, payouts, returns, removals, inbound shipments, inbound operation jobs, inbound receiving, inventory reconciliation, FBA inventory, sync logs, operation controls, and AI features.
 - Cron XML defines scheduled actions for order jobs, status sync, FBA sale stock events, product sync, price update, settlement import, cancellation checks, stock export, inbound polling, receiving, removal import, inventory audits, health, operations, retries, alerts, Phase 7 jobs, returns, adjustments, reimbursements, and reimbursement matching.
@@ -34,6 +34,7 @@ The following are present in code/docs but require staging/live validation, conf
 - FBA inbound planning, packing, placement, shipping, labels, tracking, dispatch, and receiving.
 - Inventory audits and reviewed reconciliation.
 - FBA sale-stock event processing.
+- FBA sale-stock cutover V2 (historical fulfillment evidence baseline) with coverage-gap protection, B>C anomaly detection, baseline immutability, and deduplication. Hardened 2026-09-15, version 19.0.10.6.1.
 - Returns, removals, inventory adjustments, reimbursements, and settlement jobs.
 - Settlement accounting and payout clearing.
 - AI listing, pricing, forecast, review, alert, health, and chat features.

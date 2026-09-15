@@ -104,3 +104,55 @@ Job workers must:
 - Poll asynchronous feeds, reports, and inbound operations to terminal status where applicable.
 - Respect Amazon rate limits and retry only bounded, classified retryable failures.
 
+## FBA Sale Stock Cutover
+
+Two cutover strategies exist for handling pre-cutover Amazon FBA orders.
+
+### Cutover V1 (purchase-date suppression)
+
+When `fba_sale_stock_cutover_at` is set on an instance, any order with `purchase_date < cutover_at` is marked `state=historical` with `processed_fulfilled_qty = amazon_cumulative_fulfilled_qty`. No stock picking is created. This prevents double-counting for orders fulfilled before inventory was seeded.
+
+### Cutover V2 (historical fulfillment evidence baseline)
+
+V2 uses Amazon's `GET_AMAZON_FULFILLED_SHIPMENTS_DATA_GENERAL` report to determine exactly how many units were fulfilled before the cutover boundary for each order item.
+
+**Definitions:**
+
+- B = pre-cutover fulfilled quantity (from shipment evidence)
+- C = current Amazon cumulative fulfilled quantity
+- P = post-cutover quantity already moved by Odoo
+- D = outstanding depletion: `D = max(0, C - B - P)`
+
+**Models:**
+
+- `amazon.fba.sale.stock.cutover.run` — lifecycle (draft → building → ready → activated → cancelled)
+- `amazon.fba.sale.stock.cutover.baseline` — per-order-item evidence: B value, unique per (instance, order, item)
+- `amazon.fba.sale.stock.cutover.shipment` — raw shipment evidence rows, deduplicated by shipment_item_id
+
+**Safe B=0 semantics:**
+
+B=0 is only proven safe when all are true:
+
+1. Cutover v2 run is activated
+2. Order's `purchase_date` falls within `[history_start_at, cutover_at)`
+3. All report windows completed successfully
+4. No matching shipment evidence exists for shipment_date <= cutover_at
+
+Orders with `purchase_date < history_start_at` and no evidence get `state=manual_review` with error code `CUTOVER_BASELINE_OUTSIDE_COVERAGE`.
+
+**Controlled deployment sequence:**
+
+1. Snapshot inventory state
+2. Wait for shipment-report safety delay (default 4 hours)
+3. Build fulfillment evidence (read-only Amazon API)
+4. Verify coverage completeness
+5. Mark baseline READY
+6. Seed opening inventory (NOT performed by the baseline builder)
+7. Activate cutover
+8. Import orders
+9. Enable controlled automation
+
+**Activation side effects:**
+
+`action_activate` ONLY sets `fba_sale_stock_cutover_at` on the instance and transitions the run to `activated`. It does not seed inventory, import orders, enable crons, create stock moves, or call Amazon write APIs.
+

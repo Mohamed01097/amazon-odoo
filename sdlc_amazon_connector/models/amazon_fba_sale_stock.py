@@ -81,6 +81,12 @@ class AmazonFbaSaleStockEvent(models.Model):
         string='Historical Cutover At', readonly=True, copy=False,
         help="Cutover timestamp that classified this event as historical.",
     )
+    cutover_baseline_fulfilled_qty = fields.Float(
+        default=0.0, readonly=True, copy=False,
+        help="Units fulfilled before/on cutover, from Amazon shipment evidence. "
+             "Represents inventory already absent from the opening snapshot. "
+             "processed_fulfilled_qty is initialised to this value for pre-cutover orders.",
+    )
     historical_repaired_at = fields.Datetime(readonly=True, copy=False)
     historical_repaired_qty = fields.Float(readonly=True, copy=False)
     historical_reversal_picking_id = fields.Many2one(
@@ -121,6 +127,64 @@ class AmazonFbaSaleStockEvent(models.Model):
         self.ensure_one()
         cutover = cutover_at or self.instance_id.fba_sale_stock_cutover_at
         return bool(cutover and self.order_id.purchase_date and self.order_id.purchase_date < cutover)
+
+    @api.model
+    def _is_cutover_v2_active(self, instance):
+        """Return True when the instance has an activated v2 cutover run."""
+        CutoverRun = self.env['amazon.fba.sale.stock.cutover.run'].sudo()
+        return bool(CutoverRun.search([
+            ('instance_id', '=', instance.id),
+            ('state', '=', 'activated'),
+        ], limit=1))
+
+    @api.model
+    def _lookup_cutover_v2_baseline(self, order):
+        """Look up the pre-cutover fulfilled quantity from the activated cutover run."""
+        CutoverRun = self.env['amazon.fba.sale.stock.cutover.run'].sudo()
+        run = CutoverRun.search([
+            ('instance_id', '=', order.instance_id.id),
+            ('state', '=', 'activated'),
+        ], limit=1)
+        if not run:
+            return 0.0
+        return run.get_baseline_for_order_item(
+            order.amazon_order_ref,
+            order.sudo().line_ids[0].amazon_order_item_id if order.sudo().line_ids else '',
+        )
+
+    @api.model
+    def _lookup_cutover_v2_baseline_for_line(self, instance, amazon_order_ref, amazon_order_item_id):
+        """Look up B from the activated cutover run for a specific order line."""
+        CutoverRun = self.env['amazon.fba.sale.stock.cutover.run'].sudo()
+        run = CutoverRun.search([
+            ('instance_id', '=', instance.id),
+            ('state', '=', 'activated'),
+        ], limit=1)
+        if not run:
+            return 0.0
+        return run.get_baseline_for_order_item(amazon_order_ref, amazon_order_item_id)
+
+    @api.model
+    def _is_order_within_v2_coverage(self, instance, purchase_date):
+        """Return True when purchase_date is within the activated v2 run's coverage."""
+        CutoverRun = self.env['amazon.fba.sale.stock.cutover.run'].sudo()
+        run = CutoverRun.search([
+            ('instance_id', '=', instance.id),
+            ('state', '=', 'activated'),
+        ], limit=1)
+        if not run:
+            return False
+        return run.is_order_within_coverage(purchase_date)
+
+    @api.model
+    def _get_v2_coverage_start(self, instance):
+        """Return the history_start_at of the activated v2 run, or False."""
+        CutoverRun = self.env['amazon.fba.sale.stock.cutover.run'].sudo()
+        run = CutoverRun.search([
+            ('instance_id', '=', instance.id),
+            ('state', '=', 'activated'),
+        ], limit=1)
+        return run.history_start_at if run else False
 
     def _mark_historical(self, cumulative_quantity=False, cutover_at=False,
                          reversal_picking=False, repaired=False,
@@ -187,6 +251,7 @@ class AmazonFbaSaleStockEvent(models.Model):
                 cumulative, order_line.quantity, order_line.amazon_order_item_id,
             ))
         historical_before_cutover = self._is_order_before_fba_sale_stock_cutover(order)
+        cutover_v2_active = self._is_cutover_v2_active(order.instance_id)
         domain = [
             ('instance_id', '=', order.instance_id.id),
             ('amazon_order_ref', '=', order.amazon_order_ref),
@@ -203,38 +268,137 @@ class AmazonFbaSaleStockEvent(models.Model):
             'last_activity_at': fields.Datetime.now(),
         }
         if not event:
-            values.update({
-                'instance_id': order.instance_id.id,
-                'amazon_order_ref': order.amazon_order_ref,
-                'amazon_order_item_id': order_line.amazon_order_item_id,
-                'amazon_cumulative_fulfilled_qty': cumulative,
-                'processed_fulfilled_qty': cumulative if historical_before_cutover else 0,
-                'state': 'historical' if historical_before_cutover else (
-                    'pending' if cumulative and product and product.is_storable else (
-                        'manual_review' if cumulative else 'done'
+            if historical_before_cutover and cutover_v2_active:
+                within_coverage = self._is_order_within_v2_coverage(
+                    order.instance_id, order.purchase_date,
+                )
+                baseline = self._lookup_cutover_v2_baseline_for_line(
+                    order.instance_id, order.amazon_order_ref,
+                    order_line.amazon_order_item_id,
+                )
+                values.update({
+                    'instance_id': order.instance_id.id,
+                    'amazon_order_ref': order.amazon_order_ref,
+                    'amazon_order_item_id': order_line.amazon_order_item_id,
+                    'amazon_cumulative_fulfilled_qty': cumulative,
+                    'cutover_baseline_fulfilled_qty': baseline,
+                    'historical_cutover_at': order.instance_id.fba_sale_stock_cutover_at,
+                })
+                if not within_coverage and baseline == 0.0:
+                    coverage_start = self._get_v2_coverage_start(order.instance_id)
+                    values.update({
+                        'processed_fulfilled_qty': 0.0,
+                        'state': 'manual_review',
+                        'next_run_at': False,
+                        'finished_at': False,
+                        'last_error_code': 'CUTOVER_BASELINE_OUTSIDE_COVERAGE',
+                        'last_error_message': _(
+                            "Order %s (purchased %s) is older than the cutover evidence "
+                            "coverage start %s. B=0 cannot be proven — manual review required.",
+                            order.amazon_order_ref,
+                            fields.Datetime.to_string(order.purchase_date),
+                            fields.Datetime.to_string(coverage_start) if coverage_start else 'unknown',
+                        ),
+                    })
+                elif float_compare(baseline, cumulative, precision_rounding=rounding) > 0:
+                    values.update({
+                        'processed_fulfilled_qty': 0.0,
+                        'state': 'manual_review',
+                        'next_run_at': False,
+                        'finished_at': False,
+                        'last_error_code': 'CUTOVER_BASELINE_EXCEEDS_CUMULATIVE',
+                        'last_error_message': _(
+                            "Cutover baseline B=%s exceeds current cumulative C=%s for item %s. "
+                            "Data inconsistency — manual review required.",
+                            baseline, cumulative, order_line.amazon_order_item_id,
+                        ),
+                    })
+                else:
+                    values['processed_fulfilled_qty'] = baseline
+                    delta_exists = (
+                        product and product.is_storable
+                        and float_compare(cumulative, baseline, precision_rounding=rounding) > 0
                     )
-                ),
-                'next_run_at': (
-                    fields.Datetime.now()
-                    if cumulative and product and product.is_storable and not historical_before_cutover
-                    else False
-                ),
-                'finished_at': fields.Datetime.now() if (not cumulative or historical_before_cutover) else False,
-                'historical_cutover_at': order.instance_id.fba_sale_stock_cutover_at if historical_before_cutover else False,
-            })
-            try:
-                with self.env.cr.savepoint():
-                    event = self.sudo().create(values)
-            except IntegrityError:
-                event = self.sudo().search(domain, limit=1)
-                if not event:
-                    raise
+                    if delta_exists:
+                        values.update({
+                            'state': 'pending',
+                            'next_run_at': fields.Datetime.now(),
+                            'finished_at': False,
+                        })
+                    else:
+                        values.update({
+                            'state': 'done' if product and product.is_storable else 'manual_review',
+                            'next_run_at': False,
+                            'finished_at': fields.Datetime.now(),
+                        })
+                        if not product or not product.is_storable:
+                            values['last_error_code'] = 'UNMAPPED_FBA_SKU'
+                try:
+                    with self.env.cr.savepoint():
+                        event = self.sudo().create(values)
+                except IntegrityError:
+                    event = self.sudo().search(domain, limit=1)
+                    if not event:
+                        raise
+                else:
+                    order_line.sudo().write({'amazon_cumulative_fulfilled_qty': cumulative})
+                    if event.state == 'manual_review':
+                        event._record_manual_review()
+                    return event
+            elif historical_before_cutover:
+                values.update({
+                    'instance_id': order.instance_id.id,
+                    'amazon_order_ref': order.amazon_order_ref,
+                    'amazon_order_item_id': order_line.amazon_order_item_id,
+                    'amazon_cumulative_fulfilled_qty': cumulative,
+                    'processed_fulfilled_qty': cumulative,
+                    'state': 'historical',
+                    'next_run_at': False,
+                    'finished_at': fields.Datetime.now(),
+                    'historical_cutover_at': order.instance_id.fba_sale_stock_cutover_at,
+                })
+                try:
+                    with self.env.cr.savepoint():
+                        event = self.sudo().create(values)
+                except IntegrityError:
+                    event = self.sudo().search(domain, limit=1)
+                    if not event:
+                        raise
+                else:
+                    order_line.sudo().write({'amazon_cumulative_fulfilled_qty': cumulative})
+                    return event
+            else:
+                values.update({
+                    'instance_id': order.instance_id.id,
+                    'amazon_order_ref': order.amazon_order_ref,
+                    'amazon_order_item_id': order_line.amazon_order_item_id,
+                    'amazon_cumulative_fulfilled_qty': cumulative,
+                    'processed_fulfilled_qty': 0,
+                    'state': (
+                        'pending' if cumulative and product and product.is_storable else (
+                            'manual_review' if cumulative else 'done'
+                        )
+                    ),
+                    'next_run_at': (
+                        fields.Datetime.now()
+                        if cumulative and product and product.is_storable
+                        else False
+                    ),
+                    'finished_at': fields.Datetime.now() if not cumulative else False,
+                })
+                try:
+                    with self.env.cr.savepoint():
+                        event = self.sudo().create(values)
+                except IntegrityError:
+                    event = self.sudo().search(domain, limit=1)
+                    if not event:
+                        raise
         self.env.cr.execute(
             'SELECT id FROM amazon_fba_sale_stock_event WHERE id = %s FOR UPDATE',
             [event.id],
         )
         event.invalidate_recordset()
-        if historical_before_cutover:
+        if historical_before_cutover and not cutover_v2_active:
             historical_values = dict(values, amazon_cumulative_fulfilled_qty=cumulative)
             event.write(historical_values)
             event._mark_historical(
@@ -621,8 +785,11 @@ class AmazonFbaSaleStockEvent(models.Model):
     def _process_locked(self):
         self.ensure_one()
         if self._is_before_fba_sale_stock_cutover():
-            self._mark_historical()
-            return False
+            if self._is_cutover_v2_active(self.instance_id):
+                pass  # v2: process normally using baseline delta
+            else:
+                self._mark_historical()
+                return False
         self._advisory_lock(self.instance_id.id, self.product_id.id)
         rounding = self.product_id.uom_id.rounding or 0.01
         delta = self.amazon_cumulative_fulfilled_qty - self.processed_fulfilled_qty
@@ -681,9 +848,12 @@ class AmazonFbaSaleStockEvent(models.Model):
                     [self.id],
                 )
                 self.invalidate_recordset()
-                if self.state == 'historical' or self._is_before_fba_sale_stock_cutover():
-                    self._mark_historical()
+                if self.state == 'historical':
                     return False
+                if self._is_before_fba_sale_stock_cutover():
+                    if not self._is_cutover_v2_active(self.instance_id):
+                        self._mark_historical()
+                        return False
                 if self.state == 'done' and self.amazon_cumulative_fulfilled_qty <= self.processed_fulfilled_qty:
                     return False
                 self.write({

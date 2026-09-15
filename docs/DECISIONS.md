@@ -49,6 +49,22 @@ API-specific behavior must be verified against official Amazon SP-API documentat
 
 All implementation work must be split into small phases. A phase must have one clear objective and must not combine unrelated features.
 
+### FBA Sale Stock Cutover V2
+
+Accepted 2026-09-15. The connector supports two cutover strategies:
+
+- **V1 (purchase-date suppression):** Orders before `fba_sale_stock_cutover_at` are marked historical with `processed = cumulative`. No stock move. Simple but assumes all pre-cutover fulfillment is already accounted for.
+- **V2 (historical fulfillment evidence baseline):** Uses `GET_AMAZON_FULFILLED_SHIPMENTS_DATA_GENERAL` to compute B (units fulfilled before cutover) per order item. Delta formula: `D = max(0, C - B - P)`.
+
+V2 hardening rules (non-negotiable):
+
+1. B=0 is only proven safe when the order's purchase_date is within `[history_start_at, cutover_at)` and all report windows succeeded. Orders outside coverage get `manual_review` with `CUTOVER_BASELINE_OUTSIDE_COVERAGE`.
+2. B > C is a data inconsistency — `manual_review` with `CUTOVER_BASELINE_EXCEEDS_CUMULATIVE`, never clamped.
+3. Baselines are immutable after the run leaves `building` state.
+4. `action_activate` only sets the cutover date on the instance. It does not seed inventory, import orders, enable crons, create stock moves, or call Amazon write APIs.
+5. Shipment evidence is deduplicated by `shipment_item_id` (SQL UNIQUE per run).
+6. No `env.cr.commit()` anywhere in the module.
+
 ## Pending Decisions
 
 - Final settlement accounting strategy for Egypt go-live.

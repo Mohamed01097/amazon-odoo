@@ -15,4 +15,5 @@ from . import test_settlement_accounting
 from . import test_payout_clearing
 from . import test_orders_api_v2026
 from . import test_fba_sale_stock
+from . import test_fba_cutover_v2
 from . import test_final_e2e
