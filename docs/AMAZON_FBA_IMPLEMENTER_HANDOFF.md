@@ -22,6 +22,8 @@ This document describes current code, not intended architecture. Status words ha
 
 The inbound subsystem remains suitable for a controlled, supervised pilot. It supports the Fulfillment Inbound `v2024-03-20` plan, packing, placement and transportation workflow, preserved label/receiving reads, physical-shipment splitting, explicit dispatch, cumulative receiving deltas, and reviewed FBA inventory reconciliation.
 
+Inbound planned items now support an optional physical **Expiration Date**. The implementer enters it on the Planned Items grid before pressing **Create Shipment Plan**. It is sent to Amazon Fulfillment Inbound `v2024-03-20` as `items[].expiration` in `YYYY-MM-DD` format. This is different from packing-option or placement-option expiration timestamps, which are Amazon-generated decision deadlines and are not product shelf-life dates.
+
 The FBA sale-stock blocker is closed. For each Amazon-fulfilled order item, Orders API `fulfillment.quantityFulfilled` is stored as cumulative Amazon evidence. One durable `amazon.fba.sale.stock.event` moves only the positive unprocessed delta from Amazon FBA Sellable to Amazon FBA Sold / Customers with standard Odoo pickings. Generic AFN sale-order procurement is suppressed and its accidental delivery validation is blocked, so WH/Stock is never the sale source and no second delivery can consume stock.
 
 Version `19.0.10.5.0` adds an explicit FBA Sale Stock Cutover on the Amazon instance. Amazon fulfilled orders whose imported `amazon.sale.order.purchase_date` is before that timestamp are treated as historical and do not consume the opening FBA Sellable baseline. The guard is in the event owner itself, so order import and status sync can keep importing historical evidence without creating new live stock depletion.
@@ -243,6 +245,22 @@ For SKU `24-BHT6-LWJ7`, starting WH/Stock 100 and shipment 30:
 6. Unique active picking checks, row locks, exact line caps and done-state checks prevent duplicate dispatch.
 
 All irreversible Amazon selections and physical validations remain manual. The one-minute worker only polls an operation already created by a manual action.
+
+### Planned item expiration dates
+
+Some MSKUs require an expiration date for the physical units being sent to Amazon. When that applies, enter the date on:
+
+```text
+Amazon -> Inbound Shipments -> Create/Edit Shipment -> Planned Items -> Expiration Date
+```
+
+The field belongs to each planned item because different MSKUs, and different lots of the same MSKU, can have different dates. Leave it empty for products that do not require expiration dating. The connector does not force every FBA product to have a date, because Amazon validates this per MSKU and can return a final asynchronous error when the date is required.
+
+If Amazon returns `FBA_INB_0180` with `Expiration date required`, edit the draft/retryable inbound shipment line, enter the physical inventory expiration date, and create a new inbound plan only after confirming that the previous failed operation did not create a usable plan. Do not confuse this with `packing_option.expiration_date` or `placement_option.expiration_date`; those option fields are Amazon decision deadlines.
+
+Create-plan polling preserves Amazon `operationProblems` in the operation response. If Amazon returns a final `FAILED` result with useful business errors, those errors remain visible even when Amazon's diagnostic `operationId` in the status body differs from the operation ID that was polled.
+
+Amazon's official Fulfillment Inbound `v2024-03-20` sandbox model shows that `getInboundOperationStatus` can return a body `operationId` different from the path operation ID. A mismatched `SUCCESS` is still never trusted by itself. If the stored `inboundPlanId` is available, the connector performs read-only verification with `getInboundPlan` and `listInboundPlanItems`. It reconciles the operation only when the returned plan ID, active plan status, marketplace/source context where exposed, and unordered MSKU quantities match the local Planned Items. If that identity check fails, the shipment remains failed with `OPERATION_ID_MISMATCH_UNVERIFIED`. If it passes, the normal success path moves the shipment to **Plan Created** and stores the mismatch audit plus plan-verification evidence.
 
 ## 9. Receiving
 

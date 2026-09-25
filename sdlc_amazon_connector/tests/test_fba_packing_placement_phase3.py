@@ -1,6 +1,7 @@
 from unittest.mock import Mock, patch
 
 import requests
+from psycopg2 import IntegrityError
 
 from odoo import api
 from odoo.exceptions import UserError, ValidationError
@@ -598,6 +599,20 @@ class TestFbaPackingPlacementPhase3(TransactionCase):
         self.assertEqual(self.shipment.packing_error_code, 'InvalidPlanState')
         self.assertEqual(self.shipment.state, 'plan_created')
 
+    def test_05c2_completed_packing_generation_is_not_repolled_or_corrupted(self):
+        job = self._generate_packing()
+        self.assertEqual(self.shipment.state, 'packing_generated')
+        job.write({'state': 'pending'})
+
+        with patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True) as poll_mock:
+            status = self.shipment._poll_phase3_operation(job)
+
+        self.assertEqual(status, 'success')
+        self.assertEqual(self.shipment.state, 'packing_generated')
+        self.assertEqual(self.shipment.packing_generation_status, 'success')
+        self.assertFalse(self.shipment.packing_error_code)
+        poll_mock.assert_not_called()
+
     def test_05d_expired_packing_options_can_be_regenerated_without_duplicates(self):
         self._generate_packing()
         self.shipment.packing_option_ids.write({
@@ -1140,6 +1155,7 @@ class TestFbaPackingPlacementPhase3(TransactionCase):
     def test_07a_packing_information_is_required_and_uses_official_box_schema(self):
         self._generate_packing()
         self._confirm_packing()
+        self.line_a.write({'expiration_date': '2027-03-03'})
         with self.assertRaisesRegex(UserError, 'box-level packing information'):
             self.shipment.action_generate_placement_options()
         body = self._set_packing_information()
@@ -1156,7 +1172,261 @@ class TestFbaPackingPlacementPhase3(TransactionCase):
              for item in box['items']},
             {('SKU-A', 20, 'SELLER', 'SELLER'), ('SKU-B', 10, 'SELLER', 'SELLER')},
         )
+        items_by_msku = {item['msku']: item for item in box['items']}
+        self.assertEqual(items_by_msku['SKU-A']['expiration'], '2027-03-03')
+        self.assertNotIn('expiration', items_by_msku['SKU-B'])
         self.assertEqual(self.shipment.packing_information_status, 'success')
+
+    def test_07b_packing_information_rejects_invalid_box_data(self):
+        self._generate_packing()
+        self._confirm_packing()
+        selected = self.shipment.packing_option_ids.filtered('selected')
+
+        with self.assertRaisesRegex(UserError, 'at least one box'):
+            self.shipment._prepare_packing_information_payload()
+
+        base_box_values = {
+            'packing_option_id': selected.id,
+            'amazon_packing_group_id': PACKING_GROUP_1,
+            'length': 30,
+            'width': 20,
+            'height': 10,
+            'dimension_unit': 'CM',
+            'weight': 5.5,
+            'weight_unit': 'KG',
+        }
+        with self.env.cr.savepoint(), self.assertRaises(IntegrityError):
+            self.env['amazon.fba.box'].sudo().create(dict(base_box_values, length=0))
+        with self.env.cr.savepoint(), self.assertRaises(IntegrityError):
+            self.env['amazon.fba.box'].sudo().create(dict(base_box_values, weight=0))
+
+        empty_box = self.env['amazon.fba.box'].sudo().create(base_box_values)
+        with self.assertRaisesRegex(UserError, 'must contain at least one item'):
+            self.shipment._prepare_packing_information_payload()
+        empty_box.unlink()
+
+        unknown_product = self.env['amazon.product'].sudo().create({
+            'name': 'Unknown Box SKU',
+            'instance_id': self.instance.id,
+            'sku': 'UNKNOWN-SKU',
+            'odoo_product_id': self.odoo_product.id,
+        })
+        box = self.env['amazon.fba.box'].sudo().create(base_box_values)
+        self.env['amazon.fba.box.line'].sudo().create({
+            'box_id': box.id,
+            'amazon_product_id': unknown_product.id,
+            'msku': 'UNKNOWN-SKU',
+            'quantity': 1,
+        })
+        with self.assertRaisesRegex(UserError, 'not present on the inbound plan'):
+            self.shipment._prepare_packing_information_payload()
+        box.unlink()
+
+        box = self.env['amazon.fba.box'].sudo().create(base_box_values)
+        self.env['amazon.fba.box.line'].sudo().create({
+            'box_id': box.id,
+            'amazon_product_id': self.amazon_product.id,
+            'msku': 'SKU-A',
+            'quantity': self.line_a.planned_quantity - 1,
+        })
+        self.env['amazon.fba.box.line'].sudo().create({
+            'box_id': box.id,
+            'amazon_product_id': self.amazon_product_b.id,
+            'msku': 'SKU-B',
+            'quantity': self.line_b.planned_quantity,
+        })
+        with self.assertRaisesRegex(UserError, 'exactly match'):
+            self.shipment._prepare_packing_information_payload()
+        box.unlink()
+
+        valid_box = self.env['amazon.fba.box'].sudo().create(base_box_values)
+        self.env['amazon.fba.box.line'].sudo().create({
+            'box_id': valid_box.id,
+            'amazon_product_id': self.amazon_product.id,
+            'msku': 'SKU-A',
+            'quantity': self.line_a.planned_quantity,
+        })
+        self.env['amazon.fba.box.line'].sudo().create({
+            'box_id': valid_box.id,
+            'amazon_product_id': self.amazon_product_b.id,
+            'msku': 'SKU-B',
+            'quantity': self.line_b.planned_quantity,
+        })
+        extra_box = self.env['amazon.fba.box'].sudo().create(
+            dict(base_box_values, amazon_packing_group_id=PACKING_GROUP_2)
+        )
+        self.env['amazon.fba.box.line'].sudo().create({
+            'box_id': extra_box.id,
+            'amazon_product_id': self.amazon_product.id,
+            'msku': 'SKU-A',
+            'quantity': 1,
+        })
+        with self.assertRaisesRegex(UserError, 'Every local box'):
+            self.shipment._prepare_packing_information_payload()
+        (valid_box | extra_box).unlink()
+
+        box_a = self.env['amazon.fba.box'].sudo().create(base_box_values)
+        box_b = self.env['amazon.fba.box'].sudo().create(dict(base_box_values, weight=6.0))
+        self.env['amazon.fba.box.line'].sudo().create({
+            'box_id': box_a.id,
+            'amazon_product_id': self.amazon_product.id,
+            'msku': 'SKU-A',
+            'quantity': 5,
+        })
+        self.env['amazon.fba.box.line'].sudo().create({
+            'box_id': box_b.id,
+            'amazon_product_id': self.amazon_product.id,
+            'msku': 'SKU-A',
+            'quantity': self.line_a.planned_quantity - 5,
+        })
+        self.env['amazon.fba.box.line'].sudo().create({
+            'box_id': box_b.id,
+            'amazon_product_id': self.amazon_product_b.id,
+            'msku': 'SKU-B',
+            'quantity': self.line_b.planned_quantity,
+        })
+
+        payload = self.shipment._prepare_packing_information_payload()
+
+        self.assertEqual(payload['packageGroupings'][0]['packingGroupId'], PACKING_GROUP_1)
+        self.assertEqual(len(payload['packageGroupings'][0]['boxes']), 2)
+        totals = {}
+        for box_payload in payload['packageGroupings'][0]['boxes']:
+            for item in box_payload['items']:
+                totals[item['msku']] = totals.get(item['msku'], 0) + item['quantity']
+        self.assertEqual(totals, {'SKU-A': 20, 'SKU-B': 10})
+
+    def test_07c_bulk_box_wizard_creates_physical_cartons_without_external_side_effects(self):
+        shipment = self.env['amazon.inbound.shipment'].sudo().create({
+            'name': 'P3-BULK-BOX-001',
+            'shipment_name': 'Bulk Box Plan',
+            'instance_id': self.instance.id,
+            'inbound_plan_id': 'wfbulkboxx-1234-abcd-5678-1234abcd5678',
+            'create_operation_status': 'success',
+            'state': 'packing_confirmed',
+            'packing_confirmation_status': 'success',
+        })
+        self.env['amazon.inbound.shipment.line'].sudo().create({
+            'shipment_id': shipment.id,
+            'amazon_product_id': self.amazon_product.id,
+            'odoo_product_id': self.odoo_product.id,
+            'sku': 'SKU-A',
+            'planned_quantity': 1000,
+            'prep_owner': 'SELLER',
+            'label_owner': 'SELLER',
+        })
+        option = self.env['amazon.fba.packing.option'].sudo().create({
+            'instance_id': self.instance.id,
+            'inbound_shipment_id': shipment.id,
+            'amazon_packing_option_id': 'po-bulk-boxes-0000000000000000000001',
+            'option_name': 'Bulk Box Option',
+            'status': 'ACCEPTED',
+            'selected': True,
+            'amazon_packing_group_ids': '["%s"]' % PACKING_GROUP_1,
+        })
+        group = self.env['amazon.fba.packing.group'].sudo().create({
+            'packing_option_id': option.id,
+            'amazon_packing_group_id': PACKING_GROUP_1,
+        })
+        group_item = self.env['amazon.fba.packing.group.item'].sudo().create({
+            'packing_group_id': group.id,
+            'amazon_product_id': self.amazon_product.id,
+            'msku': 'SKU-A',
+            'quantity': 1000,
+        })
+        Picking = self.env['stock.picking'].sudo()
+        Move = self.env['stock.move'].sudo()
+        before_pickings = Picking.search_count([])
+        before_moves = Move.search_count([])
+
+        def create_batch(count, units, weight):
+            wizard = self.env['amazon.fba.bulk.box.wizard'].sudo().create({
+                'inbound_shipment_id': shipment.id,
+                'packing_option_id': option.id,
+                'packing_group_id': group.id,
+                'packing_group_item_id': group_item.id,
+                'box_count': count,
+                'units_per_box': units,
+                'length': 30,
+                'width': 20,
+                'height': 26,
+                'dimension_unit': 'CM',
+                'weight': weight,
+                'weight_unit': 'KG',
+            })
+            wizard.action_generate_boxes()
+
+        with (
+            patch.object(AmazonAPI, 'confirm_packing_option', autospec=True) as confirm_mock,
+            patch.object(AmazonAPI, 'set_packing_information', autospec=True) as set_info_mock,
+            patch.object(AmazonAPI, 'generate_placement_options', autospec=True) as placement_mock,
+        ):
+            create_batch(83, 12, 6)
+            create_batch(1, 4, 2)
+        confirm_mock.assert_not_called()
+        set_info_mock.assert_not_called()
+        placement_mock.assert_not_called()
+
+        option.invalidate_recordset(['box_ids'])
+        boxes = option.box_ids
+        self.assertEqual(len(boxes), 84)
+        self.assertEqual(Picking.search_count([]), before_pickings)
+        self.assertEqual(Move.search_count([]), before_moves)
+        self.assertEqual(
+            sum(line.quantity for line in boxes.line_ids.filtered(lambda line: line.msku == 'SKU-A')),
+            1000,
+        )
+        self.assertEqual(len(boxes.filtered(lambda box: box.weight == 6 and box.line_ids.quantity == 12)), 83)
+        self.assertEqual(len(boxes.filtered(lambda box: box.weight == 2 and box.line_ids.quantity == 4)), 1)
+        self.assertEqual(len(set(boxes.mapped('amazon_box_id'))), 84)
+
+        payload = shipment._prepare_packing_information_payload()
+        grouping = payload['packageGroupings'][0]
+        self.assertEqual(grouping['packingGroupId'], PACKING_GROUP_1)
+        self.assertEqual(len(grouping['boxes']), 84)
+        payload_total = 0
+        standard_boxes = 0
+        partial_boxes = 0
+        for box in grouping['boxes']:
+            self.assertEqual(box['quantity'], 1)
+            self.assertEqual(box['dimensions'], {
+                'unitOfMeasurement': 'CM',
+                'length': 30.0,
+                'width': 20.0,
+                'height': 26.0,
+            })
+            self.assertEqual(box['weight']['unit'], 'KG')
+            self.assertEqual(len(box['items']), 1)
+            item = box['items'][0]
+            self.assertEqual(item['msku'], 'SKU-A')
+            payload_total += item['quantity']
+            if item['quantity'] == 12 and box['weight']['value'] == 6.0:
+                standard_boxes += 1
+            if item['quantity'] == 4 and box['weight']['value'] == 2.0:
+                partial_boxes += 1
+        self.assertEqual(payload_total, 1000)
+        self.assertEqual(standard_boxes, 83)
+        self.assertEqual(partial_boxes, 1)
+
+        with self.assertRaisesRegex(UserError, 'already exists'):
+            create_batch(83, 12, 6)
+        with self.assertRaisesRegex(UserError, 'exceed'):
+            create_batch(1, 1, 7)
+        with self.env.cr.savepoint(), self.assertRaises(ValidationError):
+            self.env['amazon.fba.bulk.box.wizard'].sudo().create({
+                'inbound_shipment_id': shipment.id,
+                'packing_option_id': option.id,
+                'packing_group_id': group.id,
+                'packing_group_item_id': group_item.id,
+                'box_count': 1,
+                'units_per_box': 1,
+                'length': 0,
+                'width': 20,
+                'height': 26,
+                'dimension_unit': 'CM',
+                'weight': 1,
+                'weight_unit': 'KG',
+            })
 
     def test_08_full_phase_does_not_change_stock(self):
         Picking = self.env['stock.picking'].sudo()

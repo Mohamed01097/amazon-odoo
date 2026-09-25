@@ -17,6 +17,22 @@ AMAZON_OWNER_SELECTION = [
 ]
 INBOUND_PLAN_ID_RE = re.compile(r'^[A-Za-z0-9-]{38}$')
 OPERATION_ID_RE = re.compile(r'^[A-Za-z0-9-]{36,38}$')
+WORKFLOW_STATE_RANK = {
+    'draft': 0,
+    'planning': 1,
+    'failed': 1,
+    'plan_created': 2,
+    'packing_generated': 3,
+    'packing_confirmed': 4,
+    'placement_generated': 5,
+    'placement_confirmed': 6,
+    'submitted': 7,
+    'shipped': 8,
+    'in_transit': 9,
+    'receiving': 10,
+    'closed': 11,
+    'cancelled': 99,
+}
 
 
 class AmazonInboundShipment(models.Model):
@@ -43,6 +59,13 @@ class AmazonInboundShipment(models.Model):
     create_operation_id = fields.Char(
         'Create Operation ID', index=True, copy=False,
         help="Amazon asynchronous operation identifier returned by createInboundPlan.",
+    )
+    create_operation_reported_id = fields.Char(
+        'Returned Create Operation ID', copy=False,
+        help=(
+            "Last operationId returned by getInboundOperationStatus. Kept for audit "
+            "when Amazon diagnostic metadata differs from the stored operation ID."
+        ),
     )
     create_operation_status = fields.Selection([
         ('pending', 'Pending'),
@@ -419,12 +442,17 @@ class AmazonInboundShipment(models.Model):
 
             validation_errors.extend(line_errors)
             if not line_errors:
-                items.append({
+                item = {
                     'msku': msku,
                     'quantity': quantity,
                     'prepOwner': line.prep_owner,
                     'labelOwner': line.label_owner,
-                })
+                }
+                if line.expiration_date:
+                    # Amazon Fulfillment Inbound v2024-03-20 ItemInput expects
+                    # physical SKU expiration in `expiration` as YYYY-MM-DD.
+                    item['expiration'] = fields.Date.to_string(line.expiration_date)
+                items.append(item)
 
         if validation_errors:
             raise UserError(_("Inbound plan item validation failed:\n%s", "\n".join(validation_errors)))
@@ -543,22 +571,288 @@ class AmazonInboundShipment(models.Model):
                 messages.append(message)
         return str(first.get('code') or '').strip() or False, '\n'.join(messages) or False
 
-    def _apply_create_operation_status(self, result, plan_result=None):
+    def _state_rank(self, state=False):
+        return WORKFLOW_STATE_RANK.get(state or self.state, -1)
+
+    def _monotonic_state(self, proposed_state):
+        self.ensure_one()
+        if self._state_rank(self.state) > self._state_rank(proposed_state):
+            return self.state
+        return proposed_state
+
+    def _create_plan_has_authoritatively_advanced(self):
+        self.ensure_one()
+        later_phase_started = any((
+            self.packing_generation_operation_id,
+            self.packing_generation_status,
+            self.packing_confirmation_operation_id,
+            self.packing_confirmation_status,
+            self.packing_information_operation_id,
+            self.packing_information_status,
+            self.placement_generation_operation_id,
+            self.placement_generation_status,
+            self.placement_confirmation_operation_id,
+            self.placement_confirmation_status,
+        ))
+        return (
+            bool(self.inbound_plan_id)
+            and bool(self.plan_created_at)
+            and (
+                self._state_rank(self.state) >= self._state_rank('plan_created')
+                or self.create_operation_status == 'success'
+                or later_phase_started
+            )
+        )
+
+    def _planned_expirations_by_msku(self):
+        self.ensure_one()
+        expirations = {}
+        for line in self.line_ids:
+            msku = (line.sku or '').strip()
+            if msku and line.expiration_date:
+                expirations.setdefault(msku, set()).add(fields.Date.to_string(line.expiration_date))
+        return expirations
+
+    def _inbound_plan_identity_verification(self, plan_result, plan_items):
+        """Verify a mismatched SUCCESS against read-only Amazon plan evidence.
+
+        Amazon's Fulfillment Inbound v2024-03-20 schema exposes plan metadata
+        through getInboundPlan and physical item inputs through
+        listInboundPlanItems. A mismatched operationId is never accepted from the
+        status payload alone; the stored inboundPlanId and item quantities must
+        independently match the local shipment.
+        """
+        self.ensure_one()
+        evidence = {
+            'verified': False,
+            'checks': [],
+            'expected': {},
+            'amazon': {},
+        }
+        failures = []
+
+        if not isinstance(plan_result, dict):
+            failures.append(_("Amazon returned an invalid inbound plan response."))
+            evidence['failures'] = [str(item) for item in failures]
+            return evidence
+        if not isinstance(plan_items, list):
+            failures.append(_("Amazon returned invalid inbound plan items."))
+            evidence['failures'] = [str(item) for item in failures]
+            return evidence
+
+        returned_plan_id = str(plan_result.get('inboundPlanId') or '').strip()
+        expected_plan_id = (self.inbound_plan_id or '').strip()
+        evidence['expected']['inboundPlanId'] = expected_plan_id
+        evidence['amazon']['inboundPlanId'] = returned_plan_id or False
+        if returned_plan_id != expected_plan_id:
+            failures.append(_(
+                "Amazon returned inboundPlanId %(returned)s while this shipment stores %(expected)s.",
+                returned=returned_plan_id or _("(missing)"),
+                expected=expected_plan_id,
+            ))
+        else:
+            evidence['checks'].append('inboundPlanId')
+
+        status = str(plan_result.get('status') or '').strip().upper()
+        evidence['amazon']['status'] = status or False
+        if status != 'ACTIVE':
+            failures.append(_(
+                "Amazon inbound plan %(plan)s is %(status)s, not ACTIVE.",
+                plan=expected_plan_id,
+                status=status or _("(missing)"),
+            ))
+        else:
+            evidence['checks'].append('status')
+
+        marketplace_id = (self.instance_id.marketplace_id or '').strip()
+        marketplace_ids = [
+            str(value or '').strip()
+            for value in (plan_result.get('marketplaceIds') or [])
+            if str(value or '').strip()
+        ]
+        evidence['expected']['marketplaceIds'] = [marketplace_id] if marketplace_id else []
+        evidence['amazon']['marketplaceIds'] = marketplace_ids
+        if marketplace_id and marketplace_id not in marketplace_ids:
+            failures.append(_(
+                "Amazon inbound plan marketplaceIds %(returned)s do not include the expected marketplace %(expected)s.",
+                returned=marketplace_ids,
+                expected=marketplace_id,
+            ))
+        elif marketplace_id:
+            evidence['checks'].append('marketplaceIds')
+
+        try:
+            expected_address = self._prepare_source_address()
+        except UserError:
+            expected_address = {}
+        returned_address = plan_result.get('sourceAddress') if isinstance(
+            plan_result.get('sourceAddress'), dict
+        ) else {}
+        address_keys = ('countryCode', 'postalCode')
+        address_expected = {
+            key: str(expected_address.get(key) or '').strip().upper()
+            for key in address_keys
+            if expected_address.get(key)
+        }
+        address_returned = {
+            key: str(returned_address.get(key) or '').strip().upper()
+            for key in address_keys
+            if returned_address.get(key)
+        }
+        evidence['expected']['sourceAddress'] = address_expected
+        evidence['amazon']['sourceAddress'] = address_returned
+        for key, expected in address_expected.items():
+            returned = address_returned.get(key)
+            if returned and returned != expected:
+                failures.append(_(
+                    "Amazon inbound plan sourceAddress %(key)s is %(returned)s; expected %(expected)s.",
+                    key=key,
+                    returned=returned,
+                    expected=expected,
+                ))
+        if address_expected:
+            evidence['checks'].append('sourceAddress')
+
+        expected_quantities = self._planned_msku_quantities()
+        returned_quantities = {}
+        returned_expirations = {}
+        returned_label_owners = {}
+        item_count = 0
+        for item in plan_items:
+            if not isinstance(item, dict):
+                failures.append(_("Amazon returned an invalid item in listInboundPlanItems."))
+                continue
+            item_count += 1
+            msku = str(item.get('msku') or '').strip()
+            quantity = item.get('quantity')
+            if not msku:
+                failures.append(_("Amazon returned an inbound plan item without an MSKU."))
+                continue
+            if isinstance(quantity, bool) or not isinstance(quantity, int):
+                failures.append(_("Amazon returned an invalid quantity for MSKU %s.", msku))
+                continue
+            returned_quantities[msku] = returned_quantities.get(msku, 0) + quantity
+            expiration = str(item.get('expiration') or '').strip()
+            if expiration:
+                returned_expirations.setdefault(msku, set()).add(expiration)
+            label_owner = str(item.get('labelOwner') or '').strip()
+            if label_owner:
+                returned_label_owners.setdefault(msku, set()).add(label_owner)
+
+        evidence['expected']['itemQuantities'] = expected_quantities
+        evidence['amazon']['itemQuantities'] = returned_quantities
+        evidence['amazon']['itemCount'] = item_count
+        if returned_quantities != expected_quantities:
+            failures.append(_(
+                "Amazon inbound plan item quantities do not match this shipment. Expected: %(expected)s; Amazon: %(returned)s.",
+                expected=expected_quantities,
+                returned=returned_quantities,
+            ))
+        else:
+            evidence['checks'].append('itemQuantities')
+
+        expected_expirations = self._planned_expirations_by_msku()
+        evidence['expected']['expirations'] = {
+            msku: sorted(values) for msku, values in expected_expirations.items()
+        }
+        evidence['amazon']['expirations'] = {
+            msku: sorted(values) for msku, values in returned_expirations.items()
+        }
+        for msku, values in returned_expirations.items():
+            expected_values = expected_expirations.get(msku)
+            if expected_values and not values.issubset(expected_values):
+                failures.append(_(
+                    "Amazon returned expiration %(returned)s for MSKU %(msku)s; expected %(expected)s.",
+                    returned=sorted(values),
+                    msku=msku,
+                    expected=sorted(expected_values),
+                ))
+        if expected_expirations or returned_expirations:
+            evidence['checks'].append('expiration')
+
+        expected_label_owners = {}
+        for line in self.line_ids:
+            msku = (line.sku or '').strip()
+            if msku and line.label_owner:
+                expected_label_owners.setdefault(msku, set()).add(line.label_owner)
+        evidence['expected']['labelOwners'] = {
+            msku: sorted(values) for msku, values in expected_label_owners.items()
+        }
+        evidence['amazon']['labelOwners'] = {
+            msku: sorted(values) for msku, values in returned_label_owners.items()
+        }
+        for msku, values in returned_label_owners.items():
+            expected_values = expected_label_owners.get(msku)
+            if expected_values and values != expected_values:
+                failures.append(_(
+                    "Amazon returned labelOwner %(returned)s for MSKU %(msku)s; expected %(expected)s.",
+                    returned=sorted(values),
+                    msku=msku,
+                    expected=sorted(expected_values),
+                ))
+        if returned_label_owners:
+            evidence['checks'].append('labelOwner')
+
+        evidence['verified'] = not failures
+        evidence['failures'] = [str(item) for item in failures]
+        return evidence
+
+    def _apply_create_operation_status(self, result, plan_result=None, plan_verification=None):
         self.ensure_one()
         if not isinstance(result, dict):
             result = {'unexpectedResponse': result}
         raw_status = str(result.get('operationStatus') or '').strip()
         normalized = raw_status.upper().replace('-', '_').replace(' ', '_')
+        response_operation_id = str(result.get('operationId') or '').strip()
+        operation_id_mismatch = bool(
+            self.create_operation_id and response_operation_id != self.create_operation_id
+        )
+        create_plan_already_advanced = self._create_plan_has_authoritatively_advanced()
+        previous_reported_id = str(self.create_operation_reported_id or '').strip()
+        reported_id_to_store = response_operation_id or False
+        reported_ids = []
+        for operation_id in (previous_reported_id, response_operation_id):
+            if operation_id and operation_id not in reported_ids:
+                reported_ids.append(operation_id)
+        if operation_id_mismatch and previous_reported_id and previous_reported_id != response_operation_id:
+            reported_id_to_store = previous_reported_id
         request_id = str(result.get('_amazon_request_id') or '').strip()
         error_code, error_message = self._operation_problem_values(result.get('operationProblems'))
         response_value = result if plan_result is None else {
             'operation': result,
             'inboundPlan': plan_result,
         }
+        if plan_verification is not None:
+            if not isinstance(response_value, dict) or 'operation' not in response_value:
+                response_value = {'operation': response_value}
+            response_value['planVerification'] = plan_verification
+        if operation_id_mismatch:
+            response_value = {
+                'operation': response_value,
+                'operationIdAudit': {
+                    'storedOperationId': self.create_operation_id,
+                    'returnedOperationId': response_operation_id or False,
+                    'preservedReportedOperationId': reported_id_to_store or False,
+                    'allReturnedOperationIds': reported_ids,
+                    'mismatch': True,
+                    'reconciledByGetInboundPlan': bool(
+                        plan_verification and plan_verification.get('verified')
+                    ),
+                },
+            }
+        if create_plan_already_advanced:
+            if not isinstance(response_value, dict):
+                response_value = {'operation': response_value}
+            response_value['staleCreateOperationGuard'] = {
+                'currentState': self.state,
+                'createOperationStatus': self.create_operation_status,
+                'preserveAdvancedWorkflowState': True,
+            }
         vals = {
             'last_operation_check_at': fields.Datetime.now(),
             'last_operation_request_id': request_id or False,
             'raw_create_operation_status': raw_status or False,
+            'create_operation_reported_id': reported_id_to_store,
             'create_operation_response': self._merge_operation_response(
                 'getInboundOperationStatus', response_value,
             ),
@@ -571,28 +865,85 @@ class AmazonInboundShipment(models.Model):
         pending_values = {'PENDING', 'QUEUED', 'NOT_STARTED'}
         in_progress_values = {'IN_PROGRESS', 'PROCESSING', 'RUNNING'}
         if normalized in success_values:
-            vals.update(
-                create_operation_status='success',
-                create_operation_error_code=error_code,
-                create_operation_error_message=error_message,
-                plan_created_at=self.plan_created_at or fields.Datetime.now(),
-                state='plan_created',
-            )
+            if operation_id_mismatch and not (
+                plan_verification and plan_verification.get('verified')
+            ):
+                if create_plan_already_advanced:
+                    vals.update(
+                        create_operation_status=self.create_operation_status or 'success',
+                        create_operation_error_code=False,
+                        create_operation_error_message=False,
+                    )
+                else:
+                    verification_failures = []
+                    if isinstance(plan_verification, dict):
+                        verification_failures = plan_verification.get('failures') or []
+                        if plan_verification.get('error'):
+                            verification_failures.append(plan_verification.get('error'))
+                    verification_text = "\n".join(str(item) for item in verification_failures if item)
+                    vals.update(
+                        create_operation_status='failed',
+                        create_operation_error_code='OPERATION_ID_MISMATCH_UNVERIFIED',
+                        create_operation_error_message=_(
+                            "Amazon returned SUCCESS for operationId %(returned)s while the stored "
+                            "createInboundPlan operationId is %(stored)s. The success was not accepted "
+                            "because the stored inbound plan could not be independently verified.%(details)s",
+                            returned=response_operation_id or _("(missing)"),
+                            stored=self.create_operation_id,
+                            details=("\n" + verification_text) if verification_text else "",
+                        ),
+                        state='failed',
+                    )
+            else:
+                vals.update(
+                    create_operation_status='success',
+                    create_operation_error_code=error_code,
+                    create_operation_error_message=error_message,
+                    plan_created_at=self.plan_created_at or fields.Datetime.now(),
+                    state=self._monotonic_state('plan_created'),
+                )
         elif normalized in failed_values:
-            vals.update(
-                create_operation_status='failed',
-                create_operation_error_code=error_code or 'AMAZON_OPERATION_FAILED',
-                create_operation_error_message=error_message or _("Amazon reported that inbound plan creation failed."),
-                state='failed',
-            )
+            if create_plan_already_advanced:
+                vals.update(
+                    create_operation_status='success',
+                    create_operation_error_code=False,
+                    create_operation_error_message=False,
+                )
+            else:
+                vals.update(
+                    create_operation_status='failed',
+                    create_operation_error_code=error_code or 'AMAZON_OPERATION_FAILED',
+                    create_operation_error_message=error_message or _("Amazon reported that inbound plan creation failed."),
+                    state='failed',
+                )
         elif normalized in pending_values:
-            vals.update(create_operation_status='pending', state='planning')
+            if create_plan_already_advanced:
+                vals.update(
+                    create_operation_status=self.create_operation_status or 'success',
+                    create_operation_error_code=False,
+                    create_operation_error_message=False,
+                )
+            else:
+                vals.update(create_operation_status='pending', state='planning')
         elif normalized in in_progress_values:
-            vals.update(create_operation_status='in_progress', state='planning')
+            if create_plan_already_advanced:
+                vals.update(
+                    create_operation_status=self.create_operation_status or 'success',
+                    create_operation_error_code=False,
+                    create_operation_error_message=False,
+                )
+            else:
+                vals.update(create_operation_status='in_progress', state='planning')
         else:
-            if self.create_operation_status not in ('pending', 'in_progress'):
+            if create_plan_already_advanced:
+                vals.update(
+                    create_operation_status=self.create_operation_status or 'success',
+                    create_operation_error_code=False,
+                    create_operation_error_message=False,
+                )
+            elif self.create_operation_status not in ('pending', 'in_progress'):
                 vals['create_operation_status'] = 'in_progress'
-            if self.state not in ('planning',):
+            if not create_plan_already_advanced and self.state not in ('planning',):
                 vals['state'] = 'planning'
             _logger.warning(
                 "Unknown Amazon inbound operation status %r for shipment %s; keeping it non-final.",
@@ -615,15 +966,11 @@ class AmazonInboundShipment(models.Model):
             error_msg=_("Failed to check inbound plan creation operation"),
         )
         response_operation_id = str((result or {}).get('operationId') or '').strip()
-        if response_operation_id != self.create_operation_id:
-            raise UserError(_(
-                "Amazon returned operationId %(returned)s while polling stored operationId %(stored)s.",
-                returned=response_operation_id or _("(missing)"),
-                stored=self.create_operation_id,
-            ))
+        operation_id_matches = response_operation_id == self.create_operation_id
         plan_result = None
+        plan_verification = None
         raw_status = str((result or {}).get('operationStatus') or '').strip().upper()
-        if raw_status == 'SUCCESS' and self.inbound_plan_id:
+        if raw_status == 'SUCCESS' and self.inbound_plan_id and operation_id_matches:
             try:
                 plan_result = self.instance_id._api_call_safe(
                     api.get_inbound_plan,
@@ -637,7 +984,44 @@ class AmazonInboundShipment(models.Model):
                     "Inbound plan %s was created but its raw plan status could not be refreshed: %s",
                     self.inbound_plan_id, exc,
                 )
-        return self._apply_create_operation_status(result, plan_result=plan_result)
+        elif raw_status == 'SUCCESS' and self.inbound_plan_id and not operation_id_matches:
+            try:
+                plan_result = self.instance_id._api_call_safe(
+                    api.get_inbound_plan,
+                    self.instance_id,
+                    access_token,
+                    self.inbound_plan_id,
+                    error_msg=_("Failed to verify the created inbound plan"),
+                )
+                plan_items, item_pages = self._fetch_all_option_pages(
+                    'list_inbound_plan_items', 'items',
+                )
+                plan_verification = self._inbound_plan_identity_verification(
+                    plan_result, plan_items,
+                )
+                plan_verification['itemPages'] = len(item_pages)
+                plan_verification['method'] = 'getInboundPlan+listInboundPlanItems'
+            except UserError as exc:
+                plan_verification = {
+                    'verified': False,
+                    'method': 'getInboundPlan+listInboundPlanItems',
+                    'error': str(exc),
+                    'failures': [str(exc)],
+                }
+                _logger.warning(
+                    "Could not verify mismatched Amazon createInboundPlan SUCCESS for shipment %s: %s",
+                    self.id, exc,
+                )
+        elif raw_status == 'SUCCESS' and not self.inbound_plan_id and not operation_id_matches:
+            plan_verification = {
+                'verified': False,
+                'method': 'getInboundPlan+listInboundPlanItems',
+                'error': _("No inboundPlanId is stored for independent verification."),
+                'failures': [str(_("No inboundPlanId is stored for independent verification."))],
+            }
+        return self._apply_create_operation_status(
+            result, plan_result=plan_result, plan_verification=plan_verification,
+        )
 
     def action_create_shipment_plan(self):
         """Start createInboundPlan and enqueue polling without waiting in the browser."""
@@ -1373,23 +1757,23 @@ class AmazonInboundShipment(models.Model):
         if operation_type == 'generate_packing_options':
             if not self._refresh_packing_options():
                 raise UserError(_("Amazon completed packing generation but no packing options are available yet."))
-            state = 'packing_generated' if self.state == 'plan_created' else self.state
+            state = self._monotonic_state('packing_generated') if self.state == 'plan_created' else self.state
         elif operation_type == 'confirm_packing_option':
             self._refresh_packing_options()
-            state = 'packing_confirmed'
+            state = self._monotonic_state('packing_confirmed')
         elif operation_type == 'set_packing_information':
             state = self.state
         elif operation_type == 'generate_placement_options':
             if not self._refresh_placement_options():
                 raise UserError(_("Amazon completed placement generation but no placement options are available yet."))
-            state = 'placement_generated' if self.state == 'packing_confirmed' else self.state
+            state = self._monotonic_state('placement_generated') if self.state == 'packing_confirmed' else self.state
         elif operation_type == 'confirm_placement_option':
             self._refresh_placement_options()
             selected = self.placement_option_ids.filtered('selected')
             if len(selected) != 1 or selected.status != 'ACCEPTED':
                 raise UserError(_("Amazon did not return exactly one accepted placement option."))
             self._sync_confirmed_physical_shipments(selected)
-            state = 'placement_confirmed'
+            state = self._monotonic_state('placement_confirmed')
         else:
             raise UserError(_("Unsupported inbound operation type: %s", operation_type))
         self.sudo().write({
@@ -1404,6 +1788,8 @@ class AmazonInboundShipment(models.Model):
         config = self._phase3_operation_config(job.operation_type)
         if not config or not job.operation_id:
             raise UserError(_("The inbound operation job has no pollable Amazon operation ID."))
+        if self[config['status_field']] == 'success':
+            return 'success'
         access_token = self.instance_id._get_access_token_or_raise()
         result = self.instance_id._api_call_safe(
             AmazonAPI().get_inbound_operation_status,
@@ -1458,6 +1844,8 @@ class AmazonInboundShipment(models.Model):
     def _record_phase3_job_error(self, job, message):
         self.ensure_one()
         config = self._phase3_operation_config(job.operation_type)
+        if config and self[config['status_field']] == 'success':
+            return
         if job.operation_type in ('refresh_packing_options',) or (
             config and config['response_field'] == 'packing_response'
         ):
@@ -1540,12 +1928,18 @@ class AmazonInboundShipment(models.Model):
                     if not inbound_line:
                         raise UserError(_("Box MSKU %s is not present on the inbound plan.", msku))
                     actual[msku] = actual.get(msku, 0) + box_line.quantity
-                    item_values.append({
+                    item_value = {
                         'msku': msku,
                         'quantity': box_line.quantity,
                         'prepOwner': inbound_line.prep_owner,
                         'labelOwner': inbound_line.label_owner,
-                    })
+                    }
+                    if inbound_line.expiration_date:
+                        # Amazon Fulfillment Inbound v2024-03-20 ItemInput
+                        # uses the same physical expiration field in both
+                        # createInboundPlan and setPackingInformation.
+                        item_value['expiration'] = fields.Date.to_string(inbound_line.expiration_date)
+                    item_values.append(item_value)
                 box_values.append({
                     'contentInformationSource': 'BOX_CONTENT_PROVIDED',
                     'dimensions': {
@@ -1653,6 +2047,38 @@ class AmazonInboundShipment(models.Model):
         return self._start_phase3_operation(
             'set_packing_information', 'set_packing_information', api_args=(body,),
         )
+
+    def action_open_bulk_box_wizard(self):
+        self.ensure_one()
+        self._check_inbound_manager_access()
+        selected = self.packing_option_ids.filtered('selected')
+        if (
+            self.state != 'packing_confirmed'
+            or self.packing_confirmation_status != 'success'
+            or len(selected) != 1
+            or selected.status != 'ACCEPTED'
+        ):
+            raise UserError(_("Confirm exactly one Amazon packing option before creating boxes."))
+        groups = selected.packing_group_ids
+        default_group = groups if len(groups) == 1 else self.env['amazon.fba.packing.group']
+        default_item = (
+            default_group.item_ids
+            if default_group and len(default_group.item_ids) == 1
+            else self.env['amazon.fba.packing.group.item']
+        )
+        return {
+            'type': 'ir.actions.act_window',
+            'name': _("Bulk Create Boxes"),
+            'res_model': 'amazon.fba.bulk.box.wizard',
+            'view_mode': 'form',
+            'target': 'new',
+            'context': {
+                'default_inbound_shipment_id': self.id,
+                'default_packing_option_id': selected.id,
+                'default_packing_group_id': default_group.id if default_group else False,
+                'default_packing_group_item_id': default_item.id if default_item else False,
+            },
+        }
 
     def action_generate_placement_options(self):
         self.ensure_one()
@@ -1778,6 +2204,15 @@ class AmazonInboundShipmentLine(models.Model):
     )
     prep_owner = fields.Selection(AMAZON_OWNER_SELECTION, string='Prep Owner')
     label_owner = fields.Selection(AMAZON_OWNER_SELECTION, string='Label Owner')
+    expiration_date = fields.Date(
+        'Expiration Date',
+        help=(
+            "Physical inventory expiration date for this planned inbound item. Enter it when "
+            "Amazon requires an expiration date for the MSKU; it is sent to Amazon as the "
+            "createInboundPlan item expiration date and is different from packing or placement "
+            "option expiration times."
+        ),
+    )
     quantity_shipped = fields.Float('Qty Shipped')
     quantity_received = fields.Float('Qty Received')
     quantity_in_case = fields.Float('Qty Per Case')

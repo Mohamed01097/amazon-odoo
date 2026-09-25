@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import requests
 
-from odoo import Command, api
+from odoo import Command, api, fields
 from odoo.exceptions import UserError, ValidationError
 from odoo.tests import TransactionCase, tagged
 
@@ -72,6 +72,38 @@ class TestFbaInboundPlanPhase2(TransactionCase):
             '_amazon_request_id': 'phase2-create-request-id',
         }
 
+    def _matching_plan_response(self, plan_id=PLAN_ID):
+        return {
+            'inboundPlanId': plan_id,
+            'name': 'Phase 2 Plan',
+            'status': 'ACTIVE',
+            'marketplaceIds': ['ARBP9OOSHTCHU'],
+            'sourceAddress': {
+                'addressLine1': '10 Test Street',
+                'addressLine2': 'Unit 4',
+                'city': 'Cairo',
+                'postalCode': '11511',
+                'countryCode': 'EG',
+                'phoneNumber': '+20 100 000 0000',
+            },
+            '_amazon_request_id': 'phase2-get-plan-id',
+        }
+
+    def _matching_plan_items_response(self, items=None):
+        return {
+            'items': items if items is not None else [{
+                'msku': 'P2-MSKU-001',
+                'quantity': 12,
+                'expiration': '2031-06-30',
+                'labelOwner': 'SELLER',
+                'asin': 'TESTASIN',
+                'fnsku': 'TESTFNSKU',
+                'prepInstructions': [],
+            }],
+            'pagination': {},
+            '_amazon_request_id': 'phase2-list-plan-items-id',
+        }
+
     def _create_mapped_product(self, amazon_sku, default_code):
         odoo_product = self.env['product.product'].sudo().with_company(self.company).create({
             'name': amazon_sku,
@@ -107,6 +139,48 @@ class TestFbaInboundPlanPhase2(TransactionCase):
             'quantity': 12,
             'prepOwner': 'SELLER',
             'labelOwner': 'SELLER',
+        }])
+
+    def test_01b_expiration_date_is_optional_and_uses_amazon_item_field(self):
+        self.assertIn('expiration_date', self.line._fields)
+        self.assertEqual(
+            list(name for name in self.line._fields if name == 'expiration_date'),
+            ['expiration_date'],
+        )
+
+        payload_without_expiration = self.shipment._prepare_create_inbound_plan_payload()
+        self.assertNotIn('expiration', payload_without_expiration['items'][0])
+
+        self.line.expiration_date = '2031-06-30'
+        payload_with_expiration = self.shipment._prepare_create_inbound_plan_payload()
+        self.assertEqual(payload_with_expiration['items'][0]['expiration'], '2031-06-30')
+        self.assertNotIn('expirationDate', payload_with_expiration['items'][0])
+
+    def test_01c_reported_sku_expiration_payload(self):
+        amazon_product, _odoo_product = self._create_mapped_product(
+            '6224003090026', '6224003090026',
+        )
+        shipment = self.env['amazon.inbound.shipment'].sudo().create({
+            'name': 'P2-EXPIRATION-SKU',
+            'shipment_name': 'Phase 2 Expiration SKU',
+            'instance_id': self.instance.id,
+            'line_ids': [Command.create({
+                'amazon_product_id': amazon_product.id,
+                'planned_quantity': 100,
+                'prep_owner': 'NONE',
+                'label_owner': 'SELLER',
+                'expiration_date': '2031-06-30',
+            })],
+        })
+
+        payload = shipment._prepare_create_inbound_plan_payload()
+
+        self.assertEqual(payload['items'], [{
+            'msku': '6224003090026',
+            'quantity': 100,
+            'prepOwner': 'NONE',
+            'labelOwner': 'SELLER',
+            'expiration': '2031-06-30',
         }])
 
     def test_02_missing_address_lists_fields(self):
@@ -315,6 +389,27 @@ class TestFbaInboundPlanPhase2(TransactionCase):
         self.assertTrue(args[3].endswith('/inbound/fba/2024-03-20/operations/%s' % OPERATION_ID))
         self.assertEqual(result['_amazon_request_id'], 'phase2-wrapper-request-id')
 
+    def test_api_list_inbound_plan_items_uses_existing_http_client(self):
+        class Response:
+            headers = {'x-amzn-RequestId': 'phase2-list-items-request-id'}
+
+            @staticmethod
+            def json():
+                return {'items': []}
+
+        api_client = AmazonAPI()
+        with patch.object(api_client, '_amazon_request', return_value=Response()) as request_mock:
+            result = api_client.list_inbound_plan_items(
+                self.instance, 'test-token', PLAN_ID, page_size=50, pagination_token='token-2',
+            )
+
+        args = request_mock.call_args.args
+        kwargs = request_mock.call_args.kwargs
+        self.assertEqual(args[2], 'GET')
+        self.assertTrue(args[3].endswith('/inbound/fba/2024-03-20/inboundPlans/%s/items' % PLAN_ID))
+        self.assertEqual(kwargs['params'], {'pageSize': 50, 'paginationToken': 'token-2'})
+        self.assertEqual(result['_amazon_request_id'], 'phase2-list-items-request-id')
+
     def test_13_multiple_products_are_preserved_in_payload(self):
         second_product = self.env['product.product'].sudo().with_company(self.company).create({
             'name': 'Phase 2 Product B',
@@ -336,6 +431,7 @@ class TestFbaInboundPlanPhase2(TransactionCase):
             'prep_owner': 'SELLER',
             'label_owner': 'SELLER',
         })
+        self.line.expiration_date = '2031-06-30'
 
         payload = self.shipment._prepare_create_inbound_plan_payload()
 
@@ -343,6 +439,7 @@ class TestFbaInboundPlanPhase2(TransactionCase):
             {
                 'msku': 'P2-MSKU-001', 'quantity': 12,
                 'prepOwner': 'SELLER', 'labelOwner': 'SELLER',
+                'expiration': '2031-06-30',
             },
             {
                 'msku': 'P2-MSKU-002', 'quantity': 5,
@@ -593,7 +690,43 @@ class TestFbaInboundPlanPhase2(TransactionCase):
         sleep_mock.assert_not_called()
         self.assertEqual(self.shipment.create_operation_request_id, 'phase2-throttle-request-id')
 
-    def test_23_poll_response_operation_id_must_match(self):
+    def test_23_mismatched_failed_operation_preserves_amazon_business_error(self):
+        self._start_plan()
+        mismatched = {
+            'operation': 'createInboundPlan',
+            'operationId': 'f8e9b032-fa6c-4737-9428-4d937ed0675c',
+            'operationStatus': 'FAILED',
+            'operationProblems': [{
+                'severity': 'ERROR',
+                'code': 'FBA_INB_0180',
+                'details': "There's an input error with the resource '6224003090026'.",
+                'message': 'ERROR: Expiration date required',
+            }],
+            '_amazon_request_id': 'phase2-mismatch-failed-request-id',
+        }
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=mismatched),
+            patch.object(AmazonAPI, 'get_inbound_plan', autospec=True) as get_plan_mock,
+        ):
+            action = self.shipment.action_check_create_operation_status()
+
+        self.assertEqual(action['params']['type'], 'danger')
+        self.assertEqual(self.shipment.create_operation_status, 'failed')
+        self.assertEqual(self.shipment.state, 'failed')
+        self.assertEqual(self.shipment.create_operation_id, OPERATION_ID)
+        self.assertEqual(self.shipment.create_operation_reported_id, 'f8e9b032-fa6c-4737-9428-4d937ed0675c')
+        self.assertEqual(self.shipment.raw_create_operation_status, 'FAILED')
+        self.assertEqual(self.shipment.last_operation_request_id, 'phase2-mismatch-failed-request-id')
+        self.assertEqual(self.shipment.create_operation_error_code, 'FBA_INB_0180')
+        self.assertIn('Expiration date required', self.shipment.create_operation_error_message)
+        self.assertIn('operationProblems', self.shipment.create_operation_response)
+        self.assertIn('operationIdAudit', self.shipment.create_operation_response)
+        self.assertIn(OPERATION_ID, self.shipment.create_operation_response)
+        self.assertIn('f8e9b032-fa6c-4737-9428-4d937ed0675c', self.shipment.create_operation_response)
+        get_plan_mock.assert_not_called()
+
+    def test_23b_mismatched_success_without_verified_plan_is_not_accepted(self):
         self._start_plan()
         mismatched = {
             'operation': 'createInboundPlan',
@@ -604,16 +737,270 @@ class TestFbaInboundPlanPhase2(TransactionCase):
         with (
             patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
             patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=mismatched),
-            patch.object(AmazonAPI, 'get_inbound_plan', autospec=True) as get_plan_mock,
+            patch.object(AmazonAPI, 'get_inbound_plan', autospec=True, side_effect=UserError('404 not found')) as get_plan_mock,
+            patch.object(AmazonAPI, 'list_inbound_plan_items', autospec=True) as list_items_mock,
         ):
             action = self.shipment.action_check_create_operation_status()
 
         self.assertEqual(action['params']['type'], 'danger')
-        self.assertEqual(self.shipment.create_operation_status, 'pending')
-        self.assertEqual(self.shipment.state, 'planning')
+        self.assertEqual(self.shipment.create_operation_status, 'failed')
+        self.assertEqual(self.shipment.state, 'failed')
         self.assertEqual(self.shipment.create_operation_id, OPERATION_ID)
-        self.assertEqual(self.shipment.create_operation_error_code, 'POLL_REQUEST_FAILED')
-        get_plan_mock.assert_not_called()
+        self.assertEqual(self.shipment.create_operation_reported_id, '9999abcd-1234-abcd-5678-1234abcd5678')
+        self.assertEqual(self.shipment.create_operation_error_code, 'OPERATION_ID_MISMATCH_UNVERIFIED')
+        self.assertIn('could not be independently verified', self.shipment.create_operation_error_message)
+        self.assertFalse(self.shipment.plan_created_at)
+        get_plan_mock.assert_called_once()
+        list_items_mock.assert_not_called()
+
+    def test_23c_mismatched_success_is_reconciled_when_plan_identity_matches(self):
+        self.line.expiration_date = '2031-06-30'
+        real_stored_id = '64f4c494-ba38-472c-a795-1d8713e7cfc3'
+        first_returned_id = '1b75e1e7-261c-4544-a03c-27c2ef21273a'
+        latest_returned_id = 'ea256204-7cdf-4310-9c39-aa42618d99b6'
+        real_plan_id = 'wfca96c672-bf73-4709-b926-640cc2807653'
+        self._start_plan()
+        self.shipment.write({
+            'inbound_plan_id': real_plan_id,
+            'create_operation_id': real_stored_id,
+            'create_operation_reported_id': first_returned_id,
+        })
+        mismatched = {
+            'operation': 'createInboundPlan',
+            'operationId': latest_returned_id,
+            'operationStatus': 'SUCCESS',
+            'operationProblems': [],
+            '_amazon_request_id': 'phase2-real-mismatch-success-request-id',
+        }
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=mismatched),
+            patch.object(AmazonAPI, 'get_inbound_plan', autospec=True,
+                         return_value=self._matching_plan_response(real_plan_id)),
+            patch.object(AmazonAPI, 'list_inbound_plan_items', autospec=True,
+                         return_value=self._matching_plan_items_response()),
+        ):
+            action = self.shipment.action_check_create_operation_status()
+
+        self.assertEqual(action['params']['type'], 'success')
+        self.assertEqual(self.shipment.create_operation_status, 'success')
+        self.assertEqual(self.shipment.state, 'plan_created')
+        self.assertEqual(self.shipment.create_operation_id, real_stored_id)
+        self.assertEqual(self.shipment.create_operation_reported_id, first_returned_id)
+        self.assertEqual(self.shipment.raw_create_operation_status, 'SUCCESS')
+        self.assertEqual(self.shipment.raw_plan_status, 'ACTIVE')
+        self.assertTrue(self.shipment.plan_created_at)
+        self.assertFalse(self.shipment.create_operation_error_code)
+        response = json.loads(self.shipment.create_operation_response)
+        audit = response['getInboundOperationStatus']['operationIdAudit']
+        self.assertTrue(audit['reconciledByGetInboundPlan'])
+        self.assertEqual(audit['preservedReportedOperationId'], first_returned_id)
+        self.assertEqual(audit['allReturnedOperationIds'], [first_returned_id, latest_returned_id])
+        self.assertTrue(
+            response['getInboundOperationStatus']['operation']['planVerification']['verified']
+        )
+
+    def test_23d_mismatched_success_wrong_msku_is_not_reconciled(self):
+        self._start_plan()
+        mismatched = {
+            'operation': 'createInboundPlan',
+            'operationId': '9999abcd-1234-abcd-5678-1234abcd5678',
+            'operationStatus': 'SUCCESS',
+            'operationProblems': [],
+        }
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=mismatched),
+            patch.object(AmazonAPI, 'get_inbound_plan', autospec=True,
+                         return_value=self._matching_plan_response()),
+            patch.object(AmazonAPI, 'list_inbound_plan_items', autospec=True,
+                         return_value=self._matching_plan_items_response([{
+                             'msku': 'WRONG-MSKU',
+                             'quantity': 12,
+                             'labelOwner': 'SELLER',
+                         }])),
+        ):
+            self.shipment.action_check_create_operation_status()
+
+        self.assertEqual(self.shipment.create_operation_status, 'failed')
+        self.assertEqual(self.shipment.state, 'failed')
+        self.assertEqual(self.shipment.create_operation_error_code, 'OPERATION_ID_MISMATCH_UNVERIFIED')
+        self.assertIn('item quantities do not match', self.shipment.create_operation_error_message)
+
+    def test_23e_mismatched_success_wrong_quantity_is_not_reconciled(self):
+        self._start_plan()
+        mismatched = {
+            'operation': 'createInboundPlan',
+            'operationId': '9999abcd-1234-abcd-5678-1234abcd5678',
+            'operationStatus': 'SUCCESS',
+            'operationProblems': [],
+        }
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=mismatched),
+            patch.object(AmazonAPI, 'get_inbound_plan', autospec=True,
+                         return_value=self._matching_plan_response()),
+            patch.object(AmazonAPI, 'list_inbound_plan_items', autospec=True,
+                         return_value=self._matching_plan_items_response([{
+                             'msku': 'P2-MSKU-001',
+                             'quantity': 11,
+                             'labelOwner': 'SELLER',
+                         }])),
+        ):
+            self.shipment.action_check_create_operation_status()
+
+        self.assertEqual(self.shipment.create_operation_status, 'failed')
+        self.assertEqual(self.shipment.state, 'failed')
+        self.assertEqual(self.shipment.create_operation_error_code, 'OPERATION_ID_MISMATCH_UNVERIFIED')
+        self.assertIn('item quantities do not match', self.shipment.create_operation_error_message)
+
+    def test_23f_mismatched_success_multi_item_different_order_is_reconciled(self):
+        second_amazon_product, second_odoo_product = self._create_mapped_product(
+            'P2-MSKU-002', 'P2-MSKU-002',
+        )
+        self.env['amazon.inbound.shipment.line'].sudo().create({
+            'shipment_id': self.shipment.id,
+            'amazon_product_id': second_amazon_product.id,
+            'odoo_product_id': second_odoo_product.id,
+            'sku': second_amazon_product.sku,
+            'planned_quantity': 5,
+            'prep_owner': 'SELLER',
+            'label_owner': 'SELLER',
+        })
+        self._start_plan()
+        mismatched = {
+            'operation': 'createInboundPlan',
+            'operationId': '9999abcd-1234-abcd-5678-1234abcd5678',
+            'operationStatus': 'SUCCESS',
+            'operationProblems': [],
+        }
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=mismatched),
+            patch.object(AmazonAPI, 'get_inbound_plan', autospec=True,
+                         return_value=self._matching_plan_response()),
+            patch.object(AmazonAPI, 'list_inbound_plan_items', autospec=True,
+                         return_value=self._matching_plan_items_response([
+                             {'msku': 'P2-MSKU-002', 'quantity': 5, 'labelOwner': 'SELLER'},
+                             {'msku': 'P2-MSKU-001', 'quantity': 12, 'labelOwner': 'SELLER'},
+                         ])),
+        ):
+            self.shipment.action_check_create_operation_status()
+
+        self.assertEqual(self.shipment.create_operation_status, 'success')
+        self.assertEqual(self.shipment.state, 'plan_created')
+
+    def test_23g_stale_create_failure_cannot_regress_plan_created(self):
+        self._start_plan()
+        self.shipment.write({
+            'create_operation_status': 'success',
+            'state': 'plan_created',
+            'plan_created_at': fields.Datetime.now(),
+        })
+        stale_failure = {
+            'operation': 'createInboundPlan',
+            'operationId': 'f8e9b032-fa6c-4737-9428-4d937ed0675c',
+            'operationStatus': 'FAILED',
+            'operationProblems': [{
+                'severity': 'ERROR',
+                'code': 'STALE_FAILURE',
+                'message': 'This stale result must not regress the shipment.',
+            }],
+            '_amazon_request_id': 'phase2-stale-create-failed-request-id',
+        }
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=stale_failure),
+        ):
+            self.shipment.action_check_create_operation_status()
+
+        self.assertEqual(self.shipment.state, 'plan_created')
+        self.assertEqual(self.shipment.create_operation_status, 'success')
+        self.assertFalse(self.shipment.create_operation_error_code)
+        self.assertIn('staleCreateOperationGuard', self.shipment.create_operation_response)
+        self.assertIn('STALE_FAILURE', self.shipment.create_operation_response)
+
+    def test_23h_stale_create_failure_cannot_regress_active_packing_generation(self):
+        self._start_plan()
+        self.shipment.write({
+            'create_operation_status': 'success',
+            'state': 'plan_created',
+            'plan_created_at': fields.Datetime.now(),
+            'packing_generation_operation_id': '11111111-1111-1111-1111-111111111111',
+            'packing_generation_status': 'pending',
+        })
+        stale_failure = {
+            'operation': 'createInboundPlan',
+            'operationId': 'f8e9b032-fa6c-4737-9428-4d937ed0675c',
+            'operationStatus': 'FAILED',
+            'operationProblems': [{
+                'severity': 'ERROR',
+                'code': 'STALE_FAILURE',
+                'message': 'This stale result must not cancel packing.',
+            }],
+        }
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=stale_failure),
+        ):
+            self.shipment.action_check_create_operation_status()
+
+        self.assertEqual(self.shipment.state, 'plan_created')
+        self.assertEqual(self.shipment.create_operation_status, 'success')
+        self.assertEqual(self.shipment.packing_generation_status, 'pending')
+        self.assertFalse(self.shipment.create_operation_error_code)
+
+    def test_23i_stale_create_mismatch_cannot_regress_packing_generated(self):
+        self._start_plan()
+        self.shipment.write({
+            'create_operation_status': 'success',
+            'state': 'packing_generated',
+            'plan_created_at': fields.Datetime.now(),
+            'packing_generation_operation_id': '11111111-1111-1111-1111-111111111111',
+            'packing_generation_status': 'success',
+        })
+        stale_mismatch = {
+            'operation': 'createInboundPlan',
+            'operationId': '9999abcd-1234-abcd-5678-1234abcd5678',
+            'operationStatus': 'SUCCESS',
+            'operationProblems': [],
+        }
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=stale_mismatch),
+            patch.object(AmazonAPI, 'get_inbound_plan', autospec=True, side_effect=UserError('404 not found')),
+            patch.object(AmazonAPI, 'list_inbound_plan_items', autospec=True) as list_items_mock,
+        ):
+            self.shipment.action_check_create_operation_status()
+
+        self.assertEqual(self.shipment.state, 'packing_generated')
+        self.assertEqual(self.shipment.create_operation_status, 'success')
+        self.assertFalse(self.shipment.create_operation_error_code)
+        self.assertIn('operationIdAudit', self.shipment.create_operation_response)
+        self.assertIn('staleCreateOperationGuard', self.shipment.create_operation_response)
+        list_items_mock.assert_not_called()
+
+    def test_23j_current_create_failure_before_advancement_still_fails(self):
+        self._start_plan()
+        current_failure = {
+            'operation': 'createInboundPlan',
+            'operationId': OPERATION_ID,
+            'operationStatus': 'FAILED',
+            'operationProblems': [{
+                'severity': 'ERROR',
+                'code': 'InvalidItem',
+                'message': 'The item cannot be planned.',
+            }],
+        }
+        with (
+            patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True, return_value=current_failure),
+        ):
+            self.shipment.action_check_create_operation_status()
+
+        self.assertEqual(self.shipment.state, 'failed')
+        self.assertEqual(self.shipment.create_operation_status, 'failed')
+        self.assertEqual(self.shipment.create_operation_error_code, 'InvalidItem')
 
     def test_24_invalid_state_blocks_create_before_api(self):
         self.shipment.state = 'plan_created'
@@ -633,3 +1020,8 @@ class TestFbaInboundPlanPhase2(TransactionCase):
         odoo_product = amazon_product._create_odoo_product_from_amazon()
 
         self.assertTrue(odoo_product.product_tmpl_id.is_storable)
+
+    def test_29_expiration_date_is_visible_in_planned_items_view(self):
+        view = self.env.ref('sdlc_amazon_connector.amazon_inbound_shipment_form')
+        self.assertIn('name="line_ids"', view.arch_db)
+        self.assertIn('name="expiration_date"', view.arch_db)

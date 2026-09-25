@@ -23,6 +23,42 @@
         </field>
     </record>
 
+    <record id="amazon_fba_bulk_box_wizard_form" model="ir.ui.view">
+        <field name="name">amazon.fba.bulk.box.wizard.form</field>
+        <field name="model">amazon.fba.bulk.box.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Bulk Create Boxes">
+                <group>
+                    <field name="inbound_shipment_id" invisible="1"/>
+                    <field name="packing_option_id" invisible="1"/>
+                    <field name="packing_group_id"/>
+                    <field name="packing_group_item_id"/>
+                    <field name="amazon_product_id" readonly="1"/>
+                    <field name="msku" readonly="1"/>
+                </group>
+                <group>
+                    <group string="Cartons">
+                        <field name="box_count"/>
+                        <field name="units_per_box"/>
+                        <field name="replace_existing"/>
+                    </group>
+                    <group string="Measurements">
+                        <field name="length"/>
+                        <field name="width"/>
+                        <field name="height"/>
+                        <field name="dimension_unit"/>
+                        <field name="weight"/>
+                        <field name="weight_unit"/>
+                    </group>
+                </group>
+                <footer>
+                    <button name="action_generate_boxes" type="object" string="Generate Boxes" class="btn-primary"/>
+                    <button string="Cancel" special="cancel" class="btn-secondary"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
     <record id="amazon_inbound_shipment_form" model="ir.ui.view">
         <field name="name">amazon.inbound.shipment.form</field>
         <field name="model">amazon.inbound.shipment</field>
@@ -62,6 +98,12 @@
                             type="object"
                             string="Submit Box Information"
                             class="btn-primary"
+                            groups="sdlc_amazon_connector.group_amazon_manager"
+                            invisible="state != 'packing_confirmed' or packing_information_status in ('pending', 'in_progress', 'success')"/>
+                    <button name="action_open_bulk_box_wizard"
+                            type="object"
+                            string="Bulk Create Boxes"
+                            class="btn-secondary"
                             groups="sdlc_amazon_connector.group_amazon_manager"
                             invisible="state != 'packing_confirmed' or packing_information_status in ('pending', 'in_progress', 'success')"/>
                     <button name="action_generate_placement_options"
@@ -163,6 +205,7 @@
                             <field name="planned_quantity" required="1"/>
                             <field name="prep_owner" required="1"/>
                             <field name="label_owner" required="1"/>
+                            <field name="expiration_date" optional="show"/>
                             <field name="fnsku" optional="hide"/>
                             <field name="quantity_shipped" optional="hide" readonly="1"/>
                             <field name="quantity_received" optional="hide" readonly="1"/>
@@ -389,7 +432,13 @@
                                                             type="object"
                                                             string="Generate Transportation Options"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"
-                                                            invisible="transportation_generation_status in ('pending', 'in_progress', 'success') or transportation_confirmation_status in ('pending', 'in_progress', 'success')"/>
+                                                            invisible="transportation_generation_status or transportation_confirmation_status in ('pending', 'in_progress', 'success')"/>
+                                                    <button name="action_regenerate_transportation_options"
+                                                            type="object"
+                                                            string="Regenerate Transportation Options"
+                                                            groups="sdlc_amazon_connector.group_amazon_manager"
+                                                            confirm="Regenerating transportation options will discard the current unconfirmed transportation selection and replace the existing options."
+                                                            invisible="transportation_generation_status not in ('success', 'failed') or transportation_confirmation_status in ('pending', 'in_progress', 'success') or delivery_window_generation_status in ('pending', 'in_progress') or delivery_window_confirmation_status or picking_id"/>
                                                     <button name="action_refresh_transportation_options"
                                                             type="object"
                                                             string="Refresh Transportation Options"
@@ -482,6 +531,8 @@
                                                             <field name="transportation_confirmation_status" readonly="1"/>
                                                             <field name="transportation_status" readonly="1"/>
                                                             <field name="transportation_last_sync_at" readonly="1"/>
+                                                            <field name="ready_to_ship_at"
+                                                                   readonly="transportation_generation_status in ('pending', 'in_progress', 'success') or transportation_confirmation_status in ('pending', 'in_progress', 'success')"/>
                                                             <field name="selected_transportation_option_id" readonly="1"/>
                                                             <field name="shipping_mode" readonly="1"/>
                                                             <field name="delivery_window_required" readonly="1"/>
@@ -748,6 +799,8 @@
                               groups="sdlc_amazon_connector.group_amazon_manager">
                             <group>
                                 <group>
+                                    <field name="create_operation_id" readonly="1"/>
+                                    <field name="create_operation_reported_id" readonly="1"/>
                                     <field name="create_operation_request_id" readonly="1"/>
                                     <field name="last_operation_request_id" readonly="1"/>
                                 </group>

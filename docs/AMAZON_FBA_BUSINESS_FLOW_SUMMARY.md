@@ -96,6 +96,8 @@ The operator prepares a local inbound record, then supervises these Amazon decis
 8. Download/store box labels, confirm product labels are applied, and enter tracking when required.
 9. Physically count and press **Dispatch** for each physical shipment.
 
+If an MSKU requires shelf-life information, the operator enters the physical **Expiration Date** on that planned item before creating the inbound plan. The date is per item line, not per shipment, and is sent to Amazon as the create-plan item expiration date. It is not the same as the expiration time on Amazon packing or placement options, which only tells the operator when a generated option expires.
+
 All steps before Dispatch leave **WH/Stock = 100**. Dispatch is the only step that creates and validates the standard Odoo stock movement:
 
 ```text
@@ -105,6 +107,10 @@ Total owned stock                    100
 ```
 
 The connector prevents a repeated dispatch from creating a second validated picking.
+
+If Amazon rejects plan creation with `FBA_INB_0180` / `Expiration date required`, the operator should review the failed operation, enter the physical expiration date on the affected planned item, and retry only after confirming no usable Amazon plan was created from the failed operation. The connector preserves Amazon's `operationProblems` diagnostics so this business error remains visible during troubleshooting.
+
+If Amazon returns a successful create-plan status with a different diagnostic operation ID, the connector does not accept that success blindly. It verifies the stored inbound plan through read-only Amazon plan and plan-item APIs, confirms the marketplace and planned MSKU quantities match Odoo, and only then moves the shipment to **Plan Created**. If the plan cannot be verified, the shipment stays failed for review instead of creating a duplicate plan.
 
 ### If Amazon splits the plan
 

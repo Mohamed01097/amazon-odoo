@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import re
+from datetime import timedelta
 from urllib.parse import urlparse
 
 import requests
@@ -17,6 +18,7 @@ _logger = logging.getLogger(__name__)
 AMAZON_SHIPMENT_ID_RE = INBOUND_PLAN_ID_RE
 AMAZON_FREIGHT_BILL_RE = re.compile(r'^[A-Za-z0-9._ -]{1,64}$')
 MAX_SHIPPING_LABEL_BYTES = 25 * 1024 * 1024
+READY_TO_SHIP_MIN_LEAD_MINUTES = 15
 PHASE4_STATES = {
     'placement_confirmed', 'picking_created', 'ready_to_ship', 'dispatched',
     'shipment_confirmed', 'waiting_receiving', 'partially_received',
@@ -595,6 +597,17 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
     )
     dispatch_quantity = fields.Integer(compute='_compute_dispatch_quantity')
     dispatch_date = fields.Datetime(copy=False, readonly=True)
+    ready_to_ship_at = fields.Datetime(
+        string='Ready-to-Ship Date/Time',
+        copy=False,
+        help=(
+            "Earliest real date/time when all cartons are packed, labeled, staged, "
+            "and physically available for carrier pickup. This value is sent to "
+            "Amazon when generating transportation options. Enter a value at least "
+            "15 minutes in the future so the request cannot expire while Amazon "
+            "processes it."
+        ),
+    )
     transportation_option_ids = fields.One2many(
         'amazon.fba.transportation.option', 'physical_shipment_id',
         string='Transportation Options',
@@ -837,10 +850,24 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
 
     def _prepare_ready_to_ship_window(self):
         self.ensure_one()
-        start = self.dispatch_date or fields.Datetime.now()
+        start = self.ready_to_ship_at
+        if not start:
+            raise UserError(_(
+                "Enter a Ready-to-Ship Date/Time before generating transportation options."
+            ))
         if isinstance(start, str):
             start = fields.Datetime.from_string(start)
-        return {'start': start.replace(microsecond=0).isoformat() + 'Z'}
+        minimum = fields.Datetime.now() + timedelta(minutes=READY_TO_SHIP_MIN_LEAD_MINUTES)
+        if start < minimum:
+            raise UserError(_(
+                "Ready-to-Ship Date/Time must be at least %(minutes)s minutes in the future. "
+                "Review the shipment's Ready-to-Ship value before generating transportation options.",
+                minutes=READY_TO_SHIP_MIN_LEAD_MINUTES,
+            ))
+        # Amazon Fulfillment Inbound v2024-03-20 WindowInput.start accepts ISO 8601
+        # date-time values and removes non-zero second/millisecond components.
+        start = start.replace(second=0, microsecond=0)
+        return {'start': start.isoformat() + 'Z'}
 
     def _prepare_transportation_generation_payload(self):
         self.ensure_one()
@@ -899,12 +926,12 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             'transportation_confirmation_status'
         )):
             raise UserError(_("Transportation options cannot be regenerated after plan confirmation starts."))
-        if any(status in ('pending', 'in_progress', 'success') for status in physicals.mapped(
+        if any(status in ('pending', 'in_progress', 'success', 'failed') for status in physicals.mapped(
             'transportation_generation_status'
         )):
             raise UserError(_(
-                "Transportation options were already generated or are still in progress. "
-                "Refresh the existing options instead of generating a duplicate set."
+                "Transportation options were already generated, failed, or are still in progress. "
+                "Use Regenerate Transportation Options if a fresh unconfirmed option set is needed."
             ))
         self._prepare_transportation_generation_payload()
         physicals.sudo().write({
@@ -917,6 +944,108 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             _("FBA Transportation Options"),
             _("Transportation option generation was queued.")
             if created else _("Transportation option generation is already queued."),
+            'success' if created else 'warning',
+        )
+
+    def _ensure_transportation_regeneration_allowed(self, physicals):
+        self.ensure_one()
+        if not physicals:
+            raise UserError(_("No accepted Amazon physical shipments are available for transportation."))
+        if any(code == 'WRITE_OUTCOME_UNKNOWN' for code in physicals.mapped(
+            'transportation_error_code'
+        )):
+            raise UserError(_(
+                "A previous transportation write has an unknown Amazon outcome. Reconcile the "
+                "plan with Amazon before regenerating transportation options."
+            ))
+        if any(status in ('pending', 'in_progress', 'success') for status in physicals.mapped(
+            'transportation_confirmation_status'
+        )):
+            raise UserError(_(
+                "Transportation options cannot be regenerated after transportation confirmation starts."
+            ))
+        if any((operation_id or '').strip() for operation_id in physicals.mapped(
+            'transportation_confirmation_operation_id'
+        )):
+            raise UserError(_(
+                "Transportation confirmation has already been submitted for at least one Amazon "
+                "physical shipment. Do not regenerate transportation options."
+            ))
+        if any(status in ('pending', 'in_progress') for status in physicals.mapped(
+            'transportation_generation_status'
+        )):
+            raise UserError(_("Transportation option generation is already queued or in progress."))
+        if any(status in ('pending', 'in_progress') for status in physicals.mapped(
+            'delivery_window_generation_status'
+        )):
+            raise UserError(_("Delivery-window generation is already queued or in progress."))
+        if any(status for status in physicals.mapped('delivery_window_confirmation_status')):
+            raise UserError(_(
+                "Delivery-window confirmation has already started. Do not regenerate "
+                "transportation options."
+            ))
+        if any((operation_id or '').strip() for operation_id in physicals.mapped(
+            'delivery_window_confirmation_operation_id'
+        )):
+            raise UserError(_(
+                "A delivery-window confirmation operation already exists. Do not regenerate "
+                "transportation options."
+            ))
+        if any(status in ('pending', 'in_progress', 'success') for status in physicals.mapped(
+            'tracking_status'
+        )):
+            raise UserError(_("Tracking has already started. Do not regenerate transportation options."))
+        if any(physical.labels_status == 'success' or physical.shipping_label_attachment_id for physical in physicals):
+            raise UserError(_("Shipping labels already exist. Do not regenerate transportation options."))
+        if any(physical.product_labels_confirmed for physical in physicals):
+            raise UserError(_("Product-label confirmation already exists. Do not regenerate transportation options."))
+        if any(physical.dispatch_state != 'placement_confirmed' for physical in physicals):
+            raise UserError(_("Dispatch has already started. Do not regenerate transportation options."))
+        active_pickings = physicals.mapped('picking_ids').filtered(lambda picking: picking.state != 'cancel')
+        if active_pickings:
+            raise UserError(_("Dispatch picking already exists. Do not regenerate transportation options."))
+
+    def _clear_unconfirmed_transportation_choices(self):
+        for physical in self:
+            physical.transportation_option_ids.sudo().write({'selected': False})
+            physical.delivery_window_option_ids.sudo().write({'selected': False})
+            physical.sudo().write({
+                'selected_transportation_option_id': False,
+                'shipping_mode': False,
+                'carrier_name': False,
+                'carrier_code': False,
+                'carrier_type': False,
+                'delivery_window_required': False,
+                'selected_delivery_window_option_id': False,
+                'delivery_window_generation_operation_id': False,
+                'delivery_window_generation_status': False,
+                'delivery_window_confirmation_operation_id': False,
+                'delivery_window_confirmation_status': False,
+            })
+            physical.delivery_window_option_ids.sudo().unlink()
+            physical.transportation_option_ids.sudo().unlink()
+
+    def action_regenerate_transportation_options(self):
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self.inbound_shipment_id._lock_phase3_workflow()
+        physicals = self._accepted_plan_physicals()
+        self._ensure_transportation_regeneration_allowed(physicals)
+        self._prepare_transportation_generation_payload()
+        physicals._clear_unconfirmed_transportation_choices()
+        physicals.sudo().write({
+            'transportation_generation_operation_id': False,
+            'transportation_generation_status': 'pending',
+            'transportation_error_code': False,
+            'transportation_error_message': False,
+        })
+        _job, created = self._enqueue_physical_job('generate_transportation_options')
+        return self.instance_id._notify(
+            _("FBA Transportation Options"),
+            _(
+                "Transportation option regeneration was queued. Existing unconfirmed "
+                "transportation options were discarded."
+            ) if created else _("Transportation option regeneration is already queued."),
             'success' if created else 'warning',
         )
 
@@ -1303,6 +1432,7 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
         self.ensure_one()
         Option = self.env['amazon.fba.transportation.option'].sudo()
         synced = Option
+        seen = set()
         for raw in options:
             if not isinstance(raw, dict):
                 continue
@@ -1310,6 +1440,7 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             option_id = str(raw.get('transportationOptionId') or '').strip()
             if shipment_id != self.amazon_shipment_id or not option_id:
                 continue
+            seen.add(option_id)
             carrier = raw.get('carrier') or {}
             quote = raw.get('quote') or {}
             cost = quote.get('cost') or {}
@@ -1346,6 +1477,22 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
                 synced |= existing
             else:
                 synced |= Option.create(vals)
+        if self.transportation_confirmation_status not in ('pending', 'in_progress', 'success'):
+            stale = self.transportation_option_ids.filtered(
+                lambda option: option.amazon_transportation_option_id not in seen
+            )
+            if stale:
+                if self.selected_transportation_option_id in stale:
+                    self.sudo().write({
+                        'selected_transportation_option_id': False,
+                        'shipping_mode': False,
+                        'carrier_name': False,
+                        'carrier_code': False,
+                        'carrier_type': False,
+                        'delivery_window_required': False,
+                    })
+                stale.sudo().write({'selected': False})
+                stale.sudo().unlink()
         return synced
 
     def _currency_from_code(self, code):

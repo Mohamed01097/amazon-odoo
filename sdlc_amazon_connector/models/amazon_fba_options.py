@@ -1,5 +1,5 @@
 from odoo import _, api, fields, models
-from odoo.exceptions import ValidationError
+from odoo.exceptions import UserError, ValidationError
 
 
 class AmazonFbaPackingOption(models.Model):
@@ -293,6 +293,184 @@ class AmazonFbaBoxLine(models.Model):
     def _onchange_amazon_product_id(self):
         if self.amazon_product_id:
             self.msku = self.amazon_product_id.sku or False
+
+
+class AmazonFbaBulkBoxWizard(models.TransientModel):
+    _name = 'amazon.fba.bulk.box.wizard'
+    _description = 'Amazon FBA Bulk Box Creation'
+
+    inbound_shipment_id = fields.Many2one(
+        'amazon.inbound.shipment', required=True, readonly=True, ondelete='cascade',
+    )
+    packing_option_id = fields.Many2one(
+        'amazon.fba.packing.option', required=True, readonly=True, ondelete='cascade',
+    )
+    packing_group_id = fields.Many2one(
+        'amazon.fba.packing.group', required=True,
+        domain="[('packing_option_id', '=', packing_option_id)]",
+    )
+    packing_group_item_id = fields.Many2one(
+        'amazon.fba.packing.group.item', required=True,
+        domain="[('packing_group_id', '=', packing_group_id)]",
+    )
+    amazon_product_id = fields.Many2one(
+        'amazon.product', related='packing_group_item_id.amazon_product_id', readonly=True,
+    )
+    msku = fields.Char(related='packing_group_item_id.msku', readonly=True)
+    box_count = fields.Integer(required=True, default=1)
+    units_per_box = fields.Integer(required=True)
+    length = fields.Float(required=True, digits=(16, 4))
+    width = fields.Float(required=True, digits=(16, 4))
+    height = fields.Float(required=True, digits=(16, 4))
+    dimension_unit = fields.Selection([
+        ('CM', 'Centimeters'),
+        ('IN', 'Inches'),
+    ], required=True, default='CM')
+    weight = fields.Float(required=True, digits=(16, 4))
+    weight_unit = fields.Selection([
+        ('KG', 'Kilograms'),
+        ('LB', 'Pounds'),
+    ], required=True, default='KG')
+    replace_existing = fields.Boolean(
+        string='Replace Existing Boxes',
+        help="Remove existing boxes on the selected packing option before creating this batch.",
+    )
+
+    @api.constrains('box_count', 'units_per_box', 'length', 'width', 'height', 'weight')
+    def _check_positive_values(self):
+        for wizard in self:
+            if wizard.box_count <= 0:
+                raise ValidationError(_("Number of boxes must be greater than zero."))
+            if wizard.units_per_box <= 0:
+                raise ValidationError(_("Units per box must be greater than zero."))
+            if (
+                wizard.length <= 0
+                or wizard.width <= 0
+                or wizard.height <= 0
+                or wizard.weight <= 0
+            ):
+                raise ValidationError(_("Box dimensions and weight must be greater than zero."))
+
+    @api.onchange('packing_group_id')
+    def _onchange_packing_group_id(self):
+        if self.packing_group_item_id.packing_group_id != self.packing_group_id:
+            self.packing_group_item_id = False
+
+    def _validate_generation_scope(self):
+        self.ensure_one()
+        shipment = self.inbound_shipment_id
+        option = self.packing_option_id
+        group = self.packing_group_id
+        item = self.packing_group_item_id
+        selected = shipment.packing_option_ids.filtered('selected')
+        if option.inbound_shipment_id != shipment:
+            raise UserError(_("The packing option does not belong to this inbound shipment."))
+        if len(selected) != 1 or selected != option:
+            raise UserError(_("Bulk boxes can only be created for the selected packing option."))
+        if shipment.state != 'packing_confirmed' or shipment.packing_confirmation_status != 'success':
+            raise UserError(_("Confirm the Amazon packing option before creating box information."))
+        if option.status != 'ACCEPTED':
+            raise UserError(_("The selected packing option must have Amazon status ACCEPTED."))
+        if group.packing_option_id != option:
+            raise UserError(_("The packing group does not belong to the selected packing option."))
+        if item.packing_group_id != group:
+            raise UserError(_("The selected item does not belong to the packing group."))
+        if not item.amazon_product_id:
+            raise UserError(_("The packing group item must be mapped to an Amazon Product before boxes can be created."))
+
+    def _matching_existing_boxes(self):
+        self.ensure_one()
+        group_id = (self.packing_group_id.amazon_packing_group_id or '').strip()
+        msku = (self.packing_group_item_id.msku or '').strip()
+        return self.packing_option_id.box_ids.filtered(lambda box: (
+            (box.amazon_packing_group_id or '').strip() == group_id
+            and box.length == self.length
+            and box.width == self.width
+            and box.height == self.height
+            and box.dimension_unit == self.dimension_unit
+            and box.weight == self.weight
+            and box.weight_unit == self.weight_unit
+            and len(box.line_ids) == 1
+            and (box.line_ids.msku or '').strip() == msku
+            and box.line_ids.quantity == self.units_per_box
+        ))
+
+    def _existing_quantity_for_item(self):
+        self.ensure_one()
+        if self.replace_existing:
+            return 0
+        group_id = (self.packing_group_id.amazon_packing_group_id or '').strip()
+        msku = (self.packing_group_item_id.msku or '').strip()
+        quantity = 0
+        for box in self.packing_option_id.box_ids.filtered(
+            lambda candidate: (candidate.amazon_packing_group_id or '').strip() == group_id
+        ):
+            quantity += sum(
+                line.quantity
+                for line in box.line_ids
+                if (line.msku or '').strip() == msku
+            )
+        return quantity
+
+    def _next_box_number(self):
+        self.ensure_one()
+        max_number = 0
+        for box_id in self.packing_option_id.box_ids.mapped('amazon_box_id'):
+            value = (box_id or '').strip()
+            if value.startswith('BOX-') and value[4:].isdigit():
+                max_number = max(max_number, int(value[4:]))
+        return max_number + 1
+
+    def action_generate_boxes(self):
+        self.ensure_one()
+        self._validate_generation_scope()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self.inbound_shipment_id._lock_phase3_workflow()
+        if not self.replace_existing and len(self._matching_existing_boxes()) >= self.box_count:
+            raise UserError(_(
+                "A matching batch of boxes already exists. Change the carton values, "
+                "or use Replace Existing Boxes to regenerate deliberately."
+            ))
+        expected_quantity = self.packing_group_item_id.quantity
+        requested_quantity = self.box_count * self.units_per_box
+        existing_quantity = self._existing_quantity_for_item()
+        if existing_quantity + requested_quantity > expected_quantity:
+            raise UserError(_(
+                "This batch would exceed Amazon's expected quantity for %(msku)s. "
+                "Expected %(expected)s; existing boxes contain %(existing)s; this batch adds %(requested)s.",
+                msku=self.msku,
+                expected=expected_quantity,
+                existing=existing_quantity,
+                requested=requested_quantity,
+            ))
+        if self.replace_existing:
+            self.packing_option_id.box_ids.unlink()
+        next_number = self._next_box_number()
+        group_id = (self.packing_group_id.amazon_packing_group_id or '').strip()
+        values = []
+        for offset in range(self.box_count):
+            values.append({
+                'packing_option_id': self.packing_option_id.id,
+                'amazon_box_id': 'BOX-%04d' % (next_number + offset),
+                'amazon_packing_group_id': group_id,
+                'length': self.length,
+                'width': self.width,
+                'height': self.height,
+                'dimension_unit': self.dimension_unit,
+                'weight': self.weight,
+                'weight_unit': self.weight_unit,
+                'line_ids': [(0, 0, {
+                    'amazon_product_id': self.amazon_product_id.id,
+                    'msku': self.msku,
+                    'quantity': self.units_per_box,
+                })],
+            })
+        self.env['amazon.fba.box'].create(values)
+        return self.inbound_shipment_id.instance_id._notify(
+            _("Bulk Boxes"),
+            _("%(count)s box(es) were created for packing group %(group)s.",
+              count=self.box_count, group=group_id),
+        )
 
 
 class AmazonFbaPlacementOption(models.Model):

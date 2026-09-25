@@ -1453,6 +1453,17 @@ class AmazonAPI():
         resp = self._amazon_request(instance, access_token, 'GET', url)
         return self._json_response_with_request_id(resp)
 
+    def list_inbound_plan_items(self, instance, access_token, plan_id, page_size=20,
+                                pagination_token=None):
+        """Return one official listInboundPlanItems page."""
+        endpoint = self._get_endpoint(instance)
+        url = f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}/items"
+        params = {'pageSize': page_size}
+        if pagination_token:
+            params['paginationToken'] = pagination_token
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
+        return self._json_response_with_request_id(resp)
+
     def generate_packing_options(self, instance, access_token, plan_id):
         """Start v2024-03-20 packing-option generation."""
         endpoint = self._get_endpoint(instance)
@@ -1662,7 +1673,8 @@ class AmazonAPI():
         if number_of_packages is not None:
             params['NumberOfPackages'] = number_of_packages
         if package_labels_to_print:
-            params['PackageLabelsToPrint'] = package_labels_to_print
+            # SP-API generated clients serialize this array query parameter as CSV.
+            params['PackageLabelsToPrint'] = ','.join(package_labels_to_print)
         resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return self._json_response_with_request_id(resp)
 

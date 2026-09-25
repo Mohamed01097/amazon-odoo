@@ -1,4 +1,5 @@
 import base64
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -133,6 +134,7 @@ class TestFbaShippingPhase4(TransactionCase):
             'shipment_confirmation_id': 'FBA1234ABCD',
             'status': 'WORKING',
             'destination_fc': 'ONT8',
+            'ready_to_ship_at': fields.Datetime.now() + timedelta(hours=1),
             'line_ids': [Command.create({
                 'amazon_product_id': self.amazon_product.id,
                 'msku': self.amazon_product.sku,
@@ -263,6 +265,20 @@ class TestFbaShippingPhase4(TransactionCase):
             'preconditions': [],
             'quote': {'cost': {'amount': 0.0, 'code': 'USD'}},
         }
+
+    def _create_transportation_option(self, physical, option_id=TRANSPORTATION_OPTION_ID,
+                                      solution='USE_YOUR_OWN_CARRIER',
+                                      mode='GROUND_SMALL_PARCEL'):
+        return self.env['amazon.fba.transportation.option'].sudo().create({
+            'instance_id': self.instance.id,
+            'inbound_shipment_id': physical.inbound_shipment_id.id,
+            'physical_shipment_id': physical.id,
+            'amazon_transportation_option_id': option_id,
+            'shipment_id': physical.amazon_shipment_id,
+            'shipping_mode': mode,
+            'shipping_solution': solution,
+            'carrier_name': 'Test Carrier',
+        })
 
     def test_01_picking_is_created_and_fully_reserved_once(self):
         source = self.instance.fba_source_location_id
@@ -461,12 +477,13 @@ class TestFbaShippingPhase4(TransactionCase):
         with patch.object(api, '_amazon_request', return_value=response) as request:
             api.get_inbound_labels_v0(
                 self.instance, 'test-token', 'FBA1234ABCD', 'PackageLabel_A4_2',
-                'UNIQUE', 1, ['BOX-1'],
+                'UNIQUE', 2, ['BOX-1', 'BOX-2'],
             )
         self.assertTrue(request.call_args.args[3].endswith(
             '/fba/inbound/v0/shipments/FBA1234ABCD/labels'
         ))
-        self.assertEqual(request.call_args.kwargs['params']['PackageLabelsToPrint'], ['BOX-1'])
+        self.assertEqual(request.call_args.kwargs['params']['NumberOfPackages'], 2)
+        self.assertEqual(request.call_args.kwargs['params']['PackageLabelsToPrint'], 'BOX-1,BOX-2')
 
     def test_09_transportation_precedes_physical_dispatch(self):
         physical = self.shipment.physical_shipment_ids
@@ -481,6 +498,48 @@ class TestFbaShippingPhase4(TransactionCase):
             job._process_operation()
         self.assertEqual(job.operation_id, TRANSPORTATION_OPERATION_ID)
         self.assertFalse(physical.picking_id)
+
+    def test_09a_ready_to_ship_window_requires_explicit_future_value(self):
+        physical = self.shipment.physical_shipment_ids
+        physical.ready_to_ship_at = False
+        with self.assertRaisesRegex(UserError, 'Ready-to-Ship Date/Time'):
+            physical._prepare_transportation_generation_payload()
+
+        physical.ready_to_ship_at = fields.Datetime.now() - timedelta(minutes=1)
+        with self.assertRaisesRegex(UserError, 'at least 15 minutes in the future'):
+            physical._prepare_transportation_generation_payload()
+
+        physical.ready_to_ship_at = fields.Datetime.now() + timedelta(minutes=5)
+        with self.assertRaisesRegex(UserError, 'at least 15 minutes in the future'):
+            physical._prepare_transportation_generation_payload()
+
+    def test_09b_ready_to_ship_serializes_user_future_value(self):
+        physical = self.shipment.physical_shipment_ids
+        physical.ready_to_ship_at = fields.Datetime.from_string('2030-01-01 08:05:45')
+
+        payload = physical._prepare_transportation_generation_payload()
+
+        config = payload['shipmentTransportationConfigurations'][0]
+        self.assertEqual(config['shipmentId'], SHIPMENT_ID)
+        self.assertEqual(
+            config['readyToShipWindow']['start'],
+            '2030-01-01T08:05:00Z',
+        )
+
+    def test_09c_invalid_ready_to_ship_blocks_before_amazon_call(self):
+        physical = self.shipment.physical_shipment_ids
+        physical.ready_to_ship_at = fields.Datetime.now()
+
+        with patch.object(
+            AmazonAPI, 'generate_transportation_options', autospec=True,
+        ) as generate_mock:
+            with self.assertRaisesRegex(UserError, 'Ready-to-Ship Date/Time'):
+                physical.action_generate_transportation_options()
+
+        self.assertFalse(generate_mock.called)
+        self.assertFalse(self.shipment.operation_job_ids.filtered(
+            lambda item: item.operation_type == 'generate_transportation_options'
+        ))
 
     def test_10_generate_and_list_transportation_options_are_idempotent(self):
         physical = self.shipment.physical_shipment_ids
@@ -506,7 +565,10 @@ class TestFbaShippingPhase4(TransactionCase):
         self.assertEqual(
             body['shipmentTransportationConfigurations'][0]['shipmentId'], SHIPMENT_ID,
         )
-        self.assertIn('readyToShipWindow', body['shipmentTransportationConfigurations'][0])
+        self.assertEqual(
+            body['shipmentTransportationConfigurations'][0]['readyToShipWindow']['start'],
+            physical.ready_to_ship_at.replace(second=0, microsecond=0).isoformat() + 'Z',
+        )
 
         with (
             patch.object(type(self.instance), '_get_access_token_or_raise', return_value='test-token'),
@@ -529,6 +591,204 @@ class TestFbaShippingPhase4(TransactionCase):
             physical.action_refresh_transportation_options()
         self.assertEqual(len(physical.transportation_option_ids), 2)
         self.assertEqual(len(physical.transportation_option_ids), 2)
+
+    def test_10a_normal_generate_cannot_duplicate_successful_generation(self):
+        physical = self.shipment.physical_shipment_ids
+        physical.write({
+            'transportation_generation_status': 'success',
+            'transportation_generation_operation_id': TRANSPORTATION_OPERATION_ID,
+        })
+        with self.assertRaisesRegex(UserError, 'already generated'):
+            physical.action_generate_transportation_options()
+
+    def test_10b_regeneration_replaces_unconfirmed_options_and_uses_updated_ready_time(self):
+        physical = self.shipment.physical_shipment_ids
+        old_job = self.env['amazon.inbound.operation.job'].sudo().create({
+            'inbound_shipment_id': self.shipment.id,
+            'physical_shipment_id': physical.id,
+            'operation_type': 'generate_transportation_options',
+            'operation_id': '77777777-7777-7777-7777-777777777777',
+            'state': 'done',
+            'response_data': '{"oldGeneration": true}',
+        })
+        physical.write({
+            'ready_to_ship_at': fields.Datetime.from_string('2030-01-01 08:00:00'),
+            'transportation_generation_status': 'success',
+            'transportation_generation_operation_id': old_job.operation_id,
+            'transportation_response': '{"oldGeneration": true}',
+        })
+        old_a = self._create_transportation_option(
+            physical, 'to-old-aaaa-1234-abcd-5678-1234abcd5678',
+        )
+        old_b = self._create_transportation_option(
+            physical, 'to-old-bbbb-1234-abcd-5678-1234abcd5678',
+            solution='AMAZON_PARTNERED_CARRIER',
+        )
+        old_a.action_select_transportation_option()
+        delivery_window = self.env['amazon.fba.delivery.window.option'].sudo().create({
+            'instance_id': self.instance.id,
+            'inbound_shipment_id': self.shipment.id,
+            'physical_shipment_id': physical.id,
+            'amazon_delivery_window_option_id': DELIVERY_OPTION_ID,
+            'start_date': fields.Datetime.from_string('2030-01-02 08:00:00'),
+            'end_date': fields.Datetime.from_string('2030-01-02 12:00:00'),
+            'valid_until': fields.Datetime.from_string('2030-01-01 08:00:00'),
+            'availability_type': 'AVAILABLE',
+            'selected': True,
+        })
+        physical.write({
+            'selected_delivery_window_option_id': delivery_window.id,
+            'delivery_window_generation_status': 'success',
+            'delivery_window_generation_operation_id': DELIVERY_GENERATE_OPERATION_ID,
+        })
+
+        before_pickings = self.env['stock.picking'].search_count([])
+        before_moves = self.env['stock.move'].search_count([])
+        before_sales = self.env['sale.order'].search_count([])
+        before_accounting = self.env['account.move'].search_count([])
+        with patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock:
+            physical.action_regenerate_transportation_options()
+
+        self.assertFalse(generate_mock.called)
+        self.assertFalse(old_a.exists())
+        self.assertFalse(old_b.exists())
+        self.assertFalse(delivery_window.exists())
+        self.assertFalse(physical.selected_transportation_option_id)
+        self.assertFalse(physical.delivery_window_required)
+        self.assertFalse(physical.selected_delivery_window_option_id)
+        self.assertEqual(physical.transportation_generation_status, 'pending')
+        self.assertFalse(physical.transportation_generation_operation_id)
+        self.assertIn('oldGeneration', physical.transportation_response)
+        self.assertTrue(old_job.exists())
+        self.assertEqual(self.env['stock.picking'].search_count([]), before_pickings)
+        self.assertEqual(self.env['stock.move'].search_count([]), before_moves)
+        self.assertEqual(self.env['sale.order'].search_count([]), before_sales)
+        self.assertEqual(self.env['account.move'].search_count([]), before_accounting)
+
+        jobs = self.shipment.operation_job_ids.filtered(
+            lambda item: item.operation_type == 'generate_transportation_options'
+            and item.state in ('pending', 'in_progress')
+        )
+        self.assertEqual(len(jobs), 1)
+        physical.ready_to_ship_at = fields.Datetime.from_string('2030-01-03 09:17:45')
+        with patch.object(
+            AmazonAPI, 'generate_transportation_options', autospec=True,
+            return_value={
+                'operationId': TRANSPORTATION_OPERATION_ID,
+                '_amazon_request_id': 'transport-regenerate',
+            },
+        ) as regenerate_mock:
+            jobs._process_operation()
+        payload = regenerate_mock.call_args.args[-1]
+        self.assertEqual(
+            payload['shipmentTransportationConfigurations'][0]['readyToShipWindow']['start'],
+            '2030-01-03T09:17:00Z',
+        )
+        self.assertEqual(physical.transportation_generation_operation_id, TRANSPORTATION_OPERATION_ID)
+        with (
+            patch.object(
+                AmazonAPI, 'get_inbound_operation_status', autospec=True,
+                return_value={'operationStatus': 'SUCCESS', 'operationProblems': []},
+            ),
+            patch.object(
+                AmazonAPI, 'list_transportation_options', autospec=True,
+                return_value={'transportationOptions': [
+                    self._transportation_option('to-new-aaaa-1234-abcd-5678-1234abcd5678'),
+                    self._transportation_option('to-new-bbbb-1234-abcd-5678-1234abcd5678'),
+                ]},
+            ),
+        ):
+            jobs._process_operation()
+        self.assertEqual(physical.transportation_generation_status, 'success')
+        self.assertEqual(
+            set(physical.transportation_option_ids.mapped('amazon_transportation_option_id')),
+            {
+                'to-new-aaaa-1234-abcd-5678-1234abcd5678',
+                'to-new-bbbb-1234-abcd-5678-1234abcd5678',
+            },
+        )
+
+    def test_10c_regeneration_allowed_after_failed_generation_when_safe(self):
+        physical = self.shipment.physical_shipment_ids
+        physical.write({
+            'transportation_generation_status': 'failed',
+            'transportation_error_code': 'BACKGROUND_JOB_FAILED',
+            'transportation_error_message': 'Previous synchronous rejection.',
+        })
+        physical.action_regenerate_transportation_options()
+        self.assertEqual(physical.transportation_generation_status, 'pending')
+        self.assertFalse(physical.transportation_error_code)
+        self.assertEqual(len(self.shipment.operation_job_ids.filtered(
+            lambda item: item.operation_type == 'generate_transportation_options'
+            and item.state in ('pending', 'in_progress')
+        )), 1)
+
+    def test_10d_regeneration_duplicate_job_is_blocked(self):
+        physical = self.shipment.physical_shipment_ids
+        physical.write({'transportation_generation_status': 'success'})
+        physical.action_regenerate_transportation_options()
+        with self.assertRaisesRegex(UserError, 'already queued or in progress'):
+            physical.action_regenerate_transportation_options()
+        self.assertEqual(len(self.shipment.operation_job_ids.filtered(
+            lambda item: item.operation_type == 'generate_transportation_options'
+            and item.state in ('pending', 'in_progress')
+        )), 1)
+
+    def test_10e_transportation_refresh_removes_stale_unconfirmed_options(self):
+        physical = self.shipment.physical_shipment_ids
+        option_a = self._create_transportation_option(
+            physical, 'to-old-aaaa-1234-abcd-5678-1234abcd5678',
+        )
+        option_b = self._create_transportation_option(
+            physical, 'to-old-bbbb-1234-abcd-5678-1234abcd5678',
+        )
+        option_b.action_select_transportation_option()
+        physical._sync_transportation_options([
+            self._transportation_option('to-old-aaaa-1234-abcd-5678-1234abcd5678'),
+        ])
+        self.assertTrue(option_a.exists())
+        self.assertFalse(option_b.exists())
+        self.assertFalse(physical.selected_transportation_option_id)
+
+        physical._sync_transportation_options([])
+        self.assertFalse(option_a.exists())
+        self.assertFalse(physical.transportation_option_ids)
+
+    def test_10f_regeneration_blocks_after_commitment_or_later_workflow(self):
+        cases = [
+            ('transportation_confirmation_status', 'pending', 'confirmation starts'),
+            ('transportation_confirmation_status', 'in_progress', 'confirmation starts'),
+            ('transportation_confirmation_status', 'success', 'confirmation starts'),
+            ('transportation_confirmation_operation_id', TRANSPORTATION_OPERATION_ID, 'already been submitted'),
+            ('delivery_window_generation_status', 'pending', 'Delivery-window generation'),
+            ('delivery_window_generation_status', 'in_progress', 'Delivery-window generation'),
+            ('delivery_window_confirmation_status', 'success', 'Delivery-window confirmation'),
+            ('tracking_status', 'success', 'Tracking has already started'),
+            ('labels_status', 'success', 'Shipping labels already exist'),
+            ('product_labels_confirmed', True, 'Product-label confirmation'),
+            ('dispatch_state', 'picking_created', 'Dispatch has already started'),
+        ]
+        physical = self.shipment.physical_shipment_ids
+        reset_values = {
+            'transportation_generation_status': 'success',
+            'transportation_generation_operation_id': False,
+            'transportation_confirmation_status': False,
+            'transportation_confirmation_operation_id': False,
+            'delivery_window_generation_status': False,
+            'delivery_window_generation_operation_id': False,
+            'delivery_window_confirmation_status': False,
+            'delivery_window_confirmation_operation_id': False,
+            'tracking_status': False,
+            'labels_status': False,
+            'shipping_label_attachment_id': False,
+            'product_labels_confirmed': False,
+            'dispatch_state': 'placement_confirmed',
+        }
+        for field_name, value, message in cases:
+            physical.write(reset_values)
+            physical.write({field_name: value})
+            with self.assertRaisesRegex(UserError, message):
+                physical.action_regenerate_transportation_options()
 
     def test_11_selection_is_one_option_and_does_not_confirm(self):
         physical = self.shipment.physical_shipment_ids
