@@ -437,7 +437,6 @@
                                                             type="object"
                                                             string="Regenerate Transportation Options"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"
-                                                            confirm="Regenerating transportation options will discard the current unconfirmed transportation selection and replace the existing options."
                                                             invisible="transportation_generation_status not in ('success', 'failed') or transportation_confirmation_status in ('pending', 'in_progress', 'success') or delivery_window_generation_status in ('pending', 'in_progress') or delivery_window_confirmation_status or picking_id"/>
                                                     <button name="action_refresh_transportation_options"
                                                             type="object"

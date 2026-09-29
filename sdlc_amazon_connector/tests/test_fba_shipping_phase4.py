@@ -1,12 +1,15 @@
 import base64
+import re
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import requests
+from lxml import etree
 
 from odoo import Command, fields
-from odoo.exceptions import UserError
-from odoo.tests import TransactionCase, tagged
+from odoo.exceptions import AccessError, UserError
+from odoo.tests import Form, TransactionCase, tagged
+from odoo.tools.safe_eval import safe_eval
 
 from ..models.amazon_api import AmazonAPI
 
@@ -491,7 +494,7 @@ class TestFbaShippingPhase4(TransactionCase):
             AmazonAPI, 'generate_transportation_options', autospec=True,
             return_value={'operationId': TRANSPORTATION_OPERATION_ID},
         ):
-            physical.action_generate_transportation_options()
+            physical._action_generate_transportation_options()
             job = self.shipment.operation_job_ids.filtered(
                 lambda item: item.operation_type == 'generate_transportation_options'
             )
@@ -534,12 +537,660 @@ class TestFbaShippingPhase4(TransactionCase):
             AmazonAPI, 'generate_transportation_options', autospec=True,
         ) as generate_mock:
             with self.assertRaisesRegex(UserError, 'Ready-to-Ship Date/Time'):
-                physical.action_generate_transportation_options()
+                physical._action_generate_transportation_options()
 
         self.assertFalse(generate_mock.called)
         self.assertFalse(self.shipment.operation_job_ids.filtered(
             lambda item: item.operation_type == 'generate_transportation_options'
         ))
+
+    # ------------------------------------------------------------------
+    # Ready-to-Ship gate for transportation generation
+    # ------------------------------------------------------------------
+    READY_TO_SHIP_REQUIRED = re.escape(
+        "Enter a Ready-to-Ship Date/Time before generating transportation options."
+    )
+
+    def _ready_to_ship_is_readonly(self, physical):
+        """Evaluate the physical shipment form's readonly modifier for ready_to_ship_at."""
+        view = self.env.ref('sdlc_amazon_connector.amazon_inbound_shipment_form')
+        arch = self.env['amazon.inbound.shipment'].get_view(view.id, 'form')['arch']
+        nodes = etree.fromstring(arch).xpath(
+            "//field[@name='physical_shipment_ids']//form//field[@name='ready_to_ship_at']"
+        )
+        self.assertEqual(len(nodes), 1)
+        expression = nodes[0].get('readonly')
+        self.assertTrue(expression, "ready_to_ship_at must keep its conditional readonly rule")
+        return bool(safe_eval(expression, {
+            'transportation_generation_status': physical.transportation_generation_status or False,
+            'transportation_confirmation_status': physical.transportation_confirmation_status or False,
+        }))
+
+    def _generation_jobs(self, states=None):
+        jobs = self.shipment.operation_job_ids.filtered(
+            lambda item: item.operation_type == 'generate_transportation_options'
+        )
+        if states:
+            jobs = jobs.filtered(lambda item: item.state in states)
+        return jobs
+
+    def test_09d_missing_ready_to_ship_blocks_generation_synchronously(self):
+        """TEST A: empty Ready-to-Ship -> UserError, no job, no status change, no Amazon call."""
+        physical = self.shipment.physical_shipment_ids
+        physical.ready_to_ship_at = False
+        self.assertFalse(self._ready_to_ship_is_readonly(physical))
+
+        with (
+            patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock,
+            patch.object(AmazonAPI, 'get_inbound_operation_status', autospec=True) as poll_mock,
+        ):
+            with self.assertRaisesRegex(UserError, self.READY_TO_SHIP_REQUIRED):
+                physical._action_generate_transportation_options()
+
+        self.assertFalse(generate_mock.called)
+        self.assertFalse(poll_mock.called)
+        self.assertFalse(self._generation_jobs())
+        self.assertFalse(physical.transportation_generation_status)
+        self.assertFalse(physical.transportation_generation_operation_id)
+        self.assertFalse(physical.transportation_error_code)
+        # The operator can still enter the value and generate normally.
+        self.assertFalse(self._ready_to_ship_is_readonly(physical))
+        physical.ready_to_ship_at = fields.Datetime.now() + timedelta(hours=2)
+        physical._action_generate_transportation_options()
+        self.assertEqual(physical.transportation_generation_status, 'pending')
+        self.assertEqual(len(self._generation_jobs(('pending',))), 1)
+
+    def test_09d2_missing_ready_to_ship_on_sibling_blocks_plan_generation(self):
+        first = self.shipment.physical_shipment_ids
+        second = self.env['amazon.fba.physical.shipment'].sudo().create({
+            'inbound_shipment_id': self.shipment.id,
+            'placement_option_id': first.placement_option_id.id,
+            'amazon_shipment_id': SHIPMENT_ID_2,
+            'shipment_confirmation_id': 'FBA5678EFGH',
+            'status': 'WORKING',
+            'destination_fc': 'CAI2',
+            'line_ids': [Command.create({
+                'amazon_product_id': self.amazon_product.id,
+                'msku': self.amazon_product.sku,
+                'quantity': 4,
+            })],
+        })
+        with patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock:
+            with self.assertRaisesRegex(UserError, SHIPMENT_ID_2):
+                first._action_generate_transportation_options()
+        self.assertFalse(generate_mock.called)
+        self.assertFalse(self._generation_jobs())
+        self.assertFalse(first.transportation_generation_status)
+        self.assertFalse(second.transportation_generation_status)
+
+    def test_09d3_missing_ready_to_ship_blocks_regeneration_without_side_effects(self):
+        physical = self.shipment.physical_shipment_ids
+        option = self._create_transportation_option(physical)
+        physical.write({
+            'ready_to_ship_at': False,
+            'transportation_generation_status': 'failed',
+            'transportation_error_code': 'BACKGROUND_JOB_FAILED',
+            'transportation_error_message': 'Previous failure.',
+        })
+        with patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock:
+            with self.assertRaisesRegex(UserError, self.READY_TO_SHIP_REQUIRED):
+                physical._action_regenerate_transportation_options()
+        self.assertFalse(generate_mock.called)
+        self.assertFalse(self._generation_jobs())
+        self.assertEqual(physical.transportation_generation_status, 'failed')
+        self.assertEqual(physical.transportation_error_code, 'BACKGROUND_JOB_FAILED')
+        self.assertTrue(option.exists())
+        self.assertFalse(self._ready_to_ship_is_readonly(physical))
+
+    def test_09e_generation_with_ready_to_ship_follows_normal_flow(self):
+        """TEST B: valid Ready-to-Ship -> queued -> in_progress -> success."""
+        physical = self.shipment.physical_shipment_ids
+        with patch.object(
+            AmazonAPI, 'generate_transportation_options', autospec=True,
+            return_value={'operationId': TRANSPORTATION_OPERATION_ID},
+        ) as generate_mock:
+            physical._action_generate_transportation_options()
+            # Queuing never calls Amazon synchronously.
+            self.assertFalse(generate_mock.called)
+            self.assertEqual(physical.transportation_generation_status, 'pending')
+            self.assertTrue(self._ready_to_ship_is_readonly(physical))
+            job = self._generation_jobs(('pending',))
+            self.assertEqual(len(job), 1)
+            job._process_operation()
+        self.assertEqual(generate_mock.call_count, 1)
+        self.assertEqual(physical.transportation_generation_status, 'in_progress')
+        self.assertEqual(physical.transportation_generation_operation_id, TRANSPORTATION_OPERATION_ID)
+        self.assertTrue(self._ready_to_ship_is_readonly(physical))
+
+        with (
+            patch.object(
+                AmazonAPI, 'get_inbound_operation_status', autospec=True,
+                return_value={'operationStatus': 'SUCCESS', 'operationProblems': []},
+            ),
+            patch.object(
+                AmazonAPI, 'list_transportation_options', autospec=True,
+                return_value={'transportationOptions': [self._transportation_option()]},
+            ),
+        ):
+            job._process_operation()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(physical.transportation_generation_status, 'success')
+        self.assertEqual(len(physical.transportation_option_ids), 1)
+        self.assertTrue(self._ready_to_ship_is_readonly(physical))
+
+    def test_09f_prewrite_job_failure_is_recoverable_and_not_ambiguous(self):
+        """TEST C: a generation that failed before reaching Amazon can be corrected and retried."""
+        physical = self.shipment.physical_shipment_ids
+        for label, stale_value in (
+            ('missing', False),
+            ('lead time elapsed', fields.Datetime.now() + timedelta(minutes=1)),
+        ):
+            with self.subTest(label):
+                physical.write({
+                    'ready_to_ship_at': fields.Datetime.now() + timedelta(hours=1),
+                    'transportation_generation_operation_id': False,
+                    'transportation_generation_status': False,
+                    'transportation_error_code': False,
+                    'transportation_error_message': False,
+                })
+                self._generation_jobs().unlink()
+                physical._action_generate_transportation_options()
+                job = self._generation_jobs(('pending',))
+                self.assertEqual(len(job), 1)
+                # The value became invalid before the worker ran (e.g. the lead
+                # time elapsed while the job waited in the queue).
+                physical.ready_to_ship_at = stale_value
+
+                with patch.object(
+                    AmazonAPI, 'generate_transportation_options', autospec=True,
+                ) as generate_mock:
+                    job._process_operation()
+                    job._process_operation()
+                self.assertFalse(generate_mock.called)
+                self.assertEqual(job.state, 'failed')
+                self.assertFalse(job.operation_id)
+                self.assertEqual(physical.transportation_generation_status, 'failed')
+                self.assertEqual(physical.transportation_error_code, 'PRE_WRITE_FAILED')
+                self.assertIn('Ready-to-Ship Date/Time', physical.transportation_error_message)
+                self.assertFalse(physical.transportation_generation_operation_id)
+                # Field is editable again and retry is offered through Regenerate.
+                self.assertFalse(self._ready_to_ship_is_readonly(physical))
+                with self.assertRaisesRegex(UserError, 'Use Regenerate'):
+                    physical._action_generate_transportation_options()
+
+                corrected = fields.Datetime.from_string('2030-02-01 10:30:00')
+                physical.ready_to_ship_at = corrected
+                physical._action_regenerate_transportation_options()
+                self.assertEqual(physical.transportation_generation_status, 'pending')
+                self.assertFalse(physical.transportation_error_code)
+                retry = self._generation_jobs(('pending', 'in_progress'))
+                self.assertEqual(len(retry), 1)
+                # Duplicate retry requests are still refused.
+                with self.assertRaisesRegex(UserError, 'already queued or in progress'):
+                    physical._action_regenerate_transportation_options()
+                with patch.object(
+                    AmazonAPI, 'generate_transportation_options', autospec=True,
+                    return_value={'operationId': TRANSPORTATION_OPERATION_ID},
+                ) as retry_mock:
+                    retry._process_operation()
+                self.assertEqual(retry_mock.call_count, 1)
+                body = retry_mock.call_args.args[-1]
+                self.assertEqual(
+                    body['shipmentTransportationConfigurations'][0]['readyToShipWindow']['start'],
+                    '2030-02-01T10:30:00Z',
+                )
+                self.assertEqual(physical.transportation_generation_status, 'in_progress')
+                self.assertEqual(
+                    physical.transportation_generation_operation_id, TRANSPORTATION_OPERATION_ID,
+                )
+
+    def test_09f2_ambiguous_amazon_write_still_blocks_retry(self):
+        """A failure raised by the Amazon write itself keeps the no-replay protection."""
+        physical = self.shipment.physical_shipment_ids
+        physical._action_generate_transportation_options()
+        job = self._generation_jobs(('pending',))
+        with patch.object(
+            AmazonAPI, 'generate_transportation_options', autospec=True,
+            side_effect=UserError('request timed out after submission'),
+        ) as generate_mock:
+            job._process_operation()
+        self.assertEqual(generate_mock.call_count, 1)
+        self.assertEqual(physical.transportation_error_code, 'WRITE_OUTCOME_UNKNOWN')
+        with self.assertRaisesRegex(UserError, 'unknown Amazon outcome'):
+            physical._action_regenerate_transportation_options()
+
+    def test_09g_ready_to_ship_locked_while_generation_active_or_succeeded(self):
+        """TEST D: the field is locked once generation legitimately started or succeeded."""
+        physical = self.shipment.physical_shipment_ids
+        for generation, confirmation, locked in (
+            (False, False, False),
+            ('failed', False, False),
+            ('pending', False, True),
+            ('in_progress', False, True),
+            ('success', False, True),
+            ('success', 'pending', True),
+            ('success', 'in_progress', True),
+            ('success', 'success', True),
+        ):
+            with self.subTest(generation=generation, confirmation=confirmation):
+                physical.write({
+                    'transportation_generation_status': generation,
+                    'transportation_confirmation_status': confirmation,
+                })
+                self.assertEqual(self._ready_to_ship_is_readonly(physical), locked)
+
+        # Server side: no new generation may start while one is active, so the
+        # Ready-to-Ship value used by the queued request cannot be superseded.
+        physical.write({'transportation_confirmation_status': False})
+        original = physical.ready_to_ship_at
+        for status in ('pending', 'in_progress'):
+            with self.subTest(status=status):
+                physical.write({'transportation_generation_status': status})
+                with patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock:
+                    with self.assertRaises(UserError):
+                        physical.action_generate_transportation_options()
+                    with self.assertRaisesRegex(UserError, 'already queued or in progress'):
+                        physical.action_regenerate_transportation_options()
+                self.assertFalse(generate_mock.called)
+                self.assertFalse(self._generation_jobs())
+                self.assertEqual(physical.transportation_generation_status, status)
+                self.assertEqual(physical.ready_to_ship_at, original)
+
+    # ------------------------------------------------------------------
+    # Ready-to-Ship wizard (UI entry point for Generate / Regenerate)
+    # ------------------------------------------------------------------
+    WIZARD_MODEL = 'amazon.fba.transportation.ready.to.ship.wizard'
+
+    def _assert_wizard_action(self, action, physical, operation_type):
+        self.assertEqual(action['type'], 'ir.actions.act_window')
+        self.assertEqual(action['res_model'], self.WIZARD_MODEL)
+        self.assertEqual(action['target'], 'new')
+        self.assertEqual(action['context']['default_physical_shipment_id'], physical.id)
+        self.assertEqual(action['context']['default_operation_type'], operation_type)
+
+    def _wizard_from_action(self, action, **vals):
+        """Create the wizard the way the web client does (context defaults)."""
+        return self.env[self.WIZARD_MODEL].with_context(**action['context']).create(vals)
+
+    def _add_second_physical(self, ready_to_ship_at=False):
+        first = self.shipment.physical_shipment_ids
+        return self.env['amazon.fba.physical.shipment'].sudo().create({
+            'inbound_shipment_id': self.shipment.id,
+            'placement_option_id': first.placement_option_id.id,
+            'amazon_shipment_id': SHIPMENT_ID_2,
+            'shipment_confirmation_id': 'FBA5678EFGH',
+            'status': 'WORKING',
+            'destination_fc': 'CAI2',
+            'ready_to_ship_at': ready_to_ship_at,
+            'line_ids': [Command.create({
+                'amazon_product_id': self.amazon_product.id,
+                'msku': self.amazon_product.sku,
+                'quantity': 4,
+            })],
+        })
+
+    def test_20_generate_button_opens_ready_to_ship_wizard(self):
+        """TEST 1: Generate opens the wizard; nothing is queued or sent yet."""
+        physical = self.shipment.physical_shipment_ids
+        physical.ready_to_ship_at = False
+        with patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock:
+            action = physical.action_generate_transportation_options()
+        self._assert_wizard_action(action, physical, 'generate')
+        self.assertFalse(generate_mock.called)
+        self.assertFalse(self._generation_jobs())
+        self.assertFalse(physical.transportation_generation_status)
+        self.assertFalse(physical.transportation_generation_operation_id)
+        wizard = self._wizard_from_action(action)
+        self.assertEqual(wizard.physical_shipment_id, physical)
+        self.assertEqual(wizard.shipment_count, 1)
+        self.assertFalse(wizard.ready_to_ship_at)
+
+    def test_21_wizard_requires_ready_to_ship(self):
+        """TEST 2: confirming without a value fails without side effects."""
+        physical = self.shipment.physical_shipment_ids
+        physical.ready_to_ship_at = False
+        action = physical.action_generate_transportation_options()
+        # Client side: the field is required in the wizard form.
+        form = Form(self.env[self.WIZARD_MODEL].with_context(**action['context']))
+        with self.assertRaises(AssertionError):
+            form.save()
+        # Server side: the existing validation still blocks the confirmation.
+        wizard = self._wizard_from_action(action)
+        with patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock:
+            with self.assertRaisesRegex(UserError, self.READY_TO_SHIP_REQUIRED):
+                wizard.action_confirm()
+        self.assertFalse(generate_mock.called)
+        self.assertFalse(self._generation_jobs())
+        self.assertFalse(physical.transportation_generation_status)
+        self.assertFalse(physical.ready_to_ship_at)
+
+    def test_22_wizard_rejects_past_or_too_close_ready_to_ship(self):
+        """TEST 3: the existing lead-time rule is enforced before anything is saved."""
+        physical = self.shipment.physical_shipment_ids
+        physical.ready_to_ship_at = False
+        action = physical.action_generate_transportation_options()
+        for value in (
+            fields.Datetime.now() - timedelta(hours=1),
+            fields.Datetime.now() + timedelta(minutes=5),
+        ):
+            with self.subTest(value=value):
+                wizard = self._wizard_from_action(action, ready_to_ship_at=value)
+                with patch.object(
+                    AmazonAPI, 'generate_transportation_options', autospec=True,
+                ) as generate_mock:
+                    with self.assertRaisesRegex(UserError, 'at least 15 minutes in the future'):
+                        wizard.action_confirm()
+                self.assertFalse(generate_mock.called)
+                self.assertFalse(self._generation_jobs())
+                self.assertFalse(physical.transportation_generation_status)
+                self.assertFalse(physical.ready_to_ship_at)
+
+    def test_23_wizard_generate_saves_value_and_runs_existing_flow(self):
+        """TEST 4: valid value -> saved -> pending -> in_progress -> success."""
+        physical = self.shipment.physical_shipment_ids
+        physical.ready_to_ship_at = False
+        entered = fields.Datetime.from_string('2030-03-01 09:45:30')
+        action = physical.action_generate_transportation_options()
+        form = Form(self.env[self.WIZARD_MODEL].with_context(**action['context']))
+        form.ready_to_ship_at = entered
+        wizard = form.save()
+        with patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock:
+            result = wizard.action_confirm()
+        self.assertFalse(generate_mock.called, "Confirmation only queues; Amazon is called by the job")
+        self.assertEqual(result['tag'], 'display_notification')
+        self.assertEqual(result['params']['next'], {'type': 'ir.actions.act_window_close'})
+        self.assertEqual(physical.ready_to_ship_at, entered)
+        self.assertEqual(physical.transportation_generation_status, 'pending')
+        job = self._generation_jobs(('pending',))
+        self.assertEqual(len(job), 1)
+
+        with patch.object(
+            AmazonAPI, 'generate_transportation_options', autospec=True,
+            return_value={'operationId': TRANSPORTATION_OPERATION_ID},
+        ) as generate_mock:
+            job._process_operation()
+        self.assertEqual(generate_mock.call_count, 1)
+        body = generate_mock.call_args.args[-1]
+        self.assertEqual(
+            body['shipmentTransportationConfigurations'][0]['readyToShipWindow']['start'],
+            '2030-03-01T09:45:00Z',
+        )
+        self.assertEqual(physical.transportation_generation_status, 'in_progress')
+
+        with (
+            patch.object(
+                AmazonAPI, 'get_inbound_operation_status', autospec=True,
+                return_value={'operationStatus': 'SUCCESS', 'operationProblems': []},
+            ),
+            patch.object(
+                AmazonAPI, 'list_transportation_options', autospec=True,
+                return_value={'transportationOptions': [self._transportation_option()]},
+            ),
+        ):
+            job._process_operation()
+        self.assertEqual(physical.transportation_generation_status, 'success')
+        self.assertEqual(len(physical.transportation_option_ids), 1)
+        self.assertTrue(self._ready_to_ship_is_readonly(physical))
+
+    def test_24_wizard_regenerate_prefills_and_sends_new_value(self):
+        """TEST 5: Regenerate pre-fills the current value; the changed value is sent."""
+        physical = self.shipment.physical_shipment_ids
+        previous = fields.Datetime.from_string('2030-01-01 08:00:00')
+        option = self._create_transportation_option(physical)
+        physical.write({
+            'ready_to_ship_at': previous,
+            'transportation_generation_status': 'failed',
+            'transportation_error_code': 'BACKGROUND_JOB_FAILED',
+            'transportation_error_message': 'Previous failure.',
+        })
+        with patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock:
+            action = physical.action_regenerate_transportation_options()
+        self._assert_wizard_action(action, physical, 'regenerate')
+        self.assertFalse(generate_mock.called)
+        self.assertEqual(physical.transportation_generation_status, 'failed')
+        self.assertTrue(option.exists(), "Opening the wizard must not discard options")
+
+        form = Form(self.env[self.WIZARD_MODEL].with_context(**action['context']))
+        self.assertEqual(form.ready_to_ship_at, previous)
+        changed = fields.Datetime.from_string('2030-01-05 14:20:00')
+        form.ready_to_ship_at = changed
+        form.save().action_confirm()
+
+        self.assertEqual(physical.ready_to_ship_at, changed)
+        self.assertEqual(physical.transportation_generation_status, 'pending')
+        self.assertFalse(physical.transportation_error_code)
+        self.assertFalse(option.exists())
+        job = self._generation_jobs(('pending',))
+        self.assertEqual(len(job), 1)
+        with patch.object(
+            AmazonAPI, 'generate_transportation_options', autospec=True,
+            return_value={'operationId': TRANSPORTATION_OPERATION_ID},
+        ) as generate_mock:
+            job._process_operation()
+        self.assertEqual(
+            generate_mock.call_args.args[-1]['shipmentTransportationConfigurations'][0]
+            ['readyToShipWindow']['start'],
+            '2030-01-05T14:20:00Z',
+        )
+
+    def test_25_wizard_confirmation_runs_internal_logic_without_recursion(self):
+        """TEST 6: confirmation calls the internal methods, never the wizard-opening buttons."""
+        physical = self.shipment.physical_shipment_ids
+        Physical = type(physical)
+        for operation_type, internal_name in (
+            ('generate', '_action_generate_transportation_options'),
+            ('regenerate', '_action_regenerate_transportation_options'),
+        ):
+            with self.subTest(operation_type=operation_type):
+                self._generation_jobs().unlink()
+                physical.write({
+                    'transportation_generation_status': (
+                        'failed' if operation_type == 'regenerate' else False
+                    ),
+                    'transportation_generation_operation_id': False,
+                    'transportation_error_code': False,
+                })
+                action = (
+                    physical.action_regenerate_transportation_options()
+                    if operation_type == 'regenerate'
+                    else physical.action_generate_transportation_options()
+                )
+                wizard = self._wizard_from_action(
+                    action, ready_to_ship_at=fields.Datetime.now() + timedelta(hours=3),
+                )
+                original = getattr(Physical, internal_name)
+                with (
+                    patch.object(
+                        Physical, 'action_generate_transportation_options',
+                        side_effect=AssertionError('wizard re-opened'),
+                    ),
+                    patch.object(
+                        Physical, 'action_regenerate_transportation_options',
+                        side_effect=AssertionError('wizard re-opened'),
+                    ),
+                    patch.object(
+                        Physical, internal_name, autospec=True, side_effect=original,
+                    ) as internal_mock,
+                    patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock,
+                ):
+                    result = wizard.action_confirm()
+                self.assertEqual(internal_mock.call_count, 1)
+                self.assertFalse(generate_mock.called)
+                self.assertEqual(result['type'], 'ir.actions.client')
+                self.assertNotEqual(result.get('res_model'), self.WIZARD_MODEL)
+                self.assertEqual(physical.transportation_generation_status, 'pending')
+                self.assertEqual(len(self._generation_jobs(('pending',))), 1)
+
+    def test_26_wizard_keeps_existing_duplicate_generation_protection(self):
+        """TEST 7: pending / in_progress / success generation cannot be started again."""
+        physical = self.shipment.physical_shipment_ids
+        original = physical.ready_to_ship_at
+        stale_action = physical.action_generate_transportation_options()
+        for status in ('pending', 'in_progress', 'success'):
+            with self.subTest(status=status):
+                physical.write({'transportation_generation_status': status})
+                with patch.object(
+                    AmazonAPI, 'generate_transportation_options', autospec=True,
+                ) as generate_mock:
+                    with self.assertRaisesRegex(UserError, 'already generated'):
+                        physical.action_generate_transportation_options()
+                    # A wizard opened before another operator queued the
+                    # generation cannot bypass the protection either.
+                    wizard = self._wizard_from_action(
+                        stale_action, ready_to_ship_at=fields.Datetime.now() + timedelta(days=2),
+                    )
+                    with self.assertRaisesRegex(UserError, 'already generated'):
+                        wizard.action_confirm()
+                    if status in ('pending', 'in_progress'):
+                        with self.assertRaisesRegex(UserError, 'already queued or in progress'):
+                            physical.action_regenerate_transportation_options()
+                self.assertFalse(generate_mock.called)
+                self.assertFalse(self._generation_jobs())
+                self.assertEqual(physical.transportation_generation_status, status)
+                self.assertEqual(physical.ready_to_ship_at, original)
+
+    def test_27_wizard_handles_every_accepted_physical_shipment(self):
+        """TEST 8: plan-level generation collects one Ready-to-Ship value per shipment."""
+        first = self.shipment.physical_shipment_ids
+        first_original = first.ready_to_ship_at
+        second = self._add_second_physical()
+        action = first.action_generate_transportation_options()
+        wizard = self._wizard_from_action(action)
+        self.assertEqual(wizard.shipment_count, 2)
+        self.assertEqual(
+            set(wizard.line_ids.mapped('amazon_shipment_id')), {SHIPMENT_ID, SHIPMENT_ID_2},
+        )
+        line_2 = wizard.line_ids.filtered(lambda line: line.physical_shipment_id == second)
+        self.assertEqual(line_2.shipment_confirmation_id, 'FBA5678EFGH')
+        self.assertEqual(line_2.destination_fc, 'CAI2')
+        self.assertFalse(line_2.ready_to_ship_at)
+
+        # Missing value on one shipment blocks everything; nothing is written.
+        line_1 = wizard.line_ids.filtered(lambda line: line.physical_shipment_id == first)
+        line_1.ready_to_ship_at = fields.Datetime.from_string('2030-04-01 07:00:00')
+        with patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock:
+            with self.assertRaisesRegex(UserError, SHIPMENT_ID_2):
+                wizard.action_confirm()
+            # Too-close value on one shipment is also reported per shipment.
+            line_2.ready_to_ship_at = fields.Datetime.now() + timedelta(minutes=5)
+            with self.assertRaisesRegex(UserError, '%s.*at least 15 minutes' % SHIPMENT_ID_2):
+                wizard.action_confirm()
+        self.assertFalse(generate_mock.called)
+        self.assertFalse(self._generation_jobs())
+        self.assertEqual(first.ready_to_ship_at, first_original)
+        self.assertFalse(second.ready_to_ship_at)
+        self.assertFalse(first.transportation_generation_status)
+        self.assertFalse(second.transportation_generation_status)
+
+        # Both values filled through the wizard form -> each reaches Amazon.
+        form = Form(self.env[self.WIZARD_MODEL].with_context(**action['context']))
+        values = {
+            SHIPMENT_ID: fields.Datetime.from_string('2030-04-01 07:00:00'),
+            SHIPMENT_ID_2: fields.Datetime.from_string('2030-04-02 16:30:00'),
+        }
+        for index in range(len(form.line_ids)):
+            with form.line_ids.edit(index) as line:
+                line.ready_to_ship_at = values[line.amazon_shipment_id]
+        form.save().action_confirm()
+        self.assertEqual(first.ready_to_ship_at, values[SHIPMENT_ID])
+        self.assertEqual(second.ready_to_ship_at, values[SHIPMENT_ID_2])
+        self.assertEqual(first.transportation_generation_status, 'pending')
+        self.assertEqual(second.transportation_generation_status, 'pending')
+        job = self._generation_jobs(('pending',))
+        self.assertEqual(len(job), 1)
+        with patch.object(
+            AmazonAPI, 'generate_transportation_options', autospec=True,
+            return_value={'operationId': TRANSPORTATION_OPERATION_ID},
+        ) as generate_mock:
+            job._process_operation()
+        self.assertEqual(generate_mock.call_count, 1)
+        sent = {
+            config['shipmentId']: config['readyToShipWindow']['start']
+            for config in generate_mock.call_args.args[-1]['shipmentTransportationConfigurations']
+        }
+        self.assertEqual(sent, {
+            SHIPMENT_ID: '2030-04-01T07:00:00Z',
+            SHIPMENT_ID_2: '2030-04-02T16:30:00Z',
+        })
+
+    def test_28_wizard_is_restricted_to_amazon_managers(self):
+        model = self.env['ir.model']._get(self.WIZARD_MODEL)
+        groups = self.env['ir.model.access'].search([('model_id', '=', model.id)]).group_id
+        self.assertEqual(groups, self.env.ref('sdlc_amazon_connector.group_amazon_manager'))
+
+    def test_29_wizard_models_are_registered_with_manager_access(self):
+        """Regression: the wizard models must be loaded from this module, reflected
+        in ir.model with their generated external ids, and reachable by Amazon
+        managers only (the error seen when the database was not upgraded was
+        "No group currently allows this operation")."""
+        line_model = self.WIZARD_MODEL + '.line'
+        manager_group = self.env.ref('sdlc_amazon_connector.group_amazon_manager')
+        for model_name, xmlid in (
+            (self.WIZARD_MODEL, 'sdlc_amazon_connector.model_amazon_fba_transportation_ready_to_ship_wizard'),
+            (line_model, 'sdlc_amazon_connector.model_amazon_fba_transportation_ready_to_ship_wizard_line'),
+        ):
+            with self.subTest(model=model_name):
+                # Python class loaded through sdlc_amazon_connector/wizard/__init__.py
+                self.assertIn(model_name, self.env.registry)
+                Model = self.env[model_name]
+                self.assertTrue(Model._transient)
+                self.assertEqual(Model._module, 'sdlc_amazon_connector')
+                self.assertIn(
+                    'odoo.addons.sdlc_amazon_connector.wizard.transportation_ready_to_ship_wizard',
+                    [cls.__module__ for cls in type(Model).__mro__],
+                )
+                # Reflected in the database with the generated external id.
+                ir_model = self.env['ir.model']._get(model_name)
+                self.assertTrue(ir_model, "%s is missing from ir.model" % model_name)
+                self.assertEqual(self.env.ref(xmlid), ir_model)
+                # Access rights resolve to the Amazon manager group only.
+                accesses = self.env['ir.model.access'].search([('model_id', '=', ir_model.id)])
+                self.assertEqual(accesses.group_id, manager_group)
+                self.assertTrue(all(
+                    access.perm_read and access.perm_write and access.perm_create and access.perm_unlink
+                    for access in accesses
+                ))
+                self.assertFalse(accesses.filtered(lambda access: not access.group_id))
+
+        # Relational fields point at the exact model names.
+        wizard_fields = self.env[self.WIZARD_MODEL]._fields
+        self.assertEqual(wizard_fields['line_ids'].comodel_name, line_model)
+        self.assertEqual(wizard_fields['physical_shipment_id'].comodel_name, 'amazon.fba.physical.shipment')
+        self.assertEqual(self.env[line_model]._fields['wizard_id'].comodel_name, self.WIZARD_MODEL)
+
+        # Real users: a manager can open and fill the wizard, an Amazon user cannot.
+        Users = self.env['res.users'].with_context(no_reset_password=True)
+        companies = [Command.set((self.company | self.env.company).ids)]
+        manager = Users.create({
+            'name': 'Wizard Manager', 'login': 'rts_wizard_manager',
+            'company_id': self.company.id, 'company_ids': companies,
+            'group_ids': [Command.set([self.env.ref('base.group_user').id, manager_group.id])],
+        })
+        amazon_user = Users.create({
+            'name': 'Wizard Amazon User', 'login': 'rts_wizard_user',
+            'company_id': self.company.id, 'company_ids': companies,
+            'group_ids': [Command.set([
+                self.env.ref('base.group_user').id,
+                self.env.ref('sdlc_amazon_connector.group_amazon_user').id,
+            ])],
+        })
+        physical = self.shipment.physical_shipment_ids
+        physical_as_manager = physical.with_user(manager).with_company(self.company)
+        with patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock:
+            action = physical_as_manager.action_generate_transportation_options()
+            wizard = self.env[self.WIZARD_MODEL].with_user(manager).with_company(self.company) \
+                .with_context(**action['context']).create({})
+            self.assertEqual(wizard.physical_shipment_id, physical)
+            self.assertEqual(wizard.read(['ready_to_ship_at'])[0]['ready_to_ship_at'], physical.ready_to_ship_at)
+        self.assertFalse(generate_mock.called)
+        self.assertFalse(self._generation_jobs())
+
+        with self.assertRaises(AccessError):
+            physical.with_user(amazon_user).with_company(self.company).action_generate_transportation_options()
+        with self.assertRaises(AccessError):
+            self.env[self.WIZARD_MODEL].with_user(amazon_user).with_company(self.company).create({
+                'physical_shipment_id': physical.id,
+            })
 
     def test_10_generate_and_list_transportation_options_are_idempotent(self):
         physical = self.shipment.physical_shipment_ids
@@ -553,7 +1204,7 @@ class TestFbaShippingPhase4(TransactionCase):
                 },
             ) as generate_mock,
         ):
-            physical.action_generate_transportation_options()
+            physical._action_generate_transportation_options()
             job = physical.inbound_shipment_id.operation_job_ids.filtered(
                 lambda item: item.operation_type == 'generate_transportation_options'
             )
@@ -599,7 +1250,7 @@ class TestFbaShippingPhase4(TransactionCase):
             'transportation_generation_operation_id': TRANSPORTATION_OPERATION_ID,
         })
         with self.assertRaisesRegex(UserError, 'already generated'):
-            physical.action_generate_transportation_options()
+            physical._action_generate_transportation_options()
 
     def test_10b_regeneration_replaces_unconfirmed_options_and_uses_updated_ready_time(self):
         physical = self.shipment.physical_shipment_ids
@@ -647,7 +1298,7 @@ class TestFbaShippingPhase4(TransactionCase):
         before_sales = self.env['sale.order'].search_count([])
         before_accounting = self.env['account.move'].search_count([])
         with patch.object(AmazonAPI, 'generate_transportation_options', autospec=True) as generate_mock:
-            physical.action_regenerate_transportation_options()
+            physical._action_regenerate_transportation_options()
 
         self.assertFalse(generate_mock.called)
         self.assertFalse(old_a.exists())
@@ -715,7 +1366,7 @@ class TestFbaShippingPhase4(TransactionCase):
             'transportation_error_code': 'BACKGROUND_JOB_FAILED',
             'transportation_error_message': 'Previous synchronous rejection.',
         })
-        physical.action_regenerate_transportation_options()
+        physical._action_regenerate_transportation_options()
         self.assertEqual(physical.transportation_generation_status, 'pending')
         self.assertFalse(physical.transportation_error_code)
         self.assertEqual(len(self.shipment.operation_job_ids.filtered(
@@ -726,9 +1377,9 @@ class TestFbaShippingPhase4(TransactionCase):
     def test_10d_regeneration_duplicate_job_is_blocked(self):
         physical = self.shipment.physical_shipment_ids
         physical.write({'transportation_generation_status': 'success'})
-        physical.action_regenerate_transportation_options()
+        physical._action_regenerate_transportation_options()
         with self.assertRaisesRegex(UserError, 'already queued or in progress'):
-            physical.action_regenerate_transportation_options()
+            physical._action_regenerate_transportation_options()
         self.assertEqual(len(self.shipment.operation_job_ids.filtered(
             lambda item: item.operation_type == 'generate_transportation_options'
             and item.state in ('pending', 'in_progress')
@@ -788,7 +1439,7 @@ class TestFbaShippingPhase4(TransactionCase):
             physical.write(reset_values)
             physical.write({field_name: value})
             with self.assertRaisesRegex(UserError, message):
-                physical.action_regenerate_transportation_options()
+                physical._action_regenerate_transportation_options()
 
     def test_11_selection_is_one_option_and_does_not_confirm(self):
         physical = self.shipment.physical_shipment_ids
@@ -1093,14 +1744,14 @@ class TestFbaShippingPhase4(TransactionCase):
             AmazonAPI, 'generate_transportation_options', autospec=True,
             side_effect=UserError('request timed out after submission'),
         ) as generate_mock:
-            physical.action_generate_transportation_options()
+            physical._action_generate_transportation_options()
             job = self.shipment.operation_job_ids.filtered(
                 lambda item: item.operation_type == 'generate_transportation_options'
             )
             job._process_operation()
             job._process_operation()
             with self.assertRaisesRegex(UserError, 'unknown Amazon outcome'):
-                physical.action_generate_transportation_options()
+                physical._action_generate_transportation_options()
         self.assertEqual(generate_mock.call_count, 1)
         self.assertEqual(job.state, 'failed')
         self.assertEqual(physical.transportation_error_code, 'WRITE_OUTCOME_UNKNOWN')
@@ -1115,7 +1766,7 @@ class TestFbaShippingPhase4(TransactionCase):
                     'transportation_error_code': False,
                     'transportation_error_message': False,
                 })
-                physical.action_generate_transportation_options()
+                physical._action_generate_transportation_options()
                 job = self.shipment.operation_job_ids.filtered(
                     lambda item: item.operation_type == 'generate_transportation_options'
                     and item.state in ('pending', 'in_progress')

@@ -19,6 +19,10 @@ AMAZON_SHIPMENT_ID_RE = INBOUND_PLAN_ID_RE
 AMAZON_FREIGHT_BILL_RE = re.compile(r'^[A-Za-z0-9._ -]{1,64}$')
 MAX_SHIPPING_LABEL_BYTES = 25 * 1024 * 1024
 READY_TO_SHIP_MIN_LEAD_MINUTES = 15
+# Error code recorded when a transportation write job fails before any Amazon
+# request was sent (local validation, missing token, ...). The Amazon outcome is
+# known (nothing was submitted), so the operator may correct data and retry.
+TRANSPORTATION_PRE_WRITE_ERROR_CODE = 'PRE_WRITE_FAILED'
 PHASE4_STATES = {
     'placement_confirmed', 'picking_created', 'ready_to_ship', 'dispatched',
     'shipment_confirmed', 'waiting_receiving', 'partially_received',
@@ -573,6 +577,13 @@ class AmazonInboundShipmentShipping(models.Model):
         return super().action_check_status()
 
 
+class TransportationPreWriteError(UserError):
+    """A transportation write job failed before the Amazon request was sent.
+
+    Never classify this as WRITE_OUTCOME_UNKNOWN: Amazon was not called.
+    """
+
+
 class AmazonFbaPhysicalShipmentDispatch(models.Model):
     _inherit = 'amazon.fba.physical.shipment'
 
@@ -850,24 +861,77 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
 
     def _prepare_ready_to_ship_window(self):
         self.ensure_one()
-        start = self.ready_to_ship_at
-        if not start:
+        start = self._validate_ready_to_ship_value(self.ready_to_ship_at)
+        # Amazon Fulfillment Inbound v2024-03-20 WindowInput.start accepts ISO 8601
+        # date-time values and removes non-zero second/millisecond components.
+        start = start.replace(second=0, microsecond=0)
+        return {'start': start.isoformat() + 'Z'}
+
+    @api.model
+    def _validate_ready_to_ship_value(self, value):
+        """Single definition of the Ready-to-Ship rule (set + minimum lead time).
+
+        Used by the synchronous button/wizard gate and by the payload builder
+        that runs again inside the background job, so a value that expired
+        while the job was queued is still caught before Amazon is called.
+        Returns the value as a datetime.
+        """
+        if not value:
             raise UserError(_(
                 "Enter a Ready-to-Ship Date/Time before generating transportation options."
             ))
-        if isinstance(start, str):
-            start = fields.Datetime.from_string(start)
+        if isinstance(value, str):
+            value = fields.Datetime.from_string(value)
         minimum = fields.Datetime.now() + timedelta(minutes=READY_TO_SHIP_MIN_LEAD_MINUTES)
-        if start < minimum:
+        if value < minimum:
             raise UserError(_(
                 "Ready-to-Ship Date/Time must be at least %(minutes)s minutes in the future. "
                 "Review the shipment's Ready-to-Ship value before generating transportation options.",
                 minutes=READY_TO_SHIP_MIN_LEAD_MINUTES,
             ))
-        # Amazon Fulfillment Inbound v2024-03-20 WindowInput.start accepts ISO 8601
-        # date-time values and removes non-zero second/millisecond components.
-        start = start.replace(second=0, microsecond=0)
-        return {'start': start.isoformat() + 'Z'}
+        return value
+
+    def _check_ready_to_ship_for_transportation_generation(self, values=None):
+        """Synchronous gate for (re)generating transportation options.
+
+        Called on the accepted plan physicals before any operation job is
+        created, before transportation_generation_status/operation ids are
+        written and before any Amazon request, so an invalid Ready-to-Ship value
+        leaves the records untouched and editable.
+
+        ``values`` optionally maps physical shipment ids to candidate
+        Ready-to-Ship values (used by the Ready-to-Ship wizard to validate the
+        operator's input before anything is written).
+        """
+        if not self:
+            raise UserError(_("No accepted Amazon physical shipments are available for transportation."))
+        values = values or {}
+
+        def candidate(physical):
+            return values[physical.id] if physical.id in values else physical.ready_to_ship_at
+
+        def label(physical):
+            return physical.amazon_shipment_id or physical.display_name
+
+        missing = self.filtered(lambda physical: not candidate(physical))
+        if missing:
+            message = _("Enter a Ready-to-Ship Date/Time before generating transportation options.")
+            if len(self) > 1:
+                message = "%s\n%s" % (message, _(
+                    "Missing on Amazon shipment(s): %s",
+                    ", ".join(label(physical) for physical in missing),
+                ))
+            raise UserError(message)
+        for physical in self:
+            try:
+                self._validate_ready_to_ship_value(candidate(physical))
+            except UserError as exc:
+                if len(self) == 1:
+                    raise
+                raise UserError(_(
+                    "Amazon shipment %(shipment)s: %(error)s",
+                    shipment=label(physical), error=exc.args[0],
+                )) from exc
 
     def _prepare_transportation_generation_payload(self):
         self.ensure_one()
@@ -910,11 +974,9 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             vals['transportation_option_id'] = option.id
         return Job.create(vals), True
 
-    def action_generate_transportation_options(self):
+    def _ensure_transportation_generation_allowed(self, physicals):
+        """Duplicate/ordering protections for a first transportation generation."""
         self.ensure_one()
-        self.inbound_shipment_id._check_inbound_manager_access()
-        self.inbound_shipment_id._lock_phase3_workflow()
-        physicals = self._accepted_plan_physicals()
         if any(code == 'WRITE_OUTCOME_UNKNOWN' for code in physicals.mapped(
             'transportation_error_code'
         )):
@@ -933,6 +995,49 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
                 "Transportation options were already generated, failed, or are still in progress. "
                 "Use Regenerate Transportation Options if a fresh unconfirmed option set is needed."
             ))
+
+    def _open_ready_to_ship_wizard(self, operation_type):
+        self.ensure_one()
+        title = (
+            _("Regenerate Transportation Options") if operation_type == 'regenerate'
+            else _("Generate Transportation Options")
+        )
+        return {
+            'type': 'ir.actions.act_window',
+            'name': title,
+            'res_model': 'amazon.fba.transportation.ready.to.ship.wizard',
+            'view_mode': 'form',
+            'target': 'new',
+            'context': {
+                'default_physical_shipment_id': self.id,
+                'default_operation_type': operation_type,
+            },
+        }
+
+    def action_generate_transportation_options(self):
+        """Button entry point: collect Ready-to-Ship value(s) in a wizard.
+
+        The existing protections run first so a blocked generation is reported
+        immediately instead of after the operator fills in the wizard.
+        """
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        physicals = self._accepted_plan_physicals()
+        if not physicals:
+            raise UserError(_("No accepted Amazon physical shipments are available for transportation."))
+        self._ensure_transportation_generation_allowed(physicals)
+        return self._open_ready_to_ship_wizard('generate')
+
+    def _action_generate_transportation_options(self):
+        """Queue plan-level transportation generation (no wizard, no recursion)."""
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self.inbound_shipment_id._lock_phase3_workflow()
+        physicals = self._accepted_plan_physicals()
+        self._ensure_transportation_generation_allowed(physicals)
+        # Validate synchronously before creating a job, changing any status or
+        # operation id, or calling Amazon.
+        physicals._check_ready_to_ship_for_transportation_generation()
         self._prepare_transportation_generation_payload()
         physicals.sudo().write({
             'transportation_generation_status': 'pending',
@@ -1026,11 +1131,22 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             physical.transportation_option_ids.sudo().unlink()
 
     def action_regenerate_transportation_options(self):
+        """Button entry point: review/change Ready-to-Ship value(s) in a wizard."""
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self._ensure_transportation_regeneration_allowed(self._accepted_plan_physicals())
+        return self._open_ready_to_ship_wizard('regenerate')
+
+    def _action_regenerate_transportation_options(self):
+        """Queue plan-level transportation regeneration (no wizard, no recursion)."""
         self.ensure_one()
         self.inbound_shipment_id._check_inbound_manager_access()
         self.inbound_shipment_id._lock_phase3_workflow()
         physicals = self._accepted_plan_physicals()
         self._ensure_transportation_regeneration_allowed(physicals)
+        # Validate synchronously before discarding options, creating a job,
+        # changing any status or operation id, or calling Amazon.
+        physicals._check_ready_to_ship_for_transportation_generation()
         self._prepare_transportation_generation_payload()
         physicals._clear_unconfirmed_transportation_choices()
         physicals.sudo().write({
@@ -1667,8 +1783,12 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
 
         if job.operation_type == 'generate_transportation_options':
             if not job.operation_id:
-                body = self._prepare_transportation_generation_payload()
-                access_token = self.instance_id._get_access_token_or_raise()
+                try:
+                    body = self._prepare_transportation_generation_payload()
+                    access_token = self.instance_id._get_access_token_or_raise()
+                except Exception as exc:
+                    # Nothing was sent to Amazon: never report an unknown outcome.
+                    raise TransportationPreWriteError(str(exc)) from exc
                 result = self.instance_id._api_call_safe(
                     AmazonAPI().generate_transportation_options,
                     self.instance_id,
@@ -2467,7 +2587,8 @@ class AmazonInboundOperationJobShipping(models.Model):
             cause = getattr(exc, '__cause__', None)
             response = getattr(cause, 'response', None)
             status_code = getattr(response, 'status_code', None)
-            ambiguous = write_start and (status_code is None or status_code >= 500)
+            pre_write = isinstance(exc, TransportationPreWriteError)
+            ambiguous = write_start and not pre_write and (status_code is None or status_code >= 500)
             error_targets = (
                 physical._accepted_plan_physicals()
                 if self.operation_type in (
@@ -2476,7 +2597,9 @@ class AmazonInboundOperationJobShipping(models.Model):
             )
             error_targets.write({
                 'transportation_error_code': (
-                    'WRITE_OUTCOME_UNKNOWN' if ambiguous else 'BACKGROUND_JOB_FAILED'
+                    TRANSPORTATION_PRE_WRITE_ERROR_CODE if pre_write
+                    else 'WRITE_OUTCOME_UNKNOWN' if ambiguous
+                    else 'BACKGROUND_JOB_FAILED'
                 ),
                 'transportation_error_message': message,
                 'transportation_last_sync_at': fields.Datetime.now(),
