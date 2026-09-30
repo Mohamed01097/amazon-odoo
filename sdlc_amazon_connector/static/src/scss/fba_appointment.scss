@@ -1,0 +1,15 @@
+// Keep the FC appointment slot list a compact, always-visible table.
+//
+// The physical-shipment popup is a very tall single modal whose scroll
+// viewport is small. Left unbounded, the appointment slot list adds ~1600px
+// of rows at the bottom of that modal, so at the scroll position where its
+// pager is visible the rows fall below the fold and the section reads as
+// empty. Bounding the list to its own scrollable height keeps the pager and
+// the rows together in one clearly visible block.
+.o_fba_appointment_slots {
+    .o_list_renderer {
+        min-height: 200px;
+        max-height: 420px;
+        overflow-y: auto;
+    }
+}

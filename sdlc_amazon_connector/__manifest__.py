@@ -1,6 +1,6 @@
 {
     'name': 'Odoo Amazon Connector',
-    'version': '19.0.10.6.3',
+    'version': '19.0.10.6.7',
     'summary': 'Amazon SP-API Connector for Odoo with Orders, Products, FBA, Settlements, Inventory, Pricing, Returns, and AI Automation',
     'description': """
         Complete Amazon-Odoo connector with Amazon SP-API integration,
@@ -106,6 +106,7 @@
     ],
     'assets': {
         'web.assets_backend': [
+            'sdlc_amazon_connector/static/src/scss/fba_appointment.scss',
             'sdlc_amazon_connector/static/src/js/amazon_dashboard.js',
             'sdlc_amazon_connector/static/src/xml/amazon_dashboard.xml',
         ],

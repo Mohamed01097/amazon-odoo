@@ -725,6 +725,43 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
     ], copy=False, readonly=True, index=True)
     tracking_last_synced_at = fields.Datetime(copy=False, readonly=True)
 
+    # --- FC Appointment fields ---
+    appointment_slot_ids = fields.One2many(
+        'amazon.fba.appointment.slot', 'physical_shipment_id',
+        string='FC Appointment Slots',
+    )
+    selected_appointment_slot_id = fields.Many2one(
+        'amazon.fba.appointment.slot', string='Selected Appointment Slot',
+        copy=False, check_company=True,
+    )
+    appointment_generation_operation_id = fields.Char(copy=False, readonly=True, index=True)
+    appointment_generation_status = fields.Selection([
+        ('pending', 'Pending'),
+        ('in_progress', 'In Progress'),
+        ('success', 'Success'),
+        ('failed', 'Failed'),
+    ], copy=False, readonly=True, index=True)
+    appointment_confirmation_operation_id = fields.Char(copy=False, readonly=True, index=True)
+    appointment_confirmation_status = fields.Selection([
+        ('pending', 'Pending'),
+        ('in_progress', 'In Progress'),
+        ('success', 'Success'),
+        ('failed', 'Failed'),
+    ], copy=False, readonly=True, index=True)
+    appointment_last_sync_at = fields.Datetime(copy=False, readonly=True)
+    appointment_slots_expires_at = fields.Datetime(copy=False, readonly=True)
+    appointment_slots_expired = fields.Boolean(
+        compute='_compute_appointment_slots_expired',
+        help="True when the stored appointment slot availability window has passed. "
+             "The rows are kept; the user must refresh to obtain fresh availability.",
+    )
+    appointment_error_code = fields.Char(
+        copy=False, readonly=True, groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+    appointment_error_message = fields.Text(
+        copy=False, readonly=True, groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+
     @api.depends('picking_ids.state')
     def _compute_dispatch_picking(self):
         for physical in self:
@@ -783,6 +820,150 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             _("Seller-applied product/FNSKU labels were recorded as printed and applied."),
             'success',
         )
+
+    @api.depends('appointment_slots_expires_at', 'appointment_generation_status')
+    def _compute_appointment_slots_expired(self):
+        now = fields.Datetime.now()
+        for physical in self:
+            physical.appointment_slots_expired = bool(
+                physical.appointment_generation_status == 'success'
+                and physical.appointment_slots_expires_at
+                and physical.appointment_slots_expires_at <= now
+            )
+
+    def action_generate_appointment_slots(self):
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self._lock_dispatch()
+        if not self.amazon_shipment_id:
+            raise UserError(_("The physical shipment has no Amazon shipment ID."))
+        if not self.inbound_shipment_id.inbound_plan_id:
+            raise UserError(_("The inbound plan has no Amazon inbound plan ID."))
+        if self.transportation_confirmation_status != 'success':
+            raise UserError(_(
+                "Transportation must be confirmed before generating FC appointment slots."
+            ))
+        if self.delivery_window_confirmation_status != 'success':
+            raise UserError(_(
+                "The delivery window must be confirmed before generating FC appointment slots."
+            ))
+        if not self.selected_delivery_window_option_id:
+            raise UserError(_(
+                "No confirmed delivery window found. Confirm a delivery window first."
+            ))
+        if self.appointment_generation_status in ('pending', 'in_progress'):
+            raise UserError(_("FC appointment slot generation is already in progress."))
+        self.sudo().write({
+            'appointment_generation_status': 'pending',
+            'appointment_error_code': False,
+            'appointment_error_message': False,
+        })
+        _job, created = self._enqueue_physical_job('generate_appointment_slots')
+        return self.instance_id._notify(
+            _("FC Appointment Slots"),
+            _("Appointment slot generation was queued.") if created
+            else _("Appointment slot generation is already queued."),
+            'success' if created else 'warning',
+        )
+
+    def action_refresh_appointment_slots(self):
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        if not self.amazon_shipment_id or not self.inbound_shipment_id.inbound_plan_id:
+            raise UserError(_("Amazon shipment ID and inbound plan ID are required."))
+        self._refresh_appointment_slots()
+        return self.instance_id._notify(
+            _("FC Appointment Slots"),
+            _("Appointment slots were refreshed."),
+            'success',
+        )
+
+    def _get_appointment_slot_date_range(self, dw):
+        """Return (effective_start, effective_end) for the appointment POST.
+
+        Amazon rejects desiredStartDate in the past, so we clamp the start
+        to at least now + 5 min to absorb network/job delay.
+        """
+        window_start = dw.start_date
+        window_end = dw.end_date
+        now_utc = fields.Datetime.now()
+        minimum_start = now_utc + timedelta(minutes=5)
+        effective_start = max(window_start, minimum_start)
+        if effective_start >= window_end:
+            raise UserError(_(
+                "The selected delivery window (%(start)s – %(end)s) has already expired "
+                "or has insufficient time remaining. Refresh the delivery windows and "
+                "select a future window before generating FC appointment slots.",
+                start=window_start, end=window_end,
+            ))
+        return effective_start, window_end
+
+    def _refresh_appointment_slots(self):
+        self.ensure_one()
+        access_token = self.instance_id._get_access_token_or_raise()
+        values = []
+        token = None
+        expires_at = None
+        for _page in range(100):
+            result = self.instance_id._api_call_safe(
+                AmazonAPI().get_self_ship_appointment_slots,
+                self.instance_id, access_token,
+                self.inbound_shipment_id.inbound_plan_id, self.amazon_shipment_id,
+                20, token,
+                error_msg=_("Failed to list Amazon FC appointment slots"),
+            )
+            if not isinstance(result, dict):
+                result = {'unexpectedResponse': result}
+            availability = result.get('selfShipAppointmentSlotsAvailability') or {}
+            if not expires_at:
+                raw_expires = availability.get('expiresAt')
+                if raw_expires:
+                    expires_at = self._parse_amazon_datetime(raw_expires)
+            for slot in (availability.get('slots') or []):
+                values.append(slot)
+            token = (result.get('pagination') or {}).get('nextToken')
+            if not token:
+                break
+        else:
+            raise UserError(_("Amazon FC appointment slot pagination exceeded 100 pages."))
+        self._sync_appointment_slots(values)
+        self.sudo().write({
+            'appointment_last_sync_at': fields.Datetime.now(),
+            'appointment_slots_expires_at': expires_at or False,
+        })
+        return values
+
+    def _sync_appointment_slots(self, values):
+        self.ensure_one()
+        Slot = self.env['amazon.fba.appointment.slot'].sudo()
+        seen = set()
+        for raw in values:
+            slot_id_raw = (raw or {}).get('slotId') or ''
+            slot_id = str(slot_id_raw).strip()
+            if not slot_id:
+                continue
+            seen.add(slot_id)
+            slot_time = raw.get('slotTime') or {}
+            vals = {
+                'instance_id': self.instance_id.id,
+                'inbound_shipment_id': self.inbound_shipment_id.id,
+                'physical_shipment_id': self.id,
+                'amazon_appointment_slot_id': slot_id,
+                'start_date': self._parse_amazon_datetime(slot_time.get('startTime')),
+                'end_date': self._parse_amazon_datetime(slot_time.get('endTime')),
+                'slot_status': str(raw.get('slotStatus') or '').strip() or False,
+                'raw_response': self.inbound_shipment_id._sanitized_json(raw),
+            }
+            existing = Slot.search([
+                ('physical_shipment_id', '=', self.id),
+                ('amazon_appointment_slot_id', '=', slot_id),
+            ], limit=1)
+            (existing.write(vals) if existing else Slot.create(vals))
+        stale = self.appointment_slot_ids.filtered(
+            lambda slot: slot.amazon_appointment_slot_id not in seen and not slot.selected
+        )
+        stale.unlink()
+        return self.appointment_slot_ids
 
     def _lock_dispatch(self):
         self.ensure_one()
@@ -1890,7 +2071,107 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             return self._poll_transportation_operation(
                 job, 'tracking_status', refresh_shipment=True,
             )
+        if job.operation_type == 'generate_appointment_slots':
+            if not job.operation_id:
+                dw = self.selected_delivery_window_option_id
+                if not dw:
+                    raise UserError(_(
+                        "No confirmed delivery window found for appointment slot generation."
+                    ))
+                effective_start, effective_end = self._get_appointment_slot_date_range(dw)
+                body = {
+                    'desiredStartDate': effective_start.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    'desiredEndDate': effective_end.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                }
+                _logger.info(
+                    "FC Appointment slot generation for shipment %s "
+                    "(amazon_shipment_id=%s, delivery_window=%s): "
+                    "window_start=%s, window_end=%s, utc_now=%s, "
+                    "desiredStartDate=%s, desiredEndDate=%s",
+                    self.id, self.amazon_shipment_id,
+                    dw.amazon_delivery_window_option_id,
+                    dw.start_date, dw.end_date, fields.Datetime.now(),
+                    body['desiredStartDate'], body['desiredEndDate'],
+                )
+                access_token = self.instance_id._get_access_token_or_raise()
+                result = self.instance_id._api_call_safe(
+                    AmazonAPI().generate_self_ship_appointment_slots,
+                    self.instance_id, access_token,
+                    self.inbound_shipment_id.inbound_plan_id,
+                    self.amazon_shipment_id, body,
+                    error_msg=_("Failed to generate Amazon FC appointment slots"),
+                )
+                if not isinstance(result, dict):
+                    result = {'unexpectedResponse': result}
+                operation_id = str(result.get('operationId') or '').strip()
+                self.sudo().write({
+                    'appointment_generation_operation_id': operation_id or False,
+                    'appointment_generation_status': 'in_progress',
+                    'appointment_last_sync_at': fields.Datetime.now(),
+                })
+                job.sudo().write({
+                    'operation_id': operation_id or False,
+                    'response_data': self.inbound_shipment_id._sanitized_json(result),
+                    'amazon_request_id': str(
+                        result.get('_amazon_request_id') or ''
+                    ).strip() or False,
+                })
+                if not OPERATION_ID_RE.fullmatch(operation_id):
+                    raise UserError(_(
+                        "Amazon did not return a valid appointment slot operationId."
+                    ))
+                return 'in_progress'
+            return self._poll_appointment_operation(job)
+
         raise UserError(_("Unsupported physical shipment operation: %s", job.operation_type))
+
+    def _poll_appointment_operation(self, job):
+        self.ensure_one()
+        access_token = self.instance_id._get_access_token_or_raise()
+        result = self.instance_id._api_call_safe(
+            AmazonAPI().get_inbound_operation_status,
+            self.instance_id, access_token, job.operation_id,
+            error_msg=_("Failed to poll Amazon FC appointment operation"),
+        )
+        if not isinstance(result, dict):
+            result = {'unexpectedResponse': result}
+        raw_status = str(result.get('operationStatus') or '').strip()
+        normalized = raw_status.upper().replace('-', '_').replace(' ', '_')
+        error_code, error_message = self._operation_problem_values(
+            result.get('operationProblems')
+        )
+        job.sudo().write({
+            'raw_operation_status': raw_status or False,
+            'amazon_request_id': str(
+                result.get('_amazon_request_id') or ''
+            ).strip() or False,
+            'response_data': self.inbound_shipment_id._sanitized_json(result),
+        })
+        if normalized == 'SUCCESS':
+            self._refresh_appointment_slots()
+            self.sudo().write({
+                'appointment_generation_status': 'success',
+                'appointment_error_code': False,
+                'appointment_error_message': False,
+            })
+            return 'success'
+        if normalized == 'FAILED':
+            self.sudo().write({
+                'appointment_generation_status': 'failed',
+                'appointment_error_code': error_code or 'AMAZON_OPERATION_FAILED',
+                'appointment_error_message': error_message or _(
+                    "Amazon reported that the FC appointment slot generation failed."
+                ),
+            })
+            return 'failed'
+        self.sudo().write({
+            'appointment_generation_status': (
+                'pending' if normalized in ('PENDING', 'QUEUED') else 'in_progress'
+            ),
+            'appointment_error_code': error_code,
+            'appointment_error_message': error_message,
+        })
+        return 'in_progress'
 
     def _poll_delivery_window_operation(self, job, status_field, refresh_options=False):
         self.ensure_one()
@@ -2346,6 +2627,67 @@ class AmazonFbaDeliveryWindowOption(models.Model):
         )
 
 
+class AmazonFbaAppointmentSlot(models.Model):
+    _name = 'amazon.fba.appointment.slot'
+    _description = 'Amazon FBA FC Appointment Slot'
+    _order = 'start_date, id'
+    _check_company_auto = True
+
+    instance_id = fields.Many2one('amazon.instance', required=True, ondelete='cascade', index=True)
+    company_id = fields.Many2one(
+        'res.company', related='instance_id.company_id', store=True, readonly=True, index=True,
+    )
+    inbound_shipment_id = fields.Many2one(
+        'amazon.inbound.shipment', required=True, ondelete='cascade', index=True,
+        check_company=True,
+    )
+    physical_shipment_id = fields.Many2one(
+        'amazon.fba.physical.shipment', required=True, ondelete='cascade', index=True,
+        check_company=True,
+    )
+    amazon_appointment_slot_id = fields.Char(required=True, copy=False, index=True)
+    start_date = fields.Datetime(required=True, copy=False)
+    end_date = fields.Datetime(required=True, copy=False)
+    duration_minutes = fields.Integer(compute='_compute_duration_minutes', store=True)
+    slot_status = fields.Char(copy=False, index=True)
+    selected = fields.Boolean(copy=False, index=True)
+    raw_response = fields.Text(
+        copy=False, readonly=True, groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+
+    _unique_physical_slot = models.Constraint(
+        'UNIQUE (physical_shipment_id, amazon_appointment_slot_id)',
+        'An appointment slot can occur only once per physical Amazon shipment.',
+    )
+    _single_selected_slot = models.UniqueIndex(
+        '(physical_shipment_id) WHERE selected IS TRUE',
+        'Only one appointment slot can be selected per physical Amazon shipment.',
+    )
+
+    @api.depends('start_date', 'end_date')
+    def _compute_duration_minutes(self):
+        for slot in self:
+            if slot.start_date and slot.end_date and slot.end_date > slot.start_date:
+                slot.duration_minutes = int((slot.end_date - slot.start_date).total_seconds() / 60)
+            else:
+                slot.duration_minutes = 0
+
+    def action_select_appointment_slot(self):
+        self.ensure_one()
+        physical = self.physical_shipment_id
+        physical.inbound_shipment_id._check_inbound_manager_access()
+        if physical.appointment_confirmation_status in ('pending', 'in_progress', 'success'):
+            raise UserError(_("The appointment is already queued or confirmed."))
+        (physical.appointment_slot_ids - self).sudo().write({'selected': False})
+        self.sudo().write({'selected': True})
+        physical.sudo().write({'selected_appointment_slot_id': self.id})
+        return physical.instance_id._notify(
+            _("FC Appointment Slot"),
+            _("Appointment slot selected locally. Confirm it separately to send it to Amazon."),
+            'success',
+        )
+
+
 class AmazonFbaShipmentBox(models.Model):
     _name = 'amazon.fba.shipment.box'
     _description = 'Amazon FBA Physical Shipment Box'
@@ -2478,6 +2820,7 @@ class AmazonInboundOperationJobShipping(models.Model):
         ('submit_transportation_tracking', 'Submit Transportation Tracking'),
         ('generate_delivery_window_options', 'Generate Delivery Window Options'),
         ('confirm_delivery_window_option', 'Confirm Delivery Window Option'),
+        ('generate_appointment_slots', 'Generate FC Appointment Slots'),
     ], ondelete={
         'confirm_shipment': 'cascade',
         'refresh_shipment_status': 'cascade',
@@ -2487,6 +2830,7 @@ class AmazonInboundOperationJobShipping(models.Model):
         'submit_transportation_tracking': 'cascade',
         'generate_delivery_window_options': 'cascade',
         'confirm_delivery_window_option': 'cascade',
+        'generate_appointment_slots': 'cascade',
     })
 
     def _process_operation(self):
@@ -2495,6 +2839,7 @@ class AmazonInboundOperationJobShipping(models.Model):
             'generate_transportation_options', 'refresh_transportation_options',
             'confirm_transportation_options', 'submit_transportation_tracking',
             'generate_delivery_window_options', 'confirm_delivery_window_option',
+            'generate_appointment_slots',
         ):
             return self._process_physical_transportation_operation()
         if self.operation_type not in ('confirm_shipment', 'refresh_shipment_status'):
@@ -2563,12 +2908,16 @@ class AmazonInboundOperationJobShipping(models.Model):
                 self._mark_done()
                 return True
             if status == 'failed':
+                error_msg = (
+                    physical.appointment_error_message
+                    if self.operation_type == 'generate_appointment_slots'
+                    else physical.transportation_error_message
+                ) or _("Amazon transportation operation failed.")
                 self.write({
                     'state': 'failed',
                     'finished_at': fields.Datetime.now(),
                     'next_run_at': False,
-                    'last_error': physical.transportation_error_message
-                    or _("Amazon transportation operation failed."),
+                    'last_error': error_msg,
                 })
                 return False
             self._schedule_retry()
@@ -2579,6 +2928,25 @@ class AmazonInboundOperationJobShipping(models.Model):
                 "Amazon physical shipment job %s (%s) failed: %s",
                 self.id, self.operation_type, message,
             )
+            if self.operation_type == 'generate_appointment_slots':
+                write_start = not self.operation_id
+                if write_start:
+                    self.write({
+                        'state': 'failed',
+                        'finished_at': fields.Datetime.now(),
+                        'next_run_at': False,
+                        'last_error': message,
+                    })
+                else:
+                    self._schedule_retry(error_message=message)
+                physical.write({
+                    'appointment_error_code': 'BACKGROUND_JOB_FAILED',
+                    'appointment_error_message': message,
+                    'appointment_last_sync_at': fields.Datetime.now(),
+                })
+                if self.state == 'failed':
+                    physical.write({'appointment_generation_status': 'failed'})
+                return False
             write_start = self.operation_type in (
                 'generate_transportation_options', 'confirm_transportation_options',
                 'submit_transportation_tracking', 'generate_delivery_window_options',

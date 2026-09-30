@@ -1641,6 +1641,34 @@ class AmazonAPI():
         )
         return self._json_response_with_request_id(resp)
 
+    def generate_self_ship_appointment_slots(self, instance, access_token, plan_id,
+                                              shipment_id, body):
+        """Start official self-ship appointment slot generation for one physical shipment."""
+        endpoint = self._get_endpoint(instance)
+        url = (
+            f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
+            f"/shipments/{shipment_id}/selfShipAppointmentSlots"
+        )
+        resp = self._amazon_request(
+            instance, access_token, 'POST', url, body=body, max_retries=0,
+        )
+        return self._json_response_with_request_id(resp)
+
+    def get_self_ship_appointment_slots(self, instance, access_token, plan_id,
+                                        shipment_id, page_size=20,
+                                        pagination_token=None):
+        """Return one getSelfShipAppointmentSlots page."""
+        endpoint = self._get_endpoint(instance)
+        url = (
+            f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
+            f"/shipments/{shipment_id}/selfShipAppointmentSlots"
+        )
+        params = {'pageSize': page_size}
+        if pagination_token:
+            params['paginationToken'] = pagination_token
+        resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
+        return self._json_response_with_request_id(resp)
+
     def list_shipment_items(self, instance, access_token, plan_id, shipment_id,
                             page_size=20, pagination_token=None):
         """Return one official listShipmentItems page."""
