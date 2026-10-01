@@ -761,6 +761,55 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
     appointment_error_message = fields.Text(
         copy=False, readonly=True, groups='sdlc_amazon_connector.group_amazon_manager',
     )
+    # --- Confirmed self-ship FC appointment (scheduleSelfShipAppointment) ---
+    # The schedule endpoint is synchronous and returns the confirmed appointment
+    # directly, so these fields are written in-line, kept separate from the
+    # (async) slot-generation status above so the two states never overload.
+    confirmed_appointment_id = fields.Char(
+        string='Amazon Appointment ID', copy=False, readonly=True,
+    )
+    confirmed_appointment_slot_id = fields.Char(
+        string='Confirmed Amazon Slot ID', copy=False, readonly=True,
+        help="The Amazon slot ID that was actually scheduled with Amazon.",
+    )
+    confirmed_appointment_start = fields.Datetime(
+        string='Confirmed Start Time', copy=False, readonly=True,
+    )
+    confirmed_appointment_end = fields.Datetime(
+        string='Confirmed End Time', copy=False, readonly=True,
+    )
+    confirmed_appointment_amazon_status = fields.Char(
+        string='Amazon Appointment Status', copy=False, readonly=True,
+        help="Raw appointmentStatus reported by Amazon (e.g. ARRIVAL_SCHEDULED).",
+    )
+    confirmed_appointment_duration_minutes = fields.Integer(
+        string='Confirmed Duration (min)',
+        compute='_compute_confirmed_appointment_duration', store=True,
+    )
+    appointment_confirmed_at = fields.Datetime(
+        string='Confirmed At', copy=False, readonly=True,
+    )
+    appointment_schedule_error_code = fields.Char(
+        copy=False, readonly=True, groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+    appointment_schedule_error_message = fields.Text(
+        copy=False, readonly=True, groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+    appointment_confirmation_response = fields.Text(
+        copy=False, readonly=True, groups='sdlc_amazon_connector.group_amazon_manager',
+    )
+
+    @api.depends('confirmed_appointment_start', 'confirmed_appointment_end')
+    def _compute_confirmed_appointment_duration(self):
+        for physical in self:
+            start = physical.confirmed_appointment_start
+            end = physical.confirmed_appointment_end
+            if start and end and end > start:
+                physical.confirmed_appointment_duration_minutes = int(
+                    (end - start).total_seconds() / 60
+                )
+            else:
+                physical.confirmed_appointment_duration_minutes = 0
 
     @api.depends('picking_ids.state')
     def _compute_dispatch_picking(self):
@@ -878,6 +927,194 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             'success',
         )
 
+    # ------------------------------------------------------------------
+    # Schedule / confirm one self-ship FC appointment (synchronous)
+    # ------------------------------------------------------------------
+    def _check_schedule_preconditions(self):
+        """Validate everything required before any Amazon schedule write.
+
+        Raises UserError on the first failed check so the reason is explicit.
+        Runs both when opening the confirmation wizard and again immediately
+        before the Amazon call, so state that changes in between still blocks.
+        """
+        self.ensure_one()
+        slot = self.selected_appointment_slot_id
+        # A. A slot is selected.
+        if not slot:
+            raise UserError(_(
+                "Please select an FC appointment slot before scheduling the appointment."
+            ))
+        # B. Slot generation succeeded.
+        if self.appointment_generation_status != 'success':
+            raise UserError(_(
+                "FC appointment slots must be generated successfully before scheduling."
+            ))
+        # H. No scheduling already pending/in progress.
+        if self.appointment_confirmation_status in ('pending', 'in_progress'):
+            raise UserError(_(
+                "An FC appointment scheduling request is already in progress."
+            ))
+        # Idempotency / explicit-reschedule guard (already confirmed).
+        if self.appointment_confirmation_status == 'success':
+            if self.confirmed_appointment_slot_id == slot.amazon_appointment_slot_id:
+                raise UserError(_(
+                    "This FC appointment is already confirmed for the selected slot."
+                ))
+            raise UserError(_(
+                "An FC appointment is already confirmed. Rescheduling must be "
+                "performed explicitly."
+            ))
+        # C. Availability has not expired.
+        if self.appointment_slots_expired:
+            raise UserError(_(
+                "The FC appointment slot availability has expired. Refresh "
+                "Appointment Slots and select a fresh slot before scheduling."
+            ))
+        # D. Selected slot belongs to this physical shipment.
+        if slot.physical_shipment_id != self:
+            raise UserError(_(
+                "The selected appointment slot does not belong to this physical shipment."
+            ))
+        # E. Selected slot has a valid Amazon slot ID.
+        if not slot.amazon_appointment_slot_id:
+            raise UserError(_("The selected appointment slot has no Amazon slot ID."))
+        # F. Slot start time must still be in the future.
+        if not slot.start_date or slot.start_date <= fields.Datetime.now():
+            raise UserError(_(
+                "The selected appointment start time has already passed. Refresh "
+                "Appointment Slots and select a future slot before scheduling."
+            ))
+        # G. Required Amazon identifiers exist.
+        if not self.inbound_shipment_id.inbound_plan_id:
+            raise UserError(_("The inbound plan has no Amazon inbound plan ID."))
+        if not self.amazon_shipment_id:
+            raise UserError(_("The physical shipment has no Amazon shipment ID."))
+        return slot
+
+    def action_schedule_appointment(self):
+        """Button entry point: validate, then open the confirmation wizard.
+
+        This never calls Amazon. Only the wizard's explicit Confirm Schedule
+        initiates the Amazon write.
+        """
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        self._check_schedule_preconditions()
+        return {
+            'type': 'ir.actions.act_window',
+            'name': _("Schedule FC Appointment"),
+            'res_model': 'amazon.fba.schedule.appointment.wizard',
+            'view_mode': 'form',
+            'target': 'new',
+            'context': {'default_physical_shipment_id': self.id},
+        }
+
+    def _schedule_selected_appointment(self):
+        """Perform the synchronous Amazon scheduleSelfShipAppointment write.
+
+        Called only by the confirmation wizard. On success the confirmed
+        appointment is stored and ``appointment_confirmation_status`` becomes
+        ``success``. On an Amazon error the failure is persisted (status
+        ``failed`` + diagnostics) and a warning is returned instead of raising,
+        so the selected slot, the generation status and the stored slot rows all
+        stay intact.
+        """
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        # Serialize against a concurrent second click on the same shipment.
+        self._lock_dispatch()
+        slot = self._check_schedule_preconditions()
+        plan_id = self.inbound_shipment_id.inbound_plan_id
+        shipment_id = self.amazon_shipment_id
+        slot_id = slot.amazon_appointment_slot_id
+        self.sudo().write({
+            'appointment_confirmation_status': 'in_progress',
+            'appointment_schedule_error_code': False,
+            'appointment_schedule_error_message': False,
+        })
+        access_token = self.instance_id._get_access_token_or_raise()
+        _logger.info(
+            "Scheduling FC appointment for physical shipment %s "
+            "(amazon_shipment_id=%s, inbound_plan=%s, slot=%s)",
+            self.id, shipment_id, plan_id, slot_id,
+        )
+        try:
+            # Initial schedule: empty body (reasonComment is reschedule-only).
+            result = AmazonAPI().schedule_self_ship_appointment(
+                self.instance_id, access_token, plan_id, shipment_id, slot_id,
+                body={},
+            )
+        except (requests.exceptions.HTTPError,
+                requests.exceptions.RequestException) as exc:
+            return self._store_schedule_failure(exc)
+        if not isinstance(result, dict):
+            result = {'unexpectedResponse': result}
+        details = result.get('selfShipAppointmentDetails') or {}
+        slot_time = details.get('appointmentSlotTime') or {}
+        appointment_id = details.get('appointmentId')
+        values = {
+            'appointment_confirmation_status': 'success',
+            'appointment_confirmed_at': fields.Datetime.now(),
+            'confirmed_appointment_slot_id': slot_id,
+            'confirmed_appointment_id': (
+                str(appointment_id) if appointment_id not in (None, '') else False
+            ),
+            'confirmed_appointment_amazon_status': (
+                str(details.get('appointmentStatus') or '').strip() or False
+            ),
+            'confirmed_appointment_start': self._parse_amazon_datetime(
+                slot_time.get('startTime')
+            ) or slot.start_date,
+            'confirmed_appointment_end': self._parse_amazon_datetime(
+                slot_time.get('endTime')
+            ) or slot.end_date,
+            'appointment_confirmation_response': self.inbound_shipment_id._sanitized_json(result),
+            'appointment_schedule_error_code': False,
+            'appointment_schedule_error_message': False,
+        }
+        self.sudo().write(values)
+        return self.instance_id._notify(
+            _("FC Appointment Scheduled"),
+            _("Amazon confirmed the appointment for slot %s.", slot_id),
+            'success',
+        )
+
+    def _store_schedule_failure(self, exc):
+        """Persist a failed schedule attempt without rolling back or raising."""
+        self.ensure_one()
+        response = getattr(exc, 'response', None)
+        http_status = getattr(response, 'status_code', False)
+        error = AmazonAPI._extract_amazon_error(
+            AmazonAPI._safe_response_json(response)
+        ) if response is not None else {}
+        request_id = AmazonAPI._amazon_request_id(response) if response is not None else ''
+        code = error.get('code') or (
+            'HTTP_%s' % http_status if http_status else 'SCHEDULE_FAILED'
+        )
+        message = error.get('message') or str(exc)
+        diagnostic = getattr(exc, 'amazon_diagnostic', None) or AmazonAPI.format_exception(exc)
+        self.sudo().write({
+            'appointment_confirmation_status': 'failed',
+            'appointment_schedule_error_code': code,
+            'appointment_schedule_error_message': _(
+                "HTTP %(status)s | %(code)s | %(msg)s | Amazon Request ID: %(rid)s",
+                status=http_status or 'N/A', code=code, msg=message,
+                rid=request_id or 'N/A',
+            ),
+            'appointment_confirmation_response': diagnostic,
+        })
+        _logger.warning(
+            "FC appointment scheduling failed for physical shipment %s: %s",
+            self.id, code,
+        )
+        return self.instance_id._notify(
+            _("FC Appointment Scheduling Failed"),
+            _("Amazon rejected the scheduling request (%s). The selected slot "
+              "was kept; review the appointment errors and try again.", code),
+            'danger',
+            sticky=True,
+        )
+
     def _get_appointment_slot_date_range(self, dw):
         """Return (effective_start, effective_end) for the appointment POST.
 
@@ -899,6 +1136,16 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
         return effective_start, window_end
 
     def _refresh_appointment_slots(self):
+        """Read the current self-ship appointment availability from Amazon (GET).
+
+        ``getSelfShipAppointmentSlots`` only *retrieves* the last availability
+        list produced by ``generateSelfShipAppointmentSlots``; it never
+        regenerates. Once ``expiresAt`` has passed Amazon keeps returning the
+        same expired snapshot, so Refresh cannot produce fresh availability — the
+        user must Generate (regenerate) again. This method persists exactly the
+        ``expiresAt`` Amazon returns, so the expired flag reflects Amazon's real
+        state rather than masking it.
+        """
         self.ensure_one()
         access_token = self.instance_id._get_access_token_or_raise()
         values = []
@@ -959,10 +1206,17 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
                 ('amazon_appointment_slot_id', '=', slot_id),
             ], limit=1)
             (existing.write(vals) if existing else Slot.create(vals))
+        # A refresh is authoritative: any slot Amazon no longer returns is stale
+        # and removed — including a previously selected one. Otherwise a stale
+        # selected slot could still be scheduled even though Amazon dropped it
+        # (see PART 2 scheduling safety). Clear the selection pointer first so it
+        # never references a removed slot.
         stale = self.appointment_slot_ids.filtered(
-            lambda slot: slot.amazon_appointment_slot_id not in seen and not slot.selected
+            lambda slot: slot.amazon_appointment_slot_id not in seen
         )
-        stale.unlink()
+        if stale and self.selected_appointment_slot_id in stale:
+            self.sudo().write({'selected_appointment_slot_id': False})
+        stale.sudo().unlink()
         return self.appointment_slot_ids
 
     def _lock_dispatch(self):

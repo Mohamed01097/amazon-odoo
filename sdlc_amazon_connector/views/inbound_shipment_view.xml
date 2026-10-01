@@ -463,12 +463,12 @@
                                                             type="object"
                                                             string="Generate Appointment Slots"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"
-                                                            invisible="appointment_generation_status in ('pending', 'in_progress', 'success') or transportation_confirmation_status != 'success'"/>
+                                                            invisible="transportation_confirmation_status != 'success' or (appointment_generation_status in ('pending', 'in_progress', 'success') and not appointment_slots_expired)"/>
                                                     <button name="action_refresh_appointment_slots"
                                                             type="object"
                                                             string="Refresh Appointment Slots"
                                                             groups="sdlc_amazon_connector.group_amazon_manager"
-                                                            invisible="appointment_generation_status != 'success'"/>
+                                                            invisible="appointment_generation_status != 'success' or appointment_slots_expired"/>
                                                     <button name="action_confirm_transportation"
                                                             type="object"
                                                             string="Confirm Transportation"
@@ -622,19 +622,22 @@
                                                         </group>
                                                         <group string="Appointment Errors"
                                                                groups="sdlc_amazon_connector.group_amazon_manager">
-                                                            <field name="appointment_confirmation_operation_id" readonly="1"/>
                                                             <field name="appointment_confirmation_status" readonly="1"/>
                                                             <field name="appointment_error_code" readonly="1"/>
                                                             <field name="appointment_error_message" readonly="1"/>
+                                                            <field name="appointment_schedule_error_code" readonly="1"/>
+                                                            <field name="appointment_schedule_error_message" readonly="1"/>
                                                         </group>
                                                     </group>
                                                     <div class="alert alert-warning" role="alert"
                                                          invisible="not appointment_slots_expired">
                                                         Appointment slot availability has expired
                                                         (see <b>Appointment Slots Expires At</b> above).
-                                                        The slots below are kept for reference. Press
-                                                        <b>Refresh Appointment Slots</b> to obtain fresh
-                                                        availability before scheduling.
+                                                        The slots below are kept for reference. Amazon's
+                                                        <i>Refresh</i> (getSelfShipAppointmentSlots) only re-reads
+                                                        this same expired list, so it cannot produce fresh
+                                                        availability. Press <b>Generate Appointment Slots</b> to
+                                                        request a fresh availability window before scheduling.
                                                     </div>
                                                     <separator string="Appointment Slots"
                                                                invisible="appointment_generation_status != 'success'"/>
@@ -655,7 +658,34 @@
                                                                         invisible="selected"/>
                                                             </list>
                                                         </field>
+                                                        <div class="mt-2">
+                                                            <button name="action_schedule_appointment"
+                                                                    type="object"
+                                                                    string="Schedule Appointment"
+                                                                    class="btn-primary"
+                                                                    groups="sdlc_amazon_connector.group_amazon_manager"
+                                                                    invisible="not selected_appointment_slot_id or appointment_slots_expired or appointment_confirmation_status in ('pending', 'in_progress', 'success')"/>
+                                                        </div>
                                                     </div>
+                                                    <separator string="CONFIRMED APPOINTMENT"
+                                                               invisible="appointment_confirmation_status != 'success'"/>
+                                                    <group invisible="appointment_confirmation_status != 'success'">
+                                                        <group string="Confirmed Appointment">
+                                                            <field name="appointment_confirmation_status" string="Status" readonly="1"/>
+                                                            <field name="confirmed_appointment_id"/>
+                                                            <field name="confirmed_appointment_amazon_status"/>
+                                                            <field name="appointment_confirmed_at"/>
+                                                        </group>
+                                                        <group string="Confirmed Slot">
+                                                            <field name="confirmed_appointment_start"/>
+                                                            <field name="confirmed_appointment_end"/>
+                                                            <field name="confirmed_appointment_duration_minutes"/>
+                                                            <field name="confirmed_appointment_slot_id"/>
+                                                        </group>
+                                                    </group>
+                                                    <field name="appointment_confirmation_response" readonly="1" nolabel="1"
+                                                           groups="sdlc_amazon_connector.group_amazon_manager"
+                                                           invisible="not appointment_confirmation_response"/>
                                                     <separator string="Amazon Shipment Boxes"/>
                                                     <field name="shipment_box_ids" readonly="1">
                                                         <list create="0" delete="0">

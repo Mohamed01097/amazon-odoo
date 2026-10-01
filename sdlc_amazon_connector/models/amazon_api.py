@@ -1669,6 +1669,26 @@ class AmazonAPI():
         resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return self._json_response_with_request_id(resp)
 
+    def schedule_self_ship_appointment(self, instance, access_token, plan_id,
+                                       shipment_id, slot_id, body=None):
+        """Schedule (confirm) one self-ship FC appointment slot.
+
+        Fulfillment Inbound v2024-03-20 ``scheduleSelfShipAppointment`` is
+        synchronous: it responds HTTP 200 with ``selfShipAppointmentDetails``
+        (appointmentId / appointmentSlotTime / appointmentStatus) directly, with
+        no ``operationId`` to poll. ``reasonComment`` is only meaningful for a
+        cancel/reschedule, so an initial schedule sends an empty body.
+        """
+        endpoint = self._get_endpoint(instance)
+        url = (
+            f"{endpoint}/inbound/fba/2024-03-20/inboundPlans/{plan_id}"
+            f"/shipments/{shipment_id}/selfShipAppointmentSlots/{slot_id}/schedule"
+        )
+        resp = self._amazon_request(
+            instance, access_token, 'POST', url, body=body or {}, max_retries=0,
+        )
+        return self._json_response_with_request_id(resp)
+
     def list_shipment_items(self, instance, access_token, plan_id, shipment_id,
                             page_size=20, pagination_token=None):
         """Return one official listShipmentItems page."""

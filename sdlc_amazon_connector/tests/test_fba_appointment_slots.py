@@ -1,11 +1,40 @@
 from datetime import timedelta
 from unittest.mock import patch
 
+import requests
+
 from odoo import Command, fields
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
 
 from ..models.amazon_api import AmazonAPI
+
+
+class _FakeResponse:
+    """Minimal object mimicking a requests.Response for schedule-failure tests."""
+
+    def __init__(self, status_code=400, error_code='InvalidInput',
+                 message='Slot is no longer available', request_id='req-err-1'):
+        self.status_code = status_code
+        self._error_code = error_code
+        self._message = message
+        self.headers = {'x-amzn-RequestId': request_id}
+        self.text = '{"errors": [{"code": "%s", "message": "%s"}]}' % (
+            error_code, message,
+        )
+
+    def json(self):
+        return {'errors': [{'code': self._error_code, 'message': self._message}]}
+
+
+def _http_error(status_code=400):
+    resp = _FakeResponse(status_code=status_code)
+    exc = requests.exceptions.HTTPError('boom', response=resp)
+    # Set a pre-built diagnostic so format_exception is not invoked on the fake.
+    exc.amazon_diagnostic = (
+        'HTTP Status: %s\nAmazon Error Code: InvalidInput' % status_code
+    )
+    return exc
 
 
 PLAN_ID = 'wf1234abcd-1234-abcd-5678-1234abcd5678'
@@ -502,8 +531,10 @@ class TestFbaAppointmentSlots(TransactionCase):
             "scheduleSelfShipAppointment must not be called in this workflow",
         )
 
-    # --- Test: Stale selected slot is preserved ---
-    def test_15_selected_slot_preserved_on_refresh(self):
+    # --- Test: A refresh is authoritative — a selected slot Amazon no longer
+    #     returns is removed and the selection pointer is cleared, so a stale
+    #     slot can never be scheduled (PART 2 safety, items 14 & 23). ---
+    def test_15_stale_selected_slot_cleared_on_refresh(self):
         self._set_confirmed()
         with patch.object(
             AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
@@ -515,6 +546,7 @@ class TestFbaAppointmentSlots(TransactionCase):
         )
         slot_to_select.action_select_appointment_slot()
         self.assertTrue(slot_to_select.selected)
+        self.assertEqual(self.physical.selected_appointment_slot_id, slot_to_select)
 
         only_slot2 = self._slots_response(slots=[{
             'slotId': SLOT_ID_2,
@@ -530,10 +562,10 @@ class TestFbaAppointmentSlots(TransactionCase):
             self.physical._refresh_appointment_slots()
         self.physical.invalidate_recordset()
         remaining = self.physical.appointment_slot_ids
-        self.assertEqual(len(remaining), 2)
-        self.assertTrue(remaining.filtered(
-            lambda s: s.amazon_appointment_slot_id == SLOT_ID_1 and s.selected
-        ))
+        # SLOT_ID_1 is gone; only the still-offered slot remains, unselected.
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining.amazon_appointment_slot_id, SLOT_ID_2)
+        self.assertFalse(self.physical.selected_appointment_slot_id)
 
     # --- Test: Expires-at is stored ---
     def test_16_expires_at_stored(self):
@@ -889,3 +921,433 @@ class TestFbaAppointmentSlots(TransactionCase):
         })
         self.physical.invalidate_recordset()
         self.assertFalse(self.physical.appointment_slots_expired)
+
+    # ==================================================================
+    # PART 2 — Schedule / confirm one self-ship FC appointment
+    # ==================================================================
+
+    @staticmethod
+    def _schedule_success_response(appointment_id=1000,
+                                   start='2026-10-05T09:00:00Z',
+                                   end='2026-10-05T09:30:00Z',
+                                   status='ARRIVAL_SCHEDULED'):
+        return {
+            'selfShipAppointmentDetails': {
+                'appointmentId': appointment_id,
+                'appointmentSlotTime': {'startTime': start, 'endTime': end},
+                'appointmentStatus': status,
+            },
+            '_amazon_request_id': 'sched-req-1',
+        }
+
+    def _prepare_selected_future_slot(self, expires_future=True):
+        """Store fresh future slots, select SLOT_ID_1, return the selected slot."""
+        slots = self._store_slots_for_ui()
+        if expires_future:
+            self.physical.sudo().write({
+                'appointment_slots_expires_at': fields.Datetime.now() + timedelta(hours=6),
+            })
+        slot = slots.filtered(lambda s: s.amazon_appointment_slot_id == SLOT_ID_1)
+        slot.action_select_appointment_slot()
+        return slot
+
+    # --- 1. Schedule blocked with no selected slot ---
+    def test_34_schedule_blocked_without_selected_slot(self):
+        self._store_slots_for_ui()  # generation success but nothing selected
+        with self.assertRaises(UserError, msg="select a slot"):
+            self.physical.action_schedule_appointment()
+
+    # --- 2. Schedule blocked when generation != success ---
+    def test_35_schedule_blocked_when_generation_not_success(self):
+        slot = self._prepare_selected_future_slot()
+        self.physical.sudo().write({'appointment_generation_status': 'failed'})
+        with self.assertRaises(UserError, msg="generated successfully"):
+            self.physical.action_schedule_appointment()
+
+    # --- 3. Schedule blocked when slots expired ---
+    def test_36_schedule_blocked_when_expired(self):
+        self._prepare_selected_future_slot()
+        self.physical.sudo().write({
+            'appointment_slots_expires_at': fields.Datetime.now() - timedelta(hours=1),
+        })
+        self.physical.invalidate_recordset()
+        with self.assertRaises(UserError, msg="expired"):
+            self.physical.action_schedule_appointment()
+
+    # --- 4. Schedule blocked when selected slot start is in the past ---
+    def test_37_schedule_blocked_when_start_in_past(self):
+        slot = self._prepare_selected_future_slot()
+        slot.sudo().write({
+            'start_date': fields.Datetime.now() - timedelta(hours=2),
+            'end_date': fields.Datetime.now() - timedelta(hours=1),
+        })
+        with self.assertRaises(UserError, msg="already passed"):
+            self.physical.action_schedule_appointment()
+
+    # --- 5. Schedule blocked when selected slot belongs to another shipment ---
+    def test_38_schedule_blocked_foreign_slot(self):
+        self._prepare_selected_future_slot()
+        other_shipment = self.env['amazon.inbound.shipment'].sudo().create({
+            'name': 'AP-PLAN-002',
+            'shipment_name': 'AP-PLAN-002',
+            'instance_id': self.instance.id,
+            'inbound_plan_id': 'wf0000abcd-0000-abcd-0000-0000abcdffff',
+            'create_operation_status': 'success',
+            'state': 'placement_confirmed',
+        })
+        other_placement = self.env['amazon.fba.placement.option'].sudo().create({
+            'inbound_shipment_id': other_shipment.id,
+            'amazon_placement_option_id': 'pl0000abcd-0000-abcd-0000-0000abcdffff',
+            'status': 'ACCEPTED',
+            'amazon_shipment_ids': '["sh-other-0000"]',
+            'selected': True,
+        })
+        other_physical = self.env['amazon.fba.physical.shipment'].sudo().create({
+            'inbound_shipment_id': other_shipment.id,
+            'placement_option_id': other_placement.id,
+            'amazon_shipment_id': 'sh-other-0000',
+            'shipment_confirmation_id': 'FBA-OTHER',
+            'status': 'WORKING',
+            'destination_fc': 'ONT8',
+        })
+        foreign = self.env['amazon.fba.appointment.slot'].sudo().create({
+            'instance_id': self.instance.id,
+            'inbound_shipment_id': other_shipment.id,
+            'physical_shipment_id': other_physical.id,
+            'amazon_appointment_slot_id': 'slot-foreign-00000000000000000000001',
+            'start_date': '2026-10-06 09:00:00',
+            'end_date': '2026-10-06 09:30:00',
+        })
+        # Force the pointer to a foreign slot (never trust only the pointer).
+        self.physical.sudo().write({'selected_appointment_slot_id': foreign.id})
+        with self.assertRaises(UserError, msg="does not belong"):
+            self.physical.action_schedule_appointment()
+
+    # --- 6. Schedule blocked when amazon_slot_id missing ---
+    def test_39_schedule_blocked_missing_amazon_slot_id(self):
+        slot = self._prepare_selected_future_slot()
+        # amazon_appointment_slot_id is a required column; blank it with raw SQL
+        # (empty string satisfies NOT NULL) to exercise the defensive guard.
+        self.env.flush_all()
+        self.env.cr.execute(
+            "UPDATE amazon_fba_appointment_slot SET amazon_appointment_slot_id = '' "
+            "WHERE id = %s", [slot.id],
+        )
+        slot.invalidate_recordset()
+        with self.assertRaises(UserError, msg="no Amazon slot ID"):
+            self.physical.action_schedule_appointment()
+
+    # --- 7. Opening confirmation wizard makes NO Amazon call ---
+    def test_40_opening_wizard_makes_no_amazon_call(self):
+        self._prepare_selected_future_slot()
+        with patch.object(AmazonAPI, 'schedule_self_ship_appointment',
+                          autospec=True) as mock_sched, \
+             patch.object(AmazonAPI, '_amazon_request', autospec=True) as mock_req:
+            action = self.physical.action_schedule_appointment()
+            mock_sched.assert_not_called()
+            mock_req.assert_not_called()
+        self.assertEqual(action['res_model'],
+                         'amazon.fba.schedule.appointment.wizard')
+        self.assertEqual(action['context']['default_physical_shipment_id'],
+                         self.physical.id)
+
+    def _open_and_confirm(self, response=None, side_effect=None):
+        """Open the wizard and press Confirm Schedule with a mocked API."""
+        action = self.physical.action_schedule_appointment()
+        wizard = self.env['amazon.fba.schedule.appointment.wizard'].with_context(
+            action['context']
+        ).create({})
+        kwargs = {'autospec': True}
+        if side_effect is not None:
+            kwargs['side_effect'] = side_effect
+        else:
+            kwargs['return_value'] = response or self._schedule_success_response()
+        with patch.object(AmazonAPI, 'schedule_self_ship_appointment', **kwargs) as mock_sched:
+            result = wizard.action_confirm_schedule()
+        return wizard, mock_sched, result
+
+    # --- 8 & 9 & 10. Confirm calls endpoint once with correct ids + empty body ---
+    def test_41_confirm_calls_endpoint_once_with_correct_args(self):
+        slot = self._prepare_selected_future_slot()
+        _wizard, mock_sched, _res = self._open_and_confirm()
+        self.assertEqual(mock_sched.call_count, 1)
+        args = mock_sched.call_args
+        # (api_self, instance, access_token, plan_id, shipment_id, slot_id)
+        self.assertEqual(args[0][3], PLAN_ID)
+        self.assertEqual(args[0][4], SHIPMENT_ID)
+        self.assertEqual(args[0][5], SLOT_ID_1)
+        # Initial schedule must send an empty body (no reasonComment).
+        self.assertEqual(args[1].get('body'), {})
+
+    # --- 11 & 12 & 13. Success stores appointment id/start/end/status + status ---
+    def test_42_success_stores_confirmed_appointment(self):
+        self._prepare_selected_future_slot()
+        self._open_and_confirm(response=self._schedule_success_response(
+            appointment_id=4242, status='ARRIVAL_SCHEDULED',
+        ))
+        self.physical.invalidate_recordset()
+        self.assertEqual(self.physical.appointment_confirmation_status, 'success')
+        self.assertEqual(self.physical.confirmed_appointment_id, '4242')
+        self.assertEqual(self.physical.confirmed_appointment_amazon_status,
+                         'ARRIVAL_SCHEDULED')
+        self.assertEqual(self.physical.confirmed_appointment_slot_id, SLOT_ID_1)
+        self.assertTrue(self.physical.confirmed_appointment_start)
+        self.assertTrue(self.physical.confirmed_appointment_end)
+        self.assertEqual(self.physical.confirmed_appointment_duration_minutes, 30)
+        self.assertTrue(self.physical.appointment_confirmed_at)
+
+    # --- 14 & 15 & 16 & 17. Failure marks failed, keeps everything intact ---
+    def test_43_failure_marks_failed_and_preserves_state(self):
+        slot = self._prepare_selected_future_slot()
+        slot_count = len(self.physical.appointment_slot_ids)
+        _wizard, _mock, result = self._open_and_confirm(side_effect=_http_error(400))
+        self.physical.invalidate_recordset()
+        self.assertEqual(self.physical.appointment_confirmation_status, 'failed')
+        # slots intact
+        self.assertEqual(len(self.physical.appointment_slot_ids), slot_count)
+        # selected slot intact
+        self.assertEqual(self.physical.selected_appointment_slot_id, slot)
+        # generation still success
+        self.assertEqual(self.physical.appointment_generation_status, 'success')
+        # no confirmed appointment recorded
+        self.assertFalse(self.physical.confirmed_appointment_id)
+        # returned a (danger) notification rather than raising
+        self.assertEqual(result.get('tag'), 'display_notification')
+
+    # --- 18. Double click / in-progress blocks a new schedule ---
+    def test_44_in_progress_blocks_schedule(self):
+        self._prepare_selected_future_slot()
+        self.physical.sudo().write({'appointment_confirmation_status': 'in_progress'})
+        with self.assertRaises(UserError, msg="already in progress"):
+            self.physical.action_schedule_appointment()
+
+    # --- 19. Same confirmed slot cannot be scheduled twice ---
+    def test_45_same_confirmed_slot_cannot_reschedule(self):
+        self._prepare_selected_future_slot()
+        self._open_and_confirm()
+        self.physical.invalidate_recordset()
+        self.assertEqual(self.physical.appointment_confirmation_status, 'success')
+        # Selecting/scheduling the same slot again is blocked.
+        with self.assertRaises(UserError, msg="already confirmed for the selected slot"):
+            self.physical.action_schedule_appointment()
+
+    # --- 20. Existing confirmed appointment blocks implicit reschedule ---
+    def test_46_confirmed_blocks_implicit_reschedule(self):
+        self._prepare_selected_future_slot()
+        self._open_and_confirm()
+        self.physical.invalidate_recordset()
+        # Point selection at a different slot; must not silently reschedule.
+        other = self.physical.appointment_slot_ids.filtered(
+            lambda s: s.amazon_appointment_slot_id == SLOT_ID_2
+        )
+        self.physical.sudo().write({
+            'selected_appointment_slot_id': other.id,
+            'confirmed_appointment_slot_id': SLOT_ID_1,
+        })
+        with self.assertRaises(UserError, msg="Rescheduling must be performed explicitly"):
+            self.physical.action_schedule_appointment()
+
+    # --- 21. Local Select makes ZERO Amazon calls ---
+    def test_47_local_select_makes_no_amazon_call(self):
+        slots = self._store_slots_for_ui()
+        with patch.object(AmazonAPI, '_amazon_request', autospec=True) as mock_req:
+            slots[0].action_select_appointment_slot()
+            mock_req.assert_not_called()
+
+    # --- 22. Expired slots remain visible but cannot be scheduled ---
+    def test_48_expired_slots_visible_but_not_schedulable(self):
+        self._prepare_selected_future_slot()
+        count = len(self.physical.appointment_slot_ids)
+        self.physical.sudo().write({
+            'appointment_slots_expires_at': fields.Datetime.now() - timedelta(minutes=1),
+        })
+        self.physical.invalidate_recordset()
+        # rows still present
+        self.assertEqual(len(self.physical.appointment_slot_ids), count)
+        self.assertTrue(self.physical.appointment_slots_expired)
+        with self.assertRaises(UserError, msg="expired"):
+            self.physical.action_schedule_appointment()
+
+    # --- 23. Refresh cannot leave a stale selected slot schedulable ---
+    def test_49_refresh_clears_stale_selection_for_scheduling(self):
+        slot = self._prepare_selected_future_slot()
+        # A refresh that no longer returns SLOT_ID_1 must drop the selection.
+        only_slot2 = self._slots_response(slots=[{
+            'slotId': SLOT_ID_2,
+            'slotTime': {'startTime': '2026-10-05T10:00:00Z',
+                         'endTime': '2026-10-05T10:45:00Z'},
+        }], expires_at='2026-10-05T23:59:59Z')
+        with patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
+                          return_value=only_slot2):
+            self.physical._refresh_appointment_slots()
+        self.physical.invalidate_recordset()
+        self.assertFalse(self.physical.selected_appointment_slot_id)
+        # Scheduling is now blocked because nothing is selected.
+        with self.assertRaises(UserError, msg="select a slot"):
+            self.physical.action_schedule_appointment()
+
+    # --- 24. No credentials/tokens stored in error fields ---
+    def test_50_no_secrets_in_error_fields(self):
+        self._prepare_selected_future_slot()
+        self._open_and_confirm(side_effect=_http_error(403))
+        self.physical.invalidate_recordset()
+        blob = ' '.join(filter(None, [
+            self.physical.appointment_schedule_error_code or '',
+            self.physical.appointment_schedule_error_message or '',
+            self.physical.appointment_confirmation_response or '',
+        ])).lower()
+        for secret_marker in ('x-amz-access-token', 'access_token', 'refresh_token',
+                              'client_secret', 'authorization', 'aws_secret'):
+            self.assertNotIn(secret_marker, blob)
+        # Diagnostics still captured something useful.
+        self.assertTrue(self.physical.appointment_schedule_error_code)
+
+    # --- Wizard confirm returns a close action on success ---
+    def test_51_wizard_success_returns_close_next(self):
+        self._prepare_selected_future_slot()
+        _wizard, _mock, result = self._open_and_confirm()
+        self.assertEqual(result.get('tag'), 'display_notification')
+        self.assertEqual(result['params']['next']['type'], 'ir.actions.act_window_close')
+
+    # ==================================================================
+    # Refresh / expiry persistence (getSelfShipAppointmentSlots is GET-only:
+    # it retrieves the last generated snapshot and never regenerates).
+    # ==================================================================
+
+    # --- 1. GET returns future expiresAt -> stored correctly ---
+    def test_52_refresh_stores_future_expiry(self):
+        self._set_confirmed()
+        self.physical.sudo().write({'appointment_generation_status': 'success'})
+        with patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
+                          return_value=self._slots_response(
+                              expires_at='2026-12-31T23:59:59Z')):
+            self.physical._refresh_appointment_slots()
+        self.physical.invalidate_recordset()
+        self.assertEqual(
+            fields.Datetime.to_string(self.physical.appointment_slots_expires_at),
+            '2026-12-31 23:59:59',
+        )
+        self.assertFalse(self.physical.appointment_slots_expired)
+
+    # --- 2. GET returns old/expired expiresAt -> stored exactly as returned ---
+    #     (This is the real amazon24sep case: Amazon keeps returning the old
+    #     snapshot with a past expiresAt; Odoo must not mask it.)
+    def test_53_refresh_stores_expired_expiry_verbatim(self):
+        self._set_confirmed()
+        self.physical.sudo().write({'appointment_generation_status': 'success'})
+        past = fields.Datetime.now() - timedelta(hours=6)
+        past_iso = past.strftime('%Y-%m-%dT%H:%M:%SZ')
+        with patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
+                          return_value=self._slots_response(expires_at=past_iso)):
+            self.physical._refresh_appointment_slots()
+        self.physical.invalidate_recordset()
+        self.assertEqual(
+            fields.Datetime.to_string(self.physical.appointment_slots_expires_at),
+            past.strftime('%Y-%m-%d %H:%M:%S'),
+        )
+        # Flag correctly reflects Amazon's real (expired) state.
+        self.assertTrue(self.physical.appointment_slots_expired)
+
+    # --- 3. GET missing expiresAt -> safe deterministic behavior ---
+    def test_54_refresh_missing_expiry_clears_field(self):
+        self._set_confirmed()
+        self.physical.sudo().write({'appointment_generation_status': 'success'})
+        resp = self._slots_response()
+        # Remove expiresAt entirely from the availability envelope.
+        resp['selfShipAppointmentSlotsAvailability'].pop('expiresAt', None)
+        with patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
+                          return_value=resp):
+            self.physical._refresh_appointment_slots()
+        self.physical.invalidate_recordset()
+        # Deterministic: no expiry stored, so not flagged expired.
+        self.assertFalse(self.physical.appointment_slots_expires_at)
+        self.assertFalse(self.physical.appointment_slots_expired)
+        # Slots themselves are still stored.
+        self.assertEqual(len(self.physical.appointment_slot_ids), 2)
+
+    # --- 4. Pagination does not overwrite expiry incorrectly ---
+    def test_55_pagination_keeps_first_page_expiry(self):
+        self._set_confirmed()
+        self.physical.sudo().write({'appointment_generation_status': 'success'})
+        page1 = self._slots_response(
+            slots=[{'slotId': SLOT_ID_1,
+                    'slotTime': {'startTime': '2026-12-01T09:00:00Z',
+                                 'endTime': '2026-12-01T09:30:00Z'}}],
+            expires_at='2026-12-31T23:59:59Z', pagination_token='p2',
+        )
+        # Second page carries a DIFFERENT expiresAt that must be ignored.
+        page2 = self._slots_response(
+            slots=[{'slotId': SLOT_ID_2,
+                    'slotTime': {'startTime': '2026-12-02T09:00:00Z',
+                                 'endTime': '2026-12-02T09:30:00Z'}}],
+            expires_at='2026-01-01T00:00:00Z',
+        )
+
+        def mock_get(*args, **kwargs):
+            # autospec call: (api_self, instance, access_token, plan_id,
+            # shipment_id, page_size, pagination_token) -> token is args[6].
+            token = kwargs.get('pagination_token') or (args[6] if len(args) > 6 else None)
+            return page2 if token == 'p2' else page1
+
+        with patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
+                          side_effect=mock_get):
+            self.physical._refresh_appointment_slots()
+        self.physical.invalidate_recordset()
+        self.assertEqual(len(self.physical.appointment_slot_ids), 2)
+        # First page's expiry wins; the later page never overwrites it.
+        self.assertEqual(
+            fields.Datetime.to_string(self.physical.appointment_slots_expires_at),
+            '2026-12-31 23:59:59',
+        )
+
+    # --- 5. Existing slots are not deleted on a failed refresh ---
+    def test_56_failed_refresh_keeps_existing_slots(self):
+        self._set_confirmed()
+        self.physical.sudo().write({'appointment_generation_status': 'success'})
+        with patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
+                          return_value=self._slots_response()):
+            self.physical._refresh_appointment_slots()
+        count = len(self.physical.appointment_slot_ids)
+        self.assertEqual(count, 2)
+        # A subsequent refresh that errors must not touch the stored slots.
+        with patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
+                          side_effect=_http_error(500)):
+            with self.assertRaises(UserError):
+                self.physical._refresh_appointment_slots()
+        self.physical.invalidate_recordset()
+        self.assertEqual(len(self.physical.appointment_slot_ids), count)
+
+    # --- 6. Selected slot handling remains correct across refresh ---
+    def test_57_refresh_keeps_still_offered_selection(self):
+        self._set_confirmed()
+        self.physical.sudo().write({'appointment_generation_status': 'success'})
+        with patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
+                          return_value=self._slots_response()):
+            self.physical._refresh_appointment_slots()
+        slot = self.physical.appointment_slot_ids.filtered(
+            lambda s: s.amazon_appointment_slot_id == SLOT_ID_1)
+        slot.action_select_appointment_slot()
+        # A refresh that still returns SLOT_ID_1 keeps the selection.
+        with patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
+                          return_value=self._slots_response()):
+            self.physical._refresh_appointment_slots()
+        self.physical.invalidate_recordset()
+        self.assertEqual(self.physical.selected_appointment_slot_id.amazon_appointment_slot_id,
+                         SLOT_ID_1)
+
+    # --- 7, 8, 9. Refresh calls only GET — never generate/schedule/cancel ---
+    def test_58_refresh_calls_only_get(self):
+        self._set_confirmed()
+        self.physical.sudo().write({'appointment_generation_status': 'success'})
+        # AmazonAPI must not even define a cancel operation.
+        self.assertFalse(hasattr(AmazonAPI, 'cancel_self_ship_appointment'))
+        with patch.object(AmazonAPI, 'generate_self_ship_appointment_slots',
+                          autospec=True) as mock_gen, \
+             patch.object(AmazonAPI, 'schedule_self_ship_appointment',
+                          autospec=True) as mock_sched, \
+             patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
+                          return_value=self._slots_response()) as mock_get:
+            self.physical._refresh_appointment_slots()
+            self.assertEqual(mock_get.call_count, 1)
+            mock_gen.assert_not_called()
+            mock_sched.assert_not_called()
