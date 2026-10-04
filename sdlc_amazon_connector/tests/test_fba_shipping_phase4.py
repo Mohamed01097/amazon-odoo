@@ -1727,6 +1727,7 @@ class TestFbaShippingPhase4(TransactionCase):
             '/web/content/%s?download=true' % physical.shipping_label_attachment_id.id,
         )
         self.assertEqual(labels_mock.call_args.args[3], 'FBA1234ABCD')
+        # SPD path: authoritative box IDs sent as PackageLabelsToPrint, no pagination.
         self.assertEqual(labels_mock.call_args.args[-1], ['FBA10ABC0YY100001'])
         self.assertEqual(labels_mock.call_count, 1)
         self.assertEqual(download_mock.call_count, 1)
@@ -1737,6 +1738,187 @@ class TestFbaShippingPhase4(TransactionCase):
             'amazon_fba_FBA1234ABCD_box_labels.pdf',
         )
         self.assertFalse(physical.label_download_url)
+
+    def test_17a_non_partnered_ltl_labels_blocked_without_live_call(self):
+        """Non-Partnered LTL/FTL box labels are blocked before any Amazon call.
+
+        Amazon cannot generate carton/carrier labels for a freight shipment set
+        up without pallet/freight information (the connector does not submit it),
+        so the request is refused with an actionable error and no live call.
+        """
+        physical = self.shipment.physical_shipment_ids
+        physical.write({
+            'transportation_confirmation_status': 'success',
+            'shipping_mode': 'FREIGHT_LTL',
+            'carrier_type': 'non_partnered',
+        })
+        self.assertTrue(physical._is_non_partnered_ltl())
+        with (
+            patch.object(
+                type(self.instance), '_get_access_token_or_raise', return_value='test-token',
+            ) as token_mock,
+            patch.object(AmazonAPI, 'list_shipment_boxes', autospec=True) as boxes_mock,
+            patch.object(AmazonAPI, 'get_inbound_labels_v0', autospec=True) as labels_mock,
+        ):
+            with self.assertRaisesRegex(UserError, 'Non-Partnered LTL/FTL'):
+                physical.action_get_shipping_labels()
+        # Zero live Amazon work: no boxes refresh, no getLabels, no token fetch.
+        self.assertEqual(boxes_mock.call_count, 0)
+        self.assertEqual(labels_mock.call_count, 0)
+        self.assertEqual(token_mock.call_count, 0)
+        self.assertNotEqual(physical.labels_status, 'success')
+        self.assertFalse(physical.shipping_label_attachment_id)
+
+    def test_17b_ltl_block_reason_only_applies_to_non_partnered_freight(self):
+        """The block targets Non-Partnered LTL/FTL only; SPD is unaffected."""
+        physical = self.shipment.physical_shipment_ids
+        # Small Parcel: no block.
+        physical.write({'shipping_mode': 'GROUND_SMALL_PARCEL', 'carrier_type': 'non_partnered'})
+        self.assertFalse(physical._is_non_partnered_ltl())
+        self.assertFalse(physical._ltl_labels_block_reason())
+        # Amazon-partnered freight: not a USE_YOUR_OWN_CARRIER block case.
+        physical.write({'shipping_mode': 'FREIGHT_LTL', 'carrier_type': 'partnered'})
+        physical.selected_transportation_option_id = False
+        self.assertFalse(physical._is_non_partnered_ltl())
+        self.assertFalse(physical._ltl_labels_block_reason())
+        # Non-partnered LTL: blocked with an actionable reason.
+        physical.write({'shipping_mode': 'FREIGHT_LTL', 'carrier_type': 'non_partnered'})
+        self.assertTrue(physical._is_non_partnered_ltl())
+        reason = physical._ltl_labels_block_reason()
+        self.assertTrue(reason)
+        self.assertIn('pallet and freight', reason)
+
+    def test_17c_get_labels_wrapper_serializes_pagination_only_when_given(self):
+        """The API wrapper adds PageSize/PageStartIndex only when supplied."""
+        api = AmazonAPI()
+        response = MagicMock()
+        response.json.return_value = {'payload': {'DownloadURL': 'https://example.test/l.pdf'}}
+        response.headers = {}
+        response.status_code = 200
+        # Without pagination (SPD): params must not contain PageSize/PageStartIndex.
+        with patch.object(api, '_amazon_request', return_value=response) as request:
+            api.get_inbound_labels_v0(
+                self.instance, 'test-token', 'FBA1234ABCD', 'PackageLabel_A4_2',
+                'UNIQUE', 2, ['BOX-1', 'BOX-2'],
+            )
+        params = request.call_args.kwargs['params']
+        self.assertNotIn('PageSize', params)
+        self.assertNotIn('PageStartIndex', params)
+        self.assertEqual(params['PackageLabelsToPrint'], 'BOX-1,BOX-2')
+        # With pagination supplied: both are serialized.
+        with patch.object(api, '_amazon_request', return_value=response) as request:
+            api.get_inbound_labels_v0(
+                self.instance, 'test-token', 'FBA1234ABCD', 'PackageLabel_A4_2',
+                'UNIQUE', 9, ['BOX-1'], page_size=9, page_start_index=0,
+            )
+        params = request.call_args.kwargs['params']
+        self.assertEqual(params['PageSize'], 9)
+        self.assertEqual(params['PageStartIndex'], 0)
+
+    def test_17d_label_validation_blocks_invalid_requests(self):
+        """Validation errors are raised before any Amazon getLabels request."""
+        physical = self.shipment.physical_shipment_ids
+        physical.write({'transportation_confirmation_status': 'success'})
+
+        # Missing shipment confirmation id.
+        physical.shipment_confirmation_id = False
+        with self.assertRaisesRegex(UserError, 'shipmentConfirmationId'):
+            physical.action_get_shipping_labels()
+        physical.shipment_confirmation_id = 'FBA1234ABCD'
+
+        # Missing page type.
+        physical.label_page_type = False
+        with self.assertRaisesRegex(UserError, 'label page type'):
+            physical.action_get_shipping_labels()
+        physical.label_page_type = 'PackageLabel_A4_2'
+
+        # Zero boxes returned by Amazon -> no getLabels call.
+        with (
+            patch.object(
+                type(self.instance), '_get_access_token_or_raise', return_value='test-token',
+            ),
+            patch.object(
+                AmazonAPI, 'list_shipment_boxes', autospec=True, return_value={'boxes': []},
+            ),
+            patch.object(AmazonAPI, 'get_inbound_labels_v0', autospec=True) as labels_mock,
+        ):
+            with self.assertRaisesRegex(UserError, 'box ID'):
+                physical.action_get_shipping_labels()
+        self.assertEqual(labels_mock.call_count, 0)
+
+        # A box missing its official Amazon boxId is rejected before getLabels.
+        with (
+            patch.object(
+                type(self.instance), '_get_access_token_or_raise', return_value='test-token',
+            ),
+            patch.object(
+                AmazonAPI, 'list_shipment_boxes', autospec=True,
+                return_value={'boxes': [{'boxId': '', 'quantity': 1}]},
+            ),
+            patch.object(AmazonAPI, 'get_inbound_labels_v0', autospec=True) as labels_mock,
+        ):
+            with self.assertRaisesRegex(UserError, 'without boxId'):
+                physical.action_get_shipping_labels()
+        self.assertEqual(labels_mock.call_count, 0)
+
+    def test_17e_label_failure_is_sanitized_and_leaves_no_success(self):
+        """An Amazon label error surfaces as UserError without leaking secrets."""
+        physical = self.shipment.physical_shipment_ids
+        physical.write({'transportation_confirmation_status': 'success'})
+        diagnostic = (
+            'HTTP Status: 400\nAmazon Error Code: InvalidInput\n'
+            'Request Headers: {"x-amz-access-token": "<redacted>"}'
+        )
+        http_error = requests.exceptions.HTTPError(diagnostic)
+        http_error.amazon_diagnostic = diagnostic
+        with (
+            patch.object(
+                type(self.instance), '_get_access_token_or_raise', return_value='test-token',
+            ),
+            patch.object(
+                AmazonAPI, 'list_shipment_boxes', autospec=True,
+                return_value={'boxes': [{'boxId': 'FBA1234ABCDU000001', 'quantity': 1}]},
+            ),
+            patch.object(
+                AmazonAPI, 'get_inbound_labels_v0', autospec=True, side_effect=http_error,
+            ),
+        ):
+            with self.assertRaises(UserError) as ctx:
+                physical.action_get_shipping_labels()
+        message = str(ctx.exception)
+        self.assertIn('InvalidInput', message)
+        self.assertNotIn('Atza|', message)
+        self.assertNotEqual(physical.labels_status, 'success')
+        self.assertFalse(physical.shipping_label_attachment_id)
+
+    def test_17f_blocked_label_request_leaves_dispatch_state_untouched(self):
+        """A blocked LTL label request must not mutate transportation/tracking state."""
+        physical = self.shipment.physical_shipment_ids
+        physical.write({
+            'transportation_confirmation_status': 'success',
+            'transportation_confirmation_operation_id': 'op-transport-confirm',
+            'shipping_mode': 'FREIGHT_LTL',
+            'carrier_type': 'non_partnered',
+            'tracking_status': 'success',
+            'tracking_number': 'OWN-CARRIER-123',
+        })
+        fields_to_check = [
+            'transportation_confirmation_status', 'transportation_confirmation_operation_id',
+            'selected_transportation_option_id', 'selected_appointment_slot_id',
+            'appointment_generation_status', 'tracking_status', 'tracking_number', 'picking_id',
+        ]
+
+        def snapshot():
+            return {
+                f: (physical[f].id if hasattr(physical[f], 'id') else physical[f])
+                for f in fields_to_check
+            }
+
+        before = snapshot()
+        with self.assertRaisesRegex(UserError, 'Non-Partnered LTL/FTL'):
+            physical.action_get_shipping_labels()
+        self.assertNotEqual(physical.labels_status, 'success')
+        self.assertEqual(before, snapshot())
 
     def test_18_ambiguous_transport_write_is_not_replayed(self):
         physical = self.shipment.physical_shipment_ids

@@ -1,0 +1,40 @@
+<odoo>
+    <record id="amazon_import_order_by_id_wizard_form" model="ir.ui.view">
+        <field name="name">amazon.import.order.by.id.wizard.form</field>
+        <field name="model">amazon.import.order.by.id.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Import Amazon Order by ID">
+                <div class="alert alert-info" role="alert">
+                    Controlled single-order import. Fetches exactly one Amazon order
+                    (getOrder), reuses the normal import pipeline, and is idempotent.
+                    It does not advance the order sync date, does not activate any cron,
+                    and does not enable auto-sync. Keep "Hold FBA stock for review"
+                    enabled for a first validation so no stock is moved automatically.
+                </div>
+                <group>
+                    <field name="instance_id"/>
+                    <field name="amazon_order_ref" placeholder="e.g. 402-0436313-9746740"/>
+                    <field name="hold_fba_stock"/>
+                </group>
+                <footer>
+                    <button name="action_import" type="object" string="Import Order" class="btn-primary"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="amazon_import_order_by_id_wizard_action" model="ir.actions.act_window">
+        <field name="name">Import Amazon Order by ID</field>
+        <field name="res_model">amazon.import.order.by.id.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <menuitem id="amazon_import_order_by_id_menu"
+              parent="amazon_orders_menu"
+              name="Import Order by ID"
+              action="amazon_import_order_by_id_wizard_action"
+              groups="sdlc_amazon_connector.group_amazon_manager"
+              sequence="35"/>
+</odoo>

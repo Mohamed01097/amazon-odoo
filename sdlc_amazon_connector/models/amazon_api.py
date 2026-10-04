@@ -825,14 +825,36 @@ class AmazonAPI():
             )
             return cls._orders_money_to_v0(detail.get('value'))
 
+        quantity = item.get('quantityOrdered', 0) or 0
+        # Authoritative customer merchandise price. ItemProduct.price.unitPrice is
+        # documented as the price of a SINGLE unit, before any quantity-based
+        # calculation. The connector's staging ``item_price`` is the extended line
+        # total (action_create_sale_order divides it by quantity to get price_unit),
+        # so the per-unit amount is multiplied by the ordered quantity here.
+        # ``proceeds`` (seller net proceeds) is only used as a fallback because it
+        # is frequently null for Amazon Egypt FBA responses.
+        unit_price = (product.get('price') or {}).get('unitPrice') or {}
+        unit_amount = unit_price.get('amount')
+        item_price = subtotal('ITEM')
+        if unit_amount is not None:
+            try:
+                extended = float(unit_amount) * float(quantity or 0)
+            except (TypeError, ValueError):
+                extended = None
+            if extended is not None:
+                item_price = {
+                    'Amount': extended,
+                    'CurrencyCode': unit_price.get('currencyCode'),
+                }
+
         return {
             'OrderItemId': item.get('orderItemId'),
             'SellerSKU': product.get('sellerSku'),
             'ASIN': product.get('asin'),
             'Title': product.get('title'),
-            'QuantityOrdered': item.get('quantityOrdered', 0),
+            'QuantityOrdered': quantity,
             'QuantityShipped': (item.get('fulfillment') or {}).get('quantityFulfilled', 0),
-            'ItemPrice': subtotal('ITEM'),
+            'ItemPrice': item_price,
             'ShippingPrice': subtotal('SHIPPING'),
             'ItemTax': detailed('TAX', 'ITEM'),
             'PromotionDiscount': subtotal('DISCOUNT'),
@@ -850,6 +872,32 @@ class AmazonAPI():
         address = recipient.get('deliveryAddress') or {}
         status = fulfillment.get('fulfillmentStatus')
         fulfilled_by = fulfillment.get('fulfilledBy')
+        items = [cls._normalize_order_item_2026(item) for item in order.get('orderItems') or []]
+        # Order total: Amazon's seller ``proceeds.grandTotal`` is authoritative when
+        # present, but it is frequently null for Amazon Egypt FBA. Fall back to a
+        # deterministic sum of the normalized item components so a non-zero product
+        # price never collapses to a zero-value order.
+        grand_total = proceeds.get('grandTotal') or {}
+        if grand_total.get('amount') is not None:
+            order_total = cls._orders_money_to_v0(grand_total)
+        else:
+            total = 0.0
+            currency = None
+            for normalized_item in items:
+                for key, sign in (
+                    ('ItemPrice', 1), ('ItemTax', 1),
+                    ('ShippingPrice', 1), ('PromotionDiscount', -1),
+                ):
+                    money = normalized_item.get(key) or {}
+                    amount = money.get('Amount')
+                    if amount is None:
+                        continue
+                    try:
+                        total += sign * float(amount)
+                    except (TypeError, ValueError):
+                        continue
+                    currency = currency or money.get('CurrencyCode')
+            order_total = {'Amount': total, 'CurrencyCode': currency}
         return {
             'AmazonOrderId': order.get('orderId'),
             'PurchaseDate': order.get('createdTime'),
@@ -860,7 +908,7 @@ class AmazonAPI():
             'SalesChannel': sales_channel.get('marketplaceName') or sales_channel.get('channelName'),
             'IsPrime': 'PRIME' in programs,
             'IsBusinessOrder': 'AMAZON_BUSINESS' in programs,
-            'OrderTotal': cls._orders_money_to_v0(proceeds.get('grandTotal')),
+            'OrderTotal': order_total,
             'ShipServiceLevel': fulfillment.get('fulfillmentServiceLevel'),
             'ShippingAddress': {
                 'Name': address.get('name'),
@@ -873,7 +921,7 @@ class AmazonAPI():
             } if address else {},
             # searchOrders includes orderItems. Keeping them on the normalized
             # order removes the legacy per-order getOrderItems request.
-            'OrderItems': [cls._normalize_order_item_2026(item) for item in order.get('orderItems') or []],
+            'OrderItems': items,
         }
 
     @classmethod
@@ -1713,8 +1761,15 @@ class AmazonAPI():
 
     def get_inbound_labels_v0(self, instance, access_token, shipment_confirmation_id,
                               page_type, label_type='UNIQUE', number_of_packages=None,
-                              package_labels_to_print=None):
-        """Return package/pallet label metadata from the preserved v0 operation."""
+                              package_labels_to_print=None, page_size=None,
+                              page_start_index=None):
+        """Return package/pallet label metadata from the preserved v0 operation.
+
+        ``page_size``/``page_start_index`` paginate through the total packages'
+        labels. The Fulfillment Inbound v0 ``getLabels`` contract makes both
+        parameters *required for Non-Partnered LTL shipments*; they are omitted
+        for the Small-Parcel (SPD) path so that behavior is unchanged.
+        """
         endpoint = self._get_endpoint(instance)
         url = f"{endpoint}/fba/inbound/v0/shipments/{shipment_confirmation_id}/labels"
         params = {'PageType': page_type, 'LabelType': label_type}
@@ -1723,6 +1778,10 @@ class AmazonAPI():
         if package_labels_to_print:
             # SP-API generated clients serialize this array query parameter as CSV.
             params['PackageLabelsToPrint'] = ','.join(package_labels_to_print)
+        if page_size is not None:
+            params['PageSize'] = page_size
+        if page_start_index is not None:
+            params['PageStartIndex'] = page_start_index
         resp = self._amazon_request(instance, access_token, 'GET', url, params=params)
         return self._json_response_with_request_id(resp)
 

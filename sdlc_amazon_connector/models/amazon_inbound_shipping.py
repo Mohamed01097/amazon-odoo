@@ -1833,34 +1833,58 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             raise UserError(_("Amazon has not returned any box IDs for this physical shipment."))
         return self.shipment_box_ids
 
-    def action_get_shipping_labels(self):
-        """Retrieve official box IDs and durably store the Amazon label document."""
+    def _is_non_partnered_ltl(self):
+        """Return True when the confirmed transportation is Non-Partnered LTL/FTL.
+
+        The decision is taken from the confirmed transportation data (shipping
+        mode + carrier/solution), never from UI text. Amazon's v0 ``getLabels``
+        operation cannot produce carton/carrier labels for such freight
+        shipments unless pallet and freight information was supplied at
+        transportation generation (see ``_ltl_labels_block_reason``).
+        """
         self.ensure_one()
-        self.inbound_shipment_id._check_inbound_manager_access()
-        if self.transportation_confirmation_status != 'success':
-            raise UserError(_("Confirm transportation successfully before requesting box labels."))
-        if not (self.shipment_confirmation_id or '').strip():
-            raise UserError(_("Amazon shipmentConfirmationId is required for shipping labels."))
-        if self.labels_status == 'success' and self.shipping_label_attachment_id:
-            return {
-                'type': 'ir.actions.act_url',
-                'url': '/web/content/%s?download=true' % self.shipping_label_attachment_id.id,
-                'target': 'new',
-            }
-        boxes = self._refresh_shipment_boxes()
-        access_token = self.instance_id._get_access_token_or_raise()
-        result = self.instance_id._api_call_safe(
-            AmazonAPI().get_inbound_labels_v0,
-            self.instance_id, access_token, self.shipment_confirmation_id.strip(),
-            self.label_page_type, 'UNIQUE', len(boxes), boxes.mapped('amazon_box_id'),
-            error_msg=_("Failed to retrieve Amazon inbound shipping labels"),
+        option = self.selected_transportation_option_id
+        mode = (self.shipping_mode or (option.shipping_mode if option else '') or '').upper()
+        if mode not in ('FREIGHT_LTL', 'FREIGHT_FTL'):
+            return False
+        if self.carrier_type == 'non_partnered':
+            return True
+        return bool(option) and option.shipping_solution == 'USE_YOUR_OWN_CARRIER'
+
+    def _ltl_labels_block_reason(self):
+        """Return an actionable message if box labels cannot be produced, else False.
+
+        Evidence (three live attempts + the authoritative Fulfillment Inbound
+        contract) established that Amazon's v0 ``getLabels`` cannot generate
+        carton/carrier labels for a Non-Partnered LTL/FTL shipment that was set
+        up without pallet and freight information. That information is only
+        provided through ``generateTransportationOptions`` (the
+        ``ShipmentTransportationConfiguration.pallets`` /``freightInformation``
+        fields), and this connector's transportation payload does not submit it
+        yet. Firing ``getLabels`` anyway returns a misleading HTTP 400
+        ("not able to fetch carrier labels while it is required"), so we block it
+        with a clear explanation instead and make no doomed Amazon call.
+        """
+        self.ensure_one()
+        if not self._is_non_partnered_ltl():
+            return False
+        return _(
+            "Box labels are not available for this shipment yet. It uses a "
+            "Non-Partnered LTL/FTL freight transportation option "
+            "(USE_YOUR_OWN_CARRIER), and Amazon cannot generate the required "
+            "carton/carrier labels for a freight shipment that was set up without "
+            "pallet and freight information. That information is supplied during "
+            "transportation generation, which this connector does not yet submit "
+            "for freight, so Amazon rejects the label request (HTTP 400: \"not "
+            "able to fetch carrier labels while it is required\"). Use a "
+            "Small-Parcel (SPD) transportation option for this shipment, or extend "
+            "the LTL transportation step to provide pallet/freight details, before "
+            "requesting labels."
         )
-        payload = result.get('payload') if isinstance(result, dict) else False
-        url = str((payload or {}).get('DownloadURL') or '').strip()
-        parsed_url = urlparse(url)
-        if parsed_url.scheme != 'https' or not parsed_url.netloc:
-            self.sudo().write({'labels_status': 'failed', 'label_download_url': False})
-            raise UserError(_("Amazon did not return a secure shipping-label download URL."))
+
+    def _store_amazon_label_document(self, url, safe_source, reuse_attachment=None):
+        """Securely download one Amazon label document and persist it as an attachment."""
+        self.ensure_one()
         try:
             response = requests.get(url, timeout=(10, 60), allow_redirects=True)
             response.raise_for_status()
@@ -1877,9 +1901,6 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             raise UserError(_(
                 "Amazon returned an empty or oversized shipping-label document (maximum 25 MiB)."
             ))
-        safe_reference = re.sub(
-            r'[^A-Za-z0-9._-]+', '_', self.shipment_confirmation_id.strip()
-        )
         if content.startswith(b'%PDF-'):
             extension = 'pdf'
             content_type = 'application/pdf'
@@ -1889,6 +1910,7 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
         else:
             self.sudo().write({'labels_status': 'failed', 'label_download_url': False})
             raise UserError(_("Amazon returned an unsupported shipping-label document format."))
+        safe_reference = re.sub(r'[^A-Za-z0-9._-]+', '_', safe_source)
         filename = 'amazon_fba_%s_box_labels.%s' % (safe_reference, extension)
         attachment_vals = {
             'name': filename,
@@ -1898,17 +1920,76 @@ class AmazonFbaPhysicalShipmentDispatch(models.Model):
             'res_model': self._name,
             'res_id': self.id,
         }
-        attachment = self.shipping_label_attachment_id.sudo()
+        attachment = reuse_attachment.sudo() if reuse_attachment else False
         if attachment:
             attachment.write(attachment_vals)
         else:
             attachment = self.env['ir.attachment'].sudo().create(attachment_vals)
+        return attachment
+
+    def action_get_shipping_labels(self):
+        """Retrieve official box IDs and durably store the Amazon label document."""
+        self.ensure_one()
+        self.inbound_shipment_id._check_inbound_manager_access()
+        if self.transportation_confirmation_status != 'success':
+            raise UserError(_("Confirm transportation successfully before requesting box labels."))
+        if not (self.shipment_confirmation_id or '').strip():
+            raise UserError(_("Amazon shipmentConfirmationId is required for shipping labels."))
+        page_type = (self.label_page_type or '').strip()
+        if not page_type:
+            raise UserError(_("Select a label page type before requesting box labels."))
+        if self.labels_status == 'success' and self.shipping_label_attachment_id:
+            return {
+                'type': 'ir.actions.act_url',
+                'url': '/web/content/%s?download=true' % self.shipping_label_attachment_id.id,
+                'target': 'new',
+            }
+        # Pre-flight: freight (Non-Partnered LTL/FTL) shipments cannot have box
+        # labels generated by Amazon without pallet/freight info. Block before
+        # any Amazon call so no doomed request is sent.
+        block_reason = self._ltl_labels_block_reason()
+        if block_reason:
+            raise UserError(block_reason)
+
+        boxes = self._refresh_shipment_boxes()
+        package_count = len(boxes)
+        if package_count <= 0:
+            raise UserError(_("Amazon has not returned any box IDs for this physical shipment."))
+        # Authoritative Amazon carton/box IDs from listShipmentBoxes. These
+        # populate PackageLabelsToPrint (-> cartonIdList), which Amazon requires
+        # non-null for LabelType=UNIQUE. Local packing names (BOX-000x) live in a
+        # different table and never reach here.
+        box_ids = [bid for bid in boxes.mapped('amazon_box_id') if (bid or '').strip()]
+        if len(box_ids) != package_count:
+            raise UserError(_(
+                "Every Amazon box requires an official boxId before box labels can be requested."
+            ))
+        shipment_confirmation_id = self.shipment_confirmation_id.strip()
+        access_token = self.instance_id._get_access_token_or_raise()
+
+        result = self.instance_id._api_call_safe(
+            AmazonAPI().get_inbound_labels_v0,
+            self.instance_id, access_token, shipment_confirmation_id,
+            page_type, 'UNIQUE', package_count, box_ids,
+            error_msg=_("Failed to retrieve Amazon inbound shipping labels"),
+        )
+        payload = result.get('payload') if isinstance(result, dict) else False
+        url = str((payload or {}).get('DownloadURL') or '').strip()
+        parsed_url = urlparse(url)
+        if parsed_url.scheme != 'https' or not parsed_url.netloc:
+            self.sudo().write({'labels_status': 'failed', 'label_download_url': False})
+            raise UserError(_("Amazon did not return a secure shipping-label download URL."))
+
+        attachment = self._store_amazon_label_document(
+            url, shipment_confirmation_id,
+            reuse_attachment=self.shipping_label_attachment_id,
+        )
         self.sudo().write({
             'labels_status': 'success',
             'label_download_url': False,
             'shipping_label_attachment_id': attachment.id,
-            'shipping_label_filename': filename,
-            'shipping_label_content_type': content_type,
+            'shipping_label_filename': attachment.name,
+            'shipping_label_content_type': attachment.mimetype,
             'labels_last_synced_at': fields.Datetime.now(),
         })
         return {

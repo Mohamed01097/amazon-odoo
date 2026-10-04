@@ -770,6 +770,14 @@ Return ONLY valid JSON:
                 % (self.amazon_order_ref, ", ".join(missing_refs))
             )
 
+        if sum(self.order_line_ids.mapped('item_price')) <= 0:
+            raise UserError(
+                "Cannot create Odoo sale order for Amazon order %s: no positive item "
+                "price was imported, which would create a zero-value order. Review the "
+                "Amazon pricing data (product.price.unitPrice / proceeds) before creating "
+                "the Sale Order." % self.amazon_order_ref
+            )
+
         partner = self._get_or_create_partner()
         order_vals = {
             'partner_id': partner.id,
@@ -802,6 +810,12 @@ Return ONLY valid JSON:
                 'name': line.title or line.sku or 'Amazon Product',
                 'product_uom_qty': line.quantity,
                 'price_unit': line.item_price / line.quantity if line.quantity else line.item_price,
+                # Amazon's imported price already reflects the marketplace's
+                # customer-facing amount. Clearing Odoo's default product taxes
+                # prevents double taxation on top of an Amazon tax-inclusive price.
+                # Whether Egypt VAT should instead be modelled as a separate tax
+                # line is an accounting configuration decision (see audit report).
+                'tax_ids': [(6, 0, [])],
             }))
         order_vals['order_line'] = lines
 
@@ -816,11 +830,29 @@ Return ONLY valid JSON:
         }
 
     def _get_or_create_partner(self):
-        """Find or create a res.partner for the Amazon buyer."""
-        name = self.shipping_address_name or 'Amazon Customer'
-        partner = self.env['res.partner'].search([('name', '=', name)], limit=1)
+        """Find or create a res.partner for the Amazon buyer.
+
+        Amazon Egypt FBA responses legitimately omit recipient PII, so a generic
+        customer is used when no shipping name is available. The lookup is scoped
+        to the instance's company and the generic customer is namespaced per
+        instance, so an unrelated same-named partner in another company (or a bare
+        global "Amazon Customer") is never matched by accident. No PII is required.
+        """
+        company = self.instance_id.company_id or self.env.company
+        if self.shipping_address_name:
+            name = self.shipping_address_name
+        else:
+            name = 'Amazon Customer - %s' % (self.instance_id.name or 'Amazon')
+        partner = self.env['res.partner'].search([
+            ('name', '=', name),
+            '|', ('company_id', '=', company.id), ('company_id', '=', False),
+        ], limit=1)
         if not partner:
-            vals = {'name': name}
+            vals = {
+                'name': name,
+                'company_id': company.id,
+                'comment': 'Amazon connector customer (instance: %s)' % (self.instance_id.name or ''),
+            }
             if self.shipping_address_line1:
                 vals['street'] = self.shipping_address_line1
             if self.shipping_address_line2:

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 import requests
 
-from odoo import models, fields, api
+from odoo import _, models, fields, api
 
 from .amazon_api import AmazonAPI, amazon_safe_before_dt, amazon_safe_before_iso, amazon_to_utc_naive
 from .amazon_instance import _amazon_datetime_to_odoo
@@ -56,6 +56,13 @@ class AmazonOrderImportJob(models.Model):
         ('MFN', 'FBM'),
         ('AFN', 'FBA'),
     ], string='Fulfillment Channel', help="Leave empty to import both FBM and FBA orders.")
+    is_single_order = fields.Boolean(
+        'Controlled Single-Order Import', readonly=True,
+        help="Set when this record was produced by the manager-only 'Import Amazon "
+             "Order by ID' wizard. Such jobs are created in a terminal state, are never "
+             "picked up by the processing cron, and do not advance last_order_sync.",
+    )
+    single_order_ref = fields.Char('Single Amazon Order ID', readonly=True)
     date_from = fields.Datetime(index=True)
     date_to = fields.Datetime(index=True)
     effective_date_to = fields.Datetime(
@@ -350,6 +357,23 @@ class AmazonOrderImportJob(models.Model):
                 )
                 skipped = True
                 sale_order_skipped = True
+            elif sum(order_rec.order_line_ids.mapped('item_price')) <= 0:
+                # Never silently create a zero-value Odoo Sale Order when Amazon
+                # supplied no positive price. Flag for review instead.
+                self._append_error(
+                    "Order %s skipped for Odoo SO creation: no positive item price "
+                    "was imported (needs pricing review)." % amazon_order_id
+                )
+                order_rec.write({
+                    'requires_status_review': True,
+                    'status_review_reason': (
+                        "Imported Amazon order has no positive item price. Odoo Sale "
+                        "Order was not created to avoid a zero-value order; review the "
+                        "Amazon pricing data (product.price.unitPrice / proceeds)."
+                    ),
+                })
+                skipped = True
+                sale_order_skipped = True
             else:
                 order_rec.action_create_sale_order()
                 sale_order_created = True
@@ -457,11 +481,30 @@ class AmazonOrderImportJob(models.Model):
             else:
                 order_line = line_model.create(line_vals)
             if order_rec.fulfillment_channel == 'AFN':
-                self.env['amazon.fba.sale.stock.event'].sudo().upsert_from_order_line(
+                event = self.env['amazon.fba.sale.stock.event'].sudo().upsert_from_order_line(
                     order_line,
                     item.get('QuantityShipped', 0) or 0,
                     evidence_updated_at=order_rec.amazon_last_update_date,
                 )
+                # Controlled single-order validation: keep the freshly created FBA
+                # stock event out of the automatic cron so a human can inspect the
+                # order before any FBA stock is moved. Reuses the existing
+                # manual_review + Retry release path (no new framework, no production
+                # cron change). Normal imports leave the event 'pending' as before.
+                if (
+                    self.env.context.get('amazon_hold_fba_stock')
+                    and event
+                    and event.state == 'pending'
+                ):
+                    event.write({
+                        'state': 'manual_review',
+                        'next_run_at': False,
+                        'last_error_code': 'HELD_FOR_CONTROLLED_IMPORT',
+                        'last_error_message': _(
+                            "Held for controlled single-order validation. Release with "
+                            "Retry to let the FBA stock cron process this movement."
+                        ),
+                    })
 
     def _resolve_currency(self, amount):
         currency_code = (amount or {}).get('CurrencyCode')
