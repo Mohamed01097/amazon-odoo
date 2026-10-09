@@ -15,6 +15,12 @@ from . import test_settlement_accounting
 from . import test_payout_clearing
 from . import test_orders_api_v2026
 from . import test_orders_import_hardening
+from . import test_orders_vat_shipping
+from . import test_fba_hold_durability
+from . import test_order_import_cron_hardening
+from . import test_fba_auto_cutover
+from . import test_fbm_lifecycle
+from . import test_peripheral_features
 from . import test_fba_sale_stock
 from . import test_fba_cutover_v2
 from . import test_final_e2e

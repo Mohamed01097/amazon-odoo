@@ -10,6 +10,15 @@ from odoo.tools.float_utils import float_compare
 
 _logger = logging.getLogger(__name__)
 
+# Error code that marks an FBA sale stock event as intentionally held for human
+# review by the controlled single-order import. While this hold is in place, no
+# normal sync/import/upsert path may return the event to 'pending' (and thus to
+# automatic processing); only the explicit Retry (action_retry) releases it.
+CONTROLLED_IMPORT_HOLD_CODE = 'HELD_FOR_CONTROLLED_IMPORT'
+CUTOVER_PRE_CODE = 'PRE_CUTOVER_FBA_ORDER'
+CUTOVER_MISSING_DATE_CODE = 'MISSING_FBA_PURCHASE_DATE'
+CUTOVER_NOT_CONFIGURED_CODE = 'FBA_CUTOVER_NOT_CONFIGURED'
+
 
 class AmazonFbaSaleStockEvent(models.Model):
     """Durable, cumulative stock owner for Amazon-fulfilled order items."""
@@ -95,6 +104,12 @@ class AmazonFbaSaleStockEvent(models.Model):
     )
     last_error_code = fields.Char(readonly=True, copy=False, index=True)
     last_error_message = fields.Text(readonly=True, copy=False)
+    cutover_manual_release = fields.Boolean(
+        default=False, readonly=True, copy=False, index=True,
+        help="Set when a human explicitly releases this event via Retry. It is the "
+             "only authorized path that lets the automatic processor move stock for an "
+             "order purchased before the FBA Automatic Stock Cutover.",
+    )
     responsible_user_id = fields.Many2one(
         'res.users', default=lambda self: self.env.user, readonly=True, index=True,
     )
@@ -109,6 +124,39 @@ class AmazonFbaSaleStockEvent(models.Model):
         'AND amazon_cumulative_fulfilled_qty <= ordered_quantity)',
         'FBA sale stock event quantities must be cumulative, non-negative, and not exceed the order quantity.',
     )
+
+    def _is_controlled_import_hold(self):
+        """True when this event is intentionally held for controlled-import review.
+
+        The hold is the single source of truth for 'do not auto-process'. It is
+        cleared only by the explicit Retry release (``action_retry``).
+        """
+        self.ensure_one()
+        return (
+            self.state == 'manual_review'
+            and self.last_error_code == CONTROLLED_IMPORT_HOLD_CODE
+        )
+
+    @api.model
+    def _fba_cutover_reason(self, instance, purchase_date, has_positive_cumulative=True):
+        """Return a hold reason code when an order is NOT auto-eligible by the cutover,
+        or None when it is eligible (or the cutover gate is inactive).
+
+        The gate is ACTIVE only once ``fba_auto_process_from`` is configured on the
+        instance. Comparison is UTC-naive (Odoo stores datetimes as naive UTC), so the
+        Amazon purchase timestamp is compared directly to the cutover. Import/create
+        dates are never substituted. Fails closed on a missing/invalid purchase date.
+        """
+        cutover = instance.fba_auto_process_from
+        if not cutover:
+            return None  # gate inactive; fail-closed for auto-import is enforced at the import boundary
+        if not has_positive_cumulative:
+            return None  # zero-quantity (e.g. canceled) carries no stock delta to gate
+        if not purchase_date:
+            return CUTOVER_MISSING_DATE_CODE
+        if purchase_date < cutover:
+            return CUTOVER_PRE_CODE
+        return None
 
     @api.model
     def _advisory_lock(self, instance_id, product_id):
@@ -368,6 +416,13 @@ class AmazonFbaSaleStockEvent(models.Model):
                     order_line.sudo().write({'amazon_cumulative_fulfilled_qty': cumulative})
                     return event
             else:
+                storable = bool(cumulative and product and product.is_storable)
+                # Cutover gate (Phase 11C): a storable AFN order purchased before the
+                # configured cutover (or with a missing purchase date) is held and never
+                # auto-processed, independent of import-job lineage or the hold flag.
+                cutover_reason = self._fba_cutover_reason(
+                    order.instance_id, order.purchase_date, has_positive_cumulative=storable,
+                ) if storable else None
                 values.update({
                     'instance_id': order.instance_id.id,
                     'amazon_order_ref': order.amazon_order_ref,
@@ -375,17 +430,21 @@ class AmazonFbaSaleStockEvent(models.Model):
                     'amazon_cumulative_fulfilled_qty': cumulative,
                     'processed_fulfilled_qty': 0,
                     'state': (
-                        'pending' if cumulative and product and product.is_storable else (
-                            'manual_review' if cumulative else 'done'
-                        )
+                        ('manual_review' if cutover_reason else 'pending')
+                        if storable else ('manual_review' if cumulative else 'done')
                     ),
                     'next_run_at': (
-                        fields.Datetime.now()
-                        if cumulative and product and product.is_storable
-                        else False
+                        fields.Datetime.now() if (storable and not cutover_reason) else False
                     ),
                     'finished_at': fields.Datetime.now() if not cumulative else False,
                 })
+                if cutover_reason:
+                    values['last_error_code'] = cutover_reason
+                    values['last_error_message'] = _(
+                        "Order %s is not eligible for automatic FBA stock processing "
+                        "(%s). Held pending the FBA Automatic Stock Cutover policy.",
+                        order.amazon_order_ref, cutover_reason,
+                    )
                 try:
                     with self.env.cr.savepoint():
                         event = self.sudo().create(values)
@@ -393,11 +452,31 @@ class AmazonFbaSaleStockEvent(models.Model):
                     event = self.sudo().search(domain, limit=1)
                     if not event:
                         raise
+                else:
+                    if cutover_reason:
+                        order_line.sudo().write({'amazon_cumulative_fulfilled_qty': cumulative})
+                        event._record_manual_review()
+                        return event
         self.env.cr.execute(
             'SELECT id FROM amazon_fba_sale_stock_event WHERE id = %s FOR UPDATE',
             [event.id],
         )
         event.invalidate_recordset()
+        # Durable controlled-import hold (centralized): a human-held event must
+        # never be returned to 'pending' by any normal sync / re-import / status-sync
+        # / AFN upsert path, so it can never be auto-processed by the FBA stock cron.
+        # Refresh only safe informational quantities and keep the hold intact. The
+        # explicit Retry (action_retry) is the sole release boundary.
+        if event._is_controlled_import_hold():
+            safe_values = {
+                'amazon_cumulative_fulfilled_qty': cumulative,
+                'ordered_quantity': order_line.quantity,
+                'amazon_evidence_updated_at': values.get('amazon_evidence_updated_at'),
+                'last_activity_at': values.get('last_activity_at'),
+            }
+            event.write(safe_values)
+            order_line.sudo().write({'amazon_cumulative_fulfilled_qty': cumulative})
+            return event
         if historical_before_cutover and not cutover_v2_active:
             historical_values = dict(values, amazon_cumulative_fulfilled_qty=cumulative)
             event.write(historical_values)
@@ -435,6 +514,26 @@ class AmazonFbaSaleStockEvent(models.Model):
                              last_error_code='CUMULATIVE_QUANTITY_DECREASED',
                              last_error_message=message))
             event._record_manual_review()
+            return event
+        # Cutover gate on re-upsert (Phase 11C): a pre-cutover / missing-date order must
+        # stay held and never be flipped to 'pending' by a later re-import or a cumulative
+        # increase, unless a human explicitly released it (cutover_manual_release).
+        cutover_reason = self._fba_cutover_reason(
+            order.instance_id, order.purchase_date, has_positive_cumulative=True,
+        )
+        if cutover_reason and not event.cutover_manual_release:
+            event.write(dict(
+                values, amazon_cumulative_fulfilled_qty=cumulative,
+                state='manual_review', next_run_at=False, finished_at=False,
+                last_error_code=cutover_reason,
+                last_error_message=_(
+                    "Order %s is not eligible for automatic FBA stock processing (%s). "
+                    "Held pending the FBA Automatic Stock Cutover policy.",
+                    order.amazon_order_ref, cutover_reason,
+                ),
+            ))
+            event._record_manual_review()
+            order_line.sudo().write({'amazon_cumulative_fulfilled_qty': cumulative})
             return event
         values['amazon_cumulative_fulfilled_qty'] = cumulative
         if float_compare(cumulative, event.processed_fulfilled_qty, precision_rounding=rounding) > 0:
@@ -848,7 +947,32 @@ class AmazonFbaSaleStockEvent(models.Model):
                     [self.id],
                 )
                 self.invalidate_recordset()
+                # Defense in depth: never process a controlled-import hold, even if
+                # one reaches the processor directly. Only Retry (which clears the
+                # hold code and sets 'pending') may lead to processing.
+                if self._is_controlled_import_hold():
+                    return False
                 if self.state == 'historical':
+                    return False
+                # Defense in depth (Phase 11C): never auto-process a pre-cutover /
+                # missing-date order that reached 'pending' through any unintended path.
+                # The ONLY authorized bypass is an explicit human release (Retry), which
+                # sets cutover_manual_release. Otherwise re-hold without moving stock.
+                cutover_reason = self._fba_cutover_reason(
+                    self.instance_id, self.order_id.purchase_date, has_positive_cumulative=True,
+                )
+                if cutover_reason and not self.cutover_manual_release:
+                    self.write({
+                        'state': 'manual_review', 'next_run_at': False,
+                        'last_error_code': cutover_reason,
+                        'last_error_message': _(
+                            "Blocked by the FBA Automatic Stock Cutover (%s). Not processed; "
+                            "release explicitly with Retry if this stock movement is intended.",
+                            cutover_reason,
+                        ),
+                        'last_activity_at': fields.Datetime.now(),
+                    })
+                    self._record_manual_review()
                     return False
                 if self._is_before_fba_sale_stock_cutover():
                     if not self._is_cutover_v2_active(self.instance_id):
@@ -923,6 +1047,8 @@ class AmazonFbaSaleStockEvent(models.Model):
                 'state': 'pending', 'next_run_at': fields.Datetime.now(),
                 'finished_at': False, 'last_error_code': False,
                 'last_error_message': False,
+                # Explicit human release: the sole authorized bypass of the cutover guard.
+                'cutover_manual_release': True,
             })
         return True
 

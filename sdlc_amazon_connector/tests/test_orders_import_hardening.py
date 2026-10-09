@@ -18,6 +18,12 @@ class TestOrdersImportHardening(TransactionCase):
         warehouse = self.env['stock.warehouse'].search(
             [('company_id', '=', self.env.company.id)], limit=1,
         )
+        base_sale = self.env['account.tax'].search(
+            [('type_tax_use', '=', 'sale'), ('company_id', '=', self.env.company.id)], limit=1)
+        self.vat14 = base_sale.copy({
+            'name': 'EG VAT 14% incl (hardening)', 'amount': 14.0,
+            'price_include_override': 'tax_included', 'active': True,
+        })
         self.instance = self.env['amazon.instance'].sudo().create({
             'name': 'Orders Hardening Instance',
             'company_id': self.env.company.id,
@@ -25,6 +31,7 @@ class TestOrdersImportHardening(TransactionCase):
             'region': 'eu',
             'fba_warehouse_id': warehouse.id,
             'fbm_warehouse_id': warehouse.id,
+            'amazon_sales_tax_id': self.vat14.id,
         })
         self.product = self.env['product.product'].sudo().create({
             'name': 'Hardening Towel',
@@ -125,7 +132,8 @@ class TestOrdersImportHardening(TransactionCase):
         line = so.order_line[0]
         self.assertEqual(line.product_uom_qty, 2)
         self.assertEqual(line.price_unit, 100.0)          # extended 200 / qty 2
-        self.assertFalse(line.tax_ids)                    # no double taxation
+        # VAT-inclusive Egypt tax now applied; gross total stays 200 (never +14%).
+        self.assertEqual(line.tax_ids, self.vat14)
         self.assertEqual(so.amount_total, 200.0)
 
     def test_06_import_single_unit_price(self):

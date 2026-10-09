@@ -86,6 +86,13 @@
                             <field name="initial_order_import_to"/>
                             <field name="order_import_batch_size"/>
                             <field name="order_import_overlap_minutes"/>
+                            <field name="order_import_enabled"/>
+                            <field name="order_import_hold_fba_stock"/>
+                            <field name="order_import_max_orders_per_job"/>
+                            <field name="fba_auto_process_from"/>
+                            <field name="amazon_sales_tax_id"/>
+                            <field name="amazon_shipping_product_id"/>
+                            <field name="amazon_discount_product_id"/>
                             <field name="active"/>
                         </group>
                     </group>

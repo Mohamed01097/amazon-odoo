@@ -184,29 +184,48 @@ class TestFbaAppointmentSlots(TransactionCase):
         })
 
     @staticmethod
-    def _slots_response(slots=None, expires_at=None, pagination_token=None):
+    def _amazon_timestamp(dt):
+        return dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    @staticmethod
+    def _odoo_timestamp(dt):
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    def _future_datetime(self, days=30, hour=9, minute=0, second=0):
+        return (
+            fields.Datetime.now() + timedelta(days=days)
+        ).replace(hour=hour, minute=minute, second=second, microsecond=0)
+
+    def _future_slot_time(self, hour, minute=0, duration_minutes=30, days=30):
+        start = self._future_datetime(days=days, hour=hour, minute=minute)
+        end = start + timedelta(minutes=duration_minutes)
+        return {
+            'startTime': self._amazon_timestamp(start),
+            'endTime': self._amazon_timestamp(end),
+        }
+
+    def _future_expiry(self, days=29):
+        return self._amazon_timestamp(
+            self._future_datetime(days=days, hour=23, minute=59, second=59)
+        )
+
+    def _slots_response(self, slots=None, expires_at=None, pagination_token=None):
         if slots is None:
             slots = [
                 {
                     'slotId': SLOT_ID_1,
-                    'slotTime': {
-                        'startTime': '2026-10-05T09:00:00Z',
-                        'endTime': '2026-10-05T09:30:00Z',
-                    },
+                    'slotTime': self._future_slot_time(9, duration_minutes=30),
                     'slotStatus': 'AVAILABLE',
                 },
                 {
                     'slotId': SLOT_ID_2,
-                    'slotTime': {
-                        'startTime': '2026-10-05T10:30:00Z',
-                        'endTime': '2026-10-05T11:15:00Z',
-                    },
+                    'slotTime': self._future_slot_time(10, 30, duration_minutes=45),
                     'slotStatus': 'AVAILABLE',
                 },
             ]
         result = {
             'selfShipAppointmentSlotsAvailability': {
-                'expiresAt': expires_at or '2026-10-04T23:59:59Z',
+                'expiresAt': expires_at or self._future_expiry(),
                 'slots': slots,
             },
             '_amazon_request_id': 'test-appointment-request',
@@ -400,19 +419,13 @@ class TestFbaAppointmentSlots(TransactionCase):
         page1 = self._slots_response(
             slots=[{
                 'slotId': SLOT_ID_1,
-                'slotTime': {
-                    'startTime': '2026-10-05T09:00:00Z',
-                    'endTime': '2026-10-05T09:30:00Z',
-                },
+                'slotTime': self._future_slot_time(9, duration_minutes=30),
             }],
             pagination_token='page2token',
         )
         page2_slots = [{
             'slotId': SLOT_ID_2,
-            'slotTime': {
-                'startTime': '2026-10-05T10:00:00Z',
-                'endTime': '2026-10-05T10:30:00Z',
-            },
+            'slotTime': self._future_slot_time(10, duration_minutes=30),
         }]
         page2 = self._slots_response(slots=page2_slots)
 
@@ -474,10 +487,7 @@ class TestFbaAppointmentSlots(TransactionCase):
 
         only_one = self._slots_response(slots=[{
             'slotId': SLOT_ID_1,
-            'slotTime': {
-                'startTime': '2026-10-05T09:00:00Z',
-                'endTime': '2026-10-05T09:30:00Z',
-            },
+            'slotTime': self._future_slot_time(9, duration_minutes=30),
             'slotStatus': 'AVAILABLE',
         }])
         with patch.object(
@@ -550,10 +560,7 @@ class TestFbaAppointmentSlots(TransactionCase):
 
         only_slot2 = self._slots_response(slots=[{
             'slotId': SLOT_ID_2,
-            'slotTime': {
-                'startTime': '2026-10-05T10:30:00Z',
-                'endTime': '2026-10-05T11:15:00Z',
-            },
+            'slotTime': self._future_slot_time(10, 30, duration_minutes=45),
         }])
         with patch.object(
             AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
@@ -572,7 +579,7 @@ class TestFbaAppointmentSlots(TransactionCase):
         self._set_confirmed()
         with patch.object(
             AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
-            return_value=self._slots_response(expires_at='2026-10-04T23:59:59Z'),
+            return_value=self._slots_response(expires_at=self._future_expiry()),
         ):
             self.physical._refresh_appointment_slots()
         self.assertTrue(self.physical.appointment_slots_expires_at)
@@ -817,20 +824,17 @@ class TestFbaAppointmentSlots(TransactionCase):
         response = self._slots_response(slots=[
             {
                 'slotId': SLOT_ID_1,
-                'slotTime': {'startTime': '2026-10-05T09:00:00Z',
-                             'endTime': '2026-10-05T09:30:00Z'},
+                'slotTime': self._future_slot_time(9, duration_minutes=30),
                 'slotStatus': 'AVAILABLE',
             },
             {
                 'slotId': SLOT_ID_2,
-                'slotTime': {'startTime': '2026-10-05T10:00:00Z',
-                             'endTime': '2026-10-05T10:45:00Z'},
+                'slotTime': self._future_slot_time(10, duration_minutes=45),
                 'slotStatus': 'AVAILABLE',
             },
             {
                 'slotId': SLOT_ID_3,
-                'slotTime': {'startTime': '2026-10-05T11:00:00Z',
-                             'endTime': '2026-10-05T12:00:00Z'},
+                'slotTime': self._future_slot_time(11, duration_minutes=60),
                 'slotStatus': 'AVAILABLE',
             },
         ])
@@ -854,8 +858,8 @@ class TestFbaAppointmentSlots(TransactionCase):
             'inbound_shipment_id': self.shipment.id,
             'physical_shipment_id': self.physical.id,
             'amazon_appointment_slot_id': 'slot-neg-0001',
-            'start_date': '2026-10-05 10:00:00',
-            'end_date': '2026-10-05 09:00:00',
+            'start_date': self._odoo_timestamp(self._future_datetime(hour=10)),
+            'end_date': self._odoo_timestamp(self._future_datetime(hour=9)),
         })
         self.assertEqual(bad.duration_minutes, 0)
 
@@ -928,9 +932,17 @@ class TestFbaAppointmentSlots(TransactionCase):
 
     @staticmethod
     def _schedule_success_response(appointment_id=1000,
-                                   start='2026-10-05T09:00:00Z',
-                                   end='2026-10-05T09:30:00Z',
+                                   start=False,
+                                   end=False,
                                    status='ARRIVAL_SCHEDULED'):
+        if not start or not end:
+            base = (
+                fields.Datetime.now() + timedelta(days=30)
+            ).replace(hour=9, minute=0, second=0, microsecond=0)
+            start = start or TestFbaAppointmentSlots._amazon_timestamp(base)
+            end = end or TestFbaAppointmentSlots._amazon_timestamp(
+                base + timedelta(minutes=30)
+            )
         return {
             'selfShipAppointmentDetails': {
                 'appointmentId': appointment_id,
@@ -1015,8 +1027,10 @@ class TestFbaAppointmentSlots(TransactionCase):
             'inbound_shipment_id': other_shipment.id,
             'physical_shipment_id': other_physical.id,
             'amazon_appointment_slot_id': 'slot-foreign-00000000000000000000001',
-            'start_date': '2026-10-06 09:00:00',
-            'end_date': '2026-10-06 09:30:00',
+            'start_date': self._odoo_timestamp(self._future_datetime(days=31, hour=9)),
+            'end_date': self._odoo_timestamp(
+                self._future_datetime(days=31, hour=9) + timedelta(minutes=30)
+            ),
         })
         # Force the pointer to a foreign slot (never trust only the pointer).
         self.physical.sudo().write({'selected_appointment_slot_id': foreign.id})
@@ -1174,9 +1188,8 @@ class TestFbaAppointmentSlots(TransactionCase):
         # A refresh that no longer returns SLOT_ID_1 must drop the selection.
         only_slot2 = self._slots_response(slots=[{
             'slotId': SLOT_ID_2,
-            'slotTime': {'startTime': '2026-10-05T10:00:00Z',
-                         'endTime': '2026-10-05T10:45:00Z'},
-        }], expires_at='2026-10-05T23:59:59Z')
+            'slotTime': self._future_slot_time(10, duration_minutes=45),
+        }], expires_at=self._future_expiry())
         with patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
                           return_value=only_slot2):
             self.physical._refresh_appointment_slots()
@@ -1218,14 +1231,16 @@ class TestFbaAppointmentSlots(TransactionCase):
     def test_52_refresh_stores_future_expiry(self):
         self._set_confirmed()
         self.physical.sudo().write({'appointment_generation_status': 'success'})
+        future_expiry_dt = self._future_datetime(days=85, hour=23, minute=59, second=59)
+        future_expiry = self._amazon_timestamp(future_expiry_dt)
         with patch.object(AmazonAPI, 'get_self_ship_appointment_slots', autospec=True,
                           return_value=self._slots_response(
-                              expires_at='2026-12-31T23:59:59Z')):
+                              expires_at=future_expiry)):
             self.physical._refresh_appointment_slots()
         self.physical.invalidate_recordset()
         self.assertEqual(
             fields.Datetime.to_string(self.physical.appointment_slots_expires_at),
-            '2026-12-31 23:59:59',
+            self._odoo_timestamp(future_expiry_dt),
         )
         self.assertFalse(self.physical.appointment_slots_expired)
 
@@ -1269,18 +1284,21 @@ class TestFbaAppointmentSlots(TransactionCase):
     def test_55_pagination_keeps_first_page_expiry(self):
         self._set_confirmed()
         self.physical.sudo().write({'appointment_generation_status': 'success'})
+        page1_expiry_dt = self._future_datetime(days=85, hour=23, minute=59, second=59)
         page1 = self._slots_response(
             slots=[{'slotId': SLOT_ID_1,
-                    'slotTime': {'startTime': '2026-12-01T09:00:00Z',
-                                 'endTime': '2026-12-01T09:30:00Z'}}],
-            expires_at='2026-12-31T23:59:59Z', pagination_token='p2',
+                    'slotTime': self._future_slot_time(9, duration_minutes=30)}],
+            expires_at=self._amazon_timestamp(page1_expiry_dt), pagination_token='p2',
         )
         # Second page carries a DIFFERENT expiresAt that must be ignored.
         page2 = self._slots_response(
             slots=[{'slotId': SLOT_ID_2,
-                    'slotTime': {'startTime': '2026-12-02T09:00:00Z',
-                                 'endTime': '2026-12-02T09:30:00Z'}}],
-            expires_at='2026-01-01T00:00:00Z',
+                    'slotTime': self._future_slot_time(
+                        9, duration_minutes=30, days=31,
+                    )}],
+            expires_at=self._amazon_timestamp(
+                self._future_datetime(days=80, hour=0, minute=0, second=0)
+            ),
         )
 
         def mock_get(*args, **kwargs):
@@ -1297,7 +1315,7 @@ class TestFbaAppointmentSlots(TransactionCase):
         # First page's expiry wins; the later page never overwrites it.
         self.assertEqual(
             fields.Datetime.to_string(self.physical.appointment_slots_expires_at),
-            '2026-12-31 23:59:59',
+            self._odoo_timestamp(page1_expiry_dt),
         )
 
     # --- 5. Existing slots are not deleted on a failed refresh ---

@@ -492,6 +492,144 @@ class AmazonInstance(models.Model):
         default=True,
     )
 
+    # --- Customer-sale financial mapping (order-side VAT / shipping / discount) ---
+    amazon_sales_tax_id = fields.Many2one(
+        'account.tax', string='Amazon Customer Sales Tax',
+        domain="[('company_id','=',company_id),('type_tax_use','=','sale'),('active','=',True)]",
+        help="Egypt customer-sale VAT applied to imported Amazon order lines "
+             "(VAT-inclusive). If left empty the connector resolves the active "
+             "14% sale tax for this company automatically.",
+    )
+    amazon_shipping_product_id = fields.Many2one(
+        'product.product', string='Amazon Shipping Product',
+        domain="['|',('company_id','=',company_id),('company_id','=',False)]",
+        help="Service product used for the customer shipping charged by Amazon. "
+             "Resolved/created automatically if left empty.",
+    )
+    amazon_discount_product_id = fields.Many2one(
+        'product.product', string='Amazon Promotion/Discount Product',
+        domain="['|',('company_id','=',company_id),('company_id','=',False)]",
+        help="Service product used for Amazon customer promotions/discounts "
+             "(negative line). Resolved/created automatically if left empty.",
+    )
+
+    # --- Automatic order-import safety gates (Phase 10B) ---
+    order_import_enabled = fields.Boolean(
+        'Automatic Order Import', default=False,
+        help="Explicit gate for the automatic new-order fetch crons. The crons only "
+             "queue an import job for instances where this is enabled; the ir.cron "
+             "'active' flag is a second, independent gate. Enabling this does NOT "
+             "activate the cron by itself.",
+    )
+    order_import_hold_fba_stock = fields.Boolean(
+        'Hold FBA Stock for Automatic Imports', default=True,
+        help="When enabled, AFN/FBA stock events created by automatic order import "
+             "are held (manual_review / HELD_FOR_CONTROLLED_IMPORT) and are not "
+             "processed by the FBA stock cron until an explicit Retry release.",
+    )
+    order_import_max_orders_per_job = fields.Integer(
+        'Maximum Orders per Import Job', default=10,
+        help="Hard cap on the total number of Amazon orders a single import job may "
+             "consume across pagination. When the cap is reached with more orders "
+             "remaining in the window, the job stops as 'capped' WITHOUT advancing "
+             "the order cursor, and a continuation job resumes the same window. "
+             "0 means unlimited (not recommended).",
+    )
+
+    _order_import_max_orders_non_negative = models.Constraint(
+        'CHECK (order_import_max_orders_per_job IS NULL OR order_import_max_orders_per_job >= 0)',
+        'Maximum Orders per Import Job must be zero (unlimited) or positive.',
+    )
+
+    # --- Automatic FBA sale-stock cutover (Phase 11C) ---
+    fba_auto_process_from = fields.Datetime(
+        'FBA Automatic Stock Cutover',
+        help="Earliest Amazon order PURCHASE timestamp (UTC) eligible for automatic "
+             "FBA sale-stock processing.\n"
+             "- Orders purchased BEFORE this timestamp stay held (PRE_CUTOVER_FBA_ORDER) "
+             "and are never auto-processed, regardless of import-job lineage, "
+             "continuation, re-import, status sync, or the hold flag.\n"
+             "- Orders purchased AT or AFTER this timestamp may be processed "
+             "automatically only when every other eligibility rule also passes.\n"
+             "- Existing held events are NOT released by setting or changing this value; "
+             "release still requires the explicit controlled Retry.\n"
+             "Compared against the Amazon purchase date (UTC); import/create dates are "
+             "never substituted.",
+    )
+
+    def _get_amazon_sales_tax(self):
+        """Deterministically resolve the Egypt 14% VAT-inclusive customer sale tax.
+
+        Prefers the explicitly configured ``amazon_sales_tax_id`` (validated);
+        otherwise searches the active 14% sale taxes for this company and prefers
+        a price-included one. Raises an actionable error on zero or ambiguous
+        matches rather than guessing.
+        """
+        self.ensure_one()
+        company = self.company_id or self.env.company
+        if self.amazon_sales_tax_id:
+            tax = self.amazon_sales_tax_id
+            if tax.company_id != company or tax.type_tax_use != 'sale' or not tax.active:
+                raise UserError(_(
+                    "The configured Amazon Customer Sales Tax (%s) is not an active "
+                    "sale tax for company %s.", tax.display_name, company.display_name,
+                ))
+            return tax
+        Tax = self.env['account.tax']
+        base = [
+            ('company_id', '=', company.id),
+            ('type_tax_use', '=', 'sale'),
+            ('amount', '=', 14.0),
+            ('active', '=', True),
+        ]
+        included = Tax.search(base + [('price_include', '=', True)])
+        candidates = included or Tax.search(base)
+        if not candidates:
+            raise UserError(_(
+                "No active 14%% sale tax was found for company %s. Configure the "
+                "Egypt localization VAT or set 'Amazon Customer Sales Tax' on the "
+                "Amazon instance.", company.display_name,
+            ))
+        if len(candidates) > 1:
+            raise UserError(_(
+                "Multiple 14%% sale taxes exist for company %s. Set 'Amazon Customer "
+                "Sales Tax' explicitly on the Amazon instance to avoid ambiguity.",
+                company.display_name,
+            ))
+        return candidates
+
+    def _get_amazon_service_product(self, config_field, default_code, name):
+        """Return (or idempotently create) a company-safe service product."""
+        self.ensure_one()
+        configured = self[config_field]
+        if configured:
+            return configured
+        company = self.company_id or self.env.company
+        Product = self.env['product.product'].sudo()
+        product = Product.search([
+            ('default_code', '=', default_code),
+            ('company_id', 'in', (company.id, False)),
+        ], limit=1)
+        if not product:
+            product = Product.create({
+                'name': name,
+                'default_code': default_code,
+                'type': 'service',
+                'sale_ok': True,
+                'purchase_ok': False,
+                'list_price': 0.0,
+                'taxes_id': [(6, 0, [])],
+            })
+        return product
+
+    def _get_amazon_shipping_product(self):
+        return self._get_amazon_service_product(
+            'amazon_shipping_product_id', 'AMZ-CUSTOMER-SHIPPING', 'Amazon Customer Shipping')
+
+    def _get_amazon_discount_product(self):
+        return self._get_amazon_service_product(
+            'amazon_discount_product_id', 'AMZ-CUSTOMER-DISCOUNT', 'Amazon Customer Promotion')
+
     _order_import_batch_size_range = models.Constraint(
         'CHECK (order_import_batch_size IS NULL OR (order_import_batch_size >= 1 AND order_import_batch_size <= 100))',
         'Order import batch size must be between 1 and 100.',
@@ -1787,6 +1925,45 @@ class AmazonInstance(models.Model):
         if active_job:
             return active_job, False, False
 
+        hold_fba_stock = self.order_import_hold_fba_stock
+        max_orders = self.order_import_max_orders_per_job or 0
+
+        # Continuation of a capped job: resume the SAME frozen window via the
+        # preserved Amazon paginationToken, so no eligible order is skipped and
+        # last_order_sync is only advanced when the window is fully drained.
+        capped_job = self.env['amazon.order.import.job'].search([
+            ('instance_id', '=', self.id),
+            ('state', '=', 'capped'),
+            ('next_token', '!=', False),
+            ('fulfillment_channel', '=', fulfillment_channel or False),
+        ], order='id desc', limit=1)
+        if capped_job:
+            job = self.env['amazon.order.import.job'].create({
+                'instance_id': self.id,
+                'date_from': capped_job.date_from,
+                'date_to': capped_job.date_to,
+                'effective_date_to': capped_job.effective_date_to,
+                'amazon_request_before': capped_job.amazon_request_before,
+                'upper_bound_adjusted': capped_job.upper_bound_adjusted,
+                'batch_size': capped_job.batch_size,
+                'fulfillment_channel': fulfillment_channel or False,
+                'next_token': capped_job.next_token,
+                'hold_fba_stock': capped_job.hold_fba_stock,
+                'max_orders': capped_job.max_orders,
+                'continuation_of_id': capped_job.id,
+            })
+            log = self._log_start(
+                'order_import',
+                request_data={'job_id': job.id, 'continuation_of': capped_job.id,
+                              'resume_window_before': capped_job.amazon_request_before},
+                res_model='amazon.order.import.job', res_id=job.id,
+            )
+            job.sync_log_id = log.id
+            cron = self.env.ref('sdlc_amazon_connector.cron_amazon_process_order_import_jobs', raise_if_not_found=False)
+            if cron and not cron.active:
+                cron.active = True
+            return job, True, False
+
         date_from, date_to = self._get_order_import_window()
         batch_size = self.order_import_batch_size or 10
         job_model = self.env['amazon.order.import.job']
@@ -1809,6 +1986,8 @@ class AmazonInstance(models.Model):
             'upper_bound_adjusted': bool(date_to and date_to > effective_date_to),
             'batch_size': batch_size,
             'fulfillment_channel': fulfillment_channel or False,
+            'hold_fba_stock': hold_fba_stock,
+            'max_orders': max_orders,
             'error_message': (
                 "%d existing Amazon product(s) are not linked to Odoo products. "
                 "Affected Sale Orders will be skipped until products are mapped."
@@ -2667,7 +2846,9 @@ class AmazonInstance(models.Model):
 
     # ── Legacy cron methods (kept for backward compatibility) ──
     def cron_import_orders(self):
-        for inst in self.env['amazon.instance'].search([]):
+        # Second safety gate (independent of the ir.cron 'active' flag): only
+        # instances with Automatic Order Import explicitly enabled are imported.
+        for inst in self.env['amazon.instance'].search([('order_import_enabled', '=', True)]):
             try:
                 inst.action_import_orders()
                 _logger.info("Cron queued order import job for %s", inst.display_name)
@@ -2675,7 +2856,7 @@ class AmazonInstance(models.Model):
                 _logger.error("Cron order import failed for %s: %s", inst.display_name, exc)
 
     def cron_import_fbm_orders(self):
-        for inst in self.env['amazon.instance'].search([]):
+        for inst in self.env['amazon.instance'].search([('order_import_enabled', '=', True)]):
             try:
                 inst.action_import_fbm_orders()
                 _logger.info("Cron queued FBM order import job for %s", inst.display_name)

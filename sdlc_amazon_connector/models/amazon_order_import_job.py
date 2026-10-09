@@ -49,6 +49,7 @@ class AmazonOrderImportJob(models.Model):
         ('running', 'Running'),
         ('done', 'Done'),
         ('partial', 'Partial'),
+        ('capped', 'Capped — Continuation Pending'),
         ('failed', 'Failed'),
     ], default='draft', required=True, index=True)
 
@@ -80,6 +81,27 @@ class AmazonOrderImportJob(models.Model):
     next_token = fields.Text()
     next_run_at = fields.Datetime(index=True)
     batch_size = fields.Integer(default=10)
+    # Phase 10B safety: per-job hold snapshot + hard total cap + continuation link.
+    hold_fba_stock = fields.Boolean(
+        'Hold FBA Stock', default=False, readonly=True,
+        help="Snapshot of the instance setting at job creation. When true, AFN "
+             "stock events created by this job are held for review (not auto-processed).",
+    )
+    max_orders = fields.Integer(
+        'Max Orders (cap)', default=0, readonly=True,
+        help="Hard cap on total orders this job may consume across pagination. "
+             "0 = unlimited.",
+    )
+    limit_reached = fields.Boolean(
+        'Per-Job Limit Reached', default=False, readonly=True, copy=False,
+        help="Set when the job stopped because it hit max_orders with more orders "
+             "still available in the window (state 'capped'); a continuation job "
+             "resumes the same window.",
+    )
+    continuation_of_id = fields.Many2one(
+        'amazon.order.import.job', string='Continuation Of', readonly=True, copy=False,
+        ondelete='set null', index=True,
+    )
 
     total_found = fields.Integer(default=0)
     total_processed = fields.Integer(default=0)
@@ -213,6 +235,15 @@ class AmazonOrderImportJob(models.Model):
                     self._defer_for_unsafe_window(date_from, created_before_dt)
                     return False
 
+            # Hard per-job cap (Phase 10B): never fetch more than the remaining
+            # allowance so the job consumes at most ``max_orders`` across pagination.
+            page_size = self.batch_size or 10
+            if self.max_orders:
+                remaining = self.max_orders - self.total_found
+                if remaining <= 0:
+                    self._mark_capped()
+                    return False
+                page_size = max(1, min(page_size, remaining))
             data = api.get_orders(
                 instance,
                 access_token,
@@ -220,7 +251,7 @@ class AmazonOrderImportJob(models.Model):
                 created_before=created_before,
                 fulfillment_channels=self.fulfillment_channel or None,
                 next_token=self.next_token or None,
-                max_results_per_page=self.batch_size or 10,
+                max_results_per_page=page_size,
             )
         except requests.exceptions.HTTPError as exc:
             if self._is_rate_limit_error(exc):
@@ -251,7 +282,9 @@ class AmazonOrderImportJob(models.Model):
             amazon_order_id = order_data.get('AmazonOrderId') or 'UNKNOWN'
             try:
                 with self.env.cr.savepoint():
-                    result = self._import_one_order(api, access_token, order_data)
+                    result = self.with_context(
+                        amazon_hold_fba_stock=self.hold_fba_stock,
+                    )._import_one_order(api, access_token, order_data)
             except AmazonRateLimitDeferred as exc:
                 rate_limited = True
                 self._defer_for_rate_limit(exc, scope='get_order_items', amazon_order_id=amazon_order_id)
@@ -289,6 +322,13 @@ class AmazonOrderImportJob(models.Model):
 
         if rate_limited:
             log.write({'summary': self._summary()})
+            return False
+
+        # Hard per-job cap reached with more orders still in the window: stop as
+        # 'capped' WITHOUT advancing the cursor; a continuation job resumes the
+        # same window via the preserved paginationToken (no order is skipped).
+        if next_token and self.max_orders and self.total_found >= self.max_orders:
+            self._mark_capped()
             return False
 
         if next_token:
@@ -505,6 +545,25 @@ class AmazonOrderImportJob(models.Model):
                             "Retry to let the FBA stock cron process this movement."
                         ),
                     })
+                # Fail-closed (Phase 11C): automatic mode (hold flag OFF) must NOT
+                # auto-process anything until a cutover is configured. Without a cutover
+                # boundary we cannot prove an order is post-cutover, so hold it.
+                elif (
+                    self.env.context.get('amazon_hold_fba_stock') is False
+                    and event
+                    and event.state == 'pending'
+                    and not self.instance_id.fba_auto_process_from
+                ):
+                    event.write({
+                        'state': 'manual_review',
+                        'next_run_at': False,
+                        'last_error_code': 'FBA_CUTOVER_NOT_CONFIGURED',
+                        'last_error_message': _(
+                            "Automatic FBA processing is enabled (hold off) but no FBA "
+                            "Automatic Stock Cutover is configured. Held (fail-closed) "
+                            "until a cutover timestamp is set."
+                        ),
+                    })
 
     def _resolve_currency(self, amount):
         currency_code = (amount or {}).get('CurrencyCode')
@@ -704,6 +763,39 @@ class AmazonOrderImportJob(models.Model):
                     records_created=self.total_created,
                     records_updated=self.total_updated,
                 )
+
+    def _mark_capped(self):
+        """Stop at the per-job order cap, preserving continuation state.
+
+        Crucially this does NOT advance ``last_order_sync`` and keeps ``next_token``,
+        so the remaining orders in the same frozen window are resumed by a
+        continuation job (see ``_queue_order_import_job``). No eligible order is
+        skipped; the cursor only advances when a job fully drains the window.
+        """
+        self.write({
+            'state': 'capped',
+            'limit_reached': True,
+            'next_run_at': False,
+            'finished_at': fields.Datetime.now(),
+            'error_message': self._merge_error(
+                "Per-job order cap of %s reached; stopped WITHOUT advancing the order "
+                "cursor. A continuation job will resume the same window via the preserved "
+                "Amazon pagination token." % self.max_orders
+            ),
+        })
+        if self.sync_log_id:
+            self.sync_log_id.log_partial(
+                summary=self._summary(),
+                records_processed=self.total_processed,
+                records_created=self.total_created,
+                records_updated=self.total_updated,
+                records_failed=self.total_failed,
+                error_message=self.error_message or '',
+            )
+        _logger.info(
+            "Amazon order import job %s capped at %s orders; continuation pending (cursor unchanged).",
+            self.id, self.max_orders,
+        )
 
     def _mark_failed(self, message):
         self.write({

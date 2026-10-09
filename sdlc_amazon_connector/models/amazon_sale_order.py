@@ -130,6 +130,16 @@ class AmazonSaleOrder(models.Model):
     invoice_id = fields.Many2one('account.move', string='Invoice')
     amazon_invoice_number = fields.Char('Amazon Invoice Number')
 
+    # Customer-sale reconciliation (Odoo gross vs Amazon customer-facing total)
+    reconciliation_status = fields.Selection([
+        ('ok', 'Reconciled'),
+        ('mismatch', 'Mismatch'),
+    ], string='Total Reconciliation', copy=False, readonly=True)
+    reconciliation_difference = fields.Float(
+        'Reconciliation Difference', copy=False, readonly=True,
+        help="Amazon customer-facing order total minus the Odoo Sale Order total.",
+    )
+
     # Lines
     order_line_ids = fields.One2many('amazon.sale.order.line', 'order_id', string='Order Lines')
     line_count = fields.Integer(compute='_compute_line_count')
@@ -802,6 +812,12 @@ Return ONLY valid JSON:
         if self.currency_id:
             order_vals['currency_id'] = self.currency_id.id
 
+        # Egypt customer-sale VAT is VAT-INCLUSIVE: the Amazon price already
+        # contains VAT, so a price-included 14% sale tax is applied and Odoo
+        # extracts the VAT internally (gross stays equal to the Amazon price;
+        # never price + 14%). The tax is resolved deterministically, never hard-coded.
+        tax = self.instance_id._get_amazon_sales_tax()
+        tax_cmd = [(6, 0, tax.ids)]
         lines = []
         for line in self.order_line_ids:
             product = line.odoo_product_id
@@ -810,18 +826,58 @@ Return ONLY valid JSON:
                 'name': line.title or line.sku or 'Amazon Product',
                 'product_uom_qty': line.quantity,
                 'price_unit': line.item_price / line.quantity if line.quantity else line.item_price,
-                # Amazon's imported price already reflects the marketplace's
-                # customer-facing amount. Clearing Odoo's default product taxes
-                # prevents double taxation on top of an Amazon tax-inclusive price.
-                # Whether Egypt VAT should instead be modelled as a separate tax
-                # line is an accounting configuration decision (see audit report).
-                'tax_ids': [(6, 0, [])],
+                'tax_ids': tax_cmd,
+            }))
+        # Customer shipping and promotions belong to the customer-facing total.
+        # Amazon marketplace commissions / FBA fees are NOT represented here —
+        # they are a separate settlement-accounting flow.
+        shipping_total = sum(self.order_line_ids.mapped('shipping_price'))
+        promo_total = sum(self.order_line_ids.mapped('promotion_discount'))
+        if shipping_total:
+            ship_product = self.instance_id._get_amazon_shipping_product()
+            lines.append((0, 0, {
+                'product_id': ship_product.id,
+                'name': 'Amazon Shipping',
+                'product_uom_qty': 1.0,
+                'price_unit': shipping_total,
+                'tax_ids': tax_cmd,
+            }))
+        if promo_total:
+            disc_product = self.instance_id._get_amazon_discount_product()
+            lines.append((0, 0, {
+                'product_id': disc_product.id,
+                'name': 'Amazon Promotion/Discount',
+                'product_uom_qty': 1.0,
+                'price_unit': -promo_total,
+                'tax_ids': tax_cmd,
             }))
         order_vals['order_line'] = lines
 
         sale_order = self.env['sale.order'].create(order_vals)
         self.sale_order_id = sale_order.id
         self.partner_id = partner.id
+
+        # Reconcile the Odoo gross total against Amazon's customer-facing total.
+        amazon_total = self.order_total or 0.0
+        diff = amazon_total - sale_order.amount_total
+        recon_vals = {'reconciliation_difference': diff}
+        if abs(diff) > 0.01:
+            recon_vals.update({
+                'reconciliation_status': 'mismatch',
+                'requires_status_review': True,
+                'status_review_reason': (
+                    "Odoo Sale Order total %.2f does not match the Amazon customer "
+                    "total %.2f (difference %.2f). Review shipping/discount/tax mapping."
+                    % (sale_order.amount_total, amazon_total, diff)
+                ),
+            })
+            _logger.warning(
+                "Amazon order %s total mismatch: Amazon %.2f vs Odoo %.2f",
+                self.amazon_order_ref, amazon_total, sale_order.amount_total,
+            )
+        else:
+            recon_vals['reconciliation_status'] = 'ok'
+        self.write(recon_vals)
         return {
             'type': 'ir.actions.act_window',
             'res_model': 'sale.order',
