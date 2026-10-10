@@ -1,4 +1,10 @@
 <odoo>
+    <!-- Phase 17: noupdate="1" so module UPGRADES never overwrite operator-controlled
+         cron configuration (active / interval / priority). Fresh installs still get
+         these records (and their default active states) created once, stamped
+         noupdate=True. Existing databases are protected by migrations/19.0.11.2.0/
+         pre-migrate.py, which flips ir.model.data.noupdate BEFORE this file reloads. -->
+    <data noupdate="1">
     <!-- ═══ FBA + FBM Schedulers ═══ -->
 
     <record id="cron_amazon_import_orders" model="ir.cron">
@@ -351,4 +357,5 @@ for inst in env['amazon.instance'].search([]):
         <field name="active">True</field><field name="priority">12</field>
     </record>
 
+    </data>
 </odoo>

@@ -30,6 +30,10 @@ class TestOrdersVatShipping(TransactionCase):
             'name': 'VAT Test Instance', 'company_id': self.company.id,
             'marketplace_id': EG, 'region': 'eu',
             'fba_warehouse_id': warehouse.id, 'fbm_warehouse_id': warehouse.id,
+            # Pin the test's own 14% tax so the resolver is deterministic even on a
+            # data-rich DB that already has a real 14% sale tax (avoids the ambiguity
+            # fail-closed in _get_amazon_sales_tax). Does not change VAT math/assertions.
+            'amazon_sales_tax_id': self.vat14.id,
         })
         self.product = self.env['product.product'].sudo().create({
             'name': 'VAT Towel', 'type': 'consu', 'is_storable': True, 'list_price': 0.0})
@@ -172,6 +176,9 @@ class TestOrdersVatShipping(TransactionCase):
 
     # TEST 11 — ambiguous taxes -> fail unless explicit
     def test_11_ambiguous_requires_explicit(self):
+        # setUp pins amazon_sales_tax_id for determinism; clear it here so the
+        # auto-resolver path (and its ambiguity fail-closed) is what is tested.
+        self.instance.amazon_sales_tax_id = False
         self.vat14.copy({'name': 'EG VAT 14% incl second', 'amount': 14.0,
                          'price_include_override': 'tax_included'})
         with self.assertRaisesRegex(UserError, 'Multiple'):
