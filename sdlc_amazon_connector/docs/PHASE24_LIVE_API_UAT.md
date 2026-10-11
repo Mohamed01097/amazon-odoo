@@ -365,6 +365,56 @@ All findings were independently re-verified in a separate session:
 
 ---
 
+## 12. Phase 24B — Live Test Connection Results
+
+### Database Alignment
+
+The Odoo UI on `http://localhost:8019` connects to `amazon_phase19_fresh` on **PostgreSQL port 5432** (local), not the Docker PG on port 5434. These are two separate databases with the same name. All Phase 24A hardening was on port 5434 only.
+
+### Port 5432 Safety Hardening
+
+| Action | Result |
+|---|---|
+| 10 API-capable crons disabled | All 10 set `active=false` on port 5432 |
+| Queued jobs verified | 0 across 5 job tables |
+| Existing instances | 0 before transfer |
+
+### Credential Transfer
+
+| Detail | Value |
+|---|---|
+| Source | Instance 5373, Docker PG port 5434 |
+| Target | Instance 2142, local PG port 5432 |
+| Method | Python `psycopg2` direct SQL (no files, no terminal output of secrets) |
+| Safety checks | Verified 0 existing instances and 0 active dangerous crons before insert |
+| Post-insert fix | `company_id` was NULL (omitted from SQL INSERT); set to 1 ("My Company") to satisfy record rule 199 `[('company_id', 'in', company_ids)]` |
+| ORM verification | `env['amazon.instance'].with_user(admin).search([])` returns instance 2142 |
+
+### Test Connection Result
+
+| Detail | Value |
+|---|---|
+| Database | `amazon_phase19_fresh` on PostgreSQL port 5432 |
+| Instance ID | 2142 |
+| Instance name | Amazon Egypt Staging (Phase 24B) |
+| Marketplace | `ARBP9OOSHTCHU` (Egypt) |
+| Region | `eu` |
+| Seller ID | `A2LMV58FMUN2ZD` |
+| **Result** | **PASS** |
+| HTTP requests | 1 — `POST https://api.amazon.com/auth/o2/token` |
+| Response | 200 OK — valid access token received |
+| Elapsed | 1.32 seconds |
+| SP-API calls | 0 |
+| Business records created | 0 |
+| Crons activated | 0 |
+| Source DB modified | NO (`amazon24sep` write_date unchanged at 2026-10-10 19:14:15) |
+
+### RequestGuard Fix
+
+During earlier Test Connection testing, a critical gap was found: `requests.post()` calls were not intercepted by the guard that only patched `requests.request`. Fixed by patching `requests.post`, `requests.get`, `requests.put`, `requests.patch`, and `requests.delete` individually. 4 new safety tests (28–31) verify this. Total: 31 safety tests, 0 failures.
+
+---
+
 ## APPROVAL GATE
 
 **Phase 24A preparation and security hardening are complete.**
