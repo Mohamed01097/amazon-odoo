@@ -26,3 +26,4 @@ from . import test_fba_sale_stock
 from . import test_fba_cutover_v2
 from . import test_final_e2e
 from . import test_fba_appointment_slots
+from . import test_phase23_uat
