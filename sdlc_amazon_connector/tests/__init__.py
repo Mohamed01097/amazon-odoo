@@ -27,3 +27,4 @@ from . import test_fba_cutover_v2
 from . import test_final_e2e
 from . import test_fba_appointment_slots
 from . import test_phase23_uat
+from . import test_phase24_diagnostic_safety
