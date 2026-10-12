@@ -427,3 +427,81 @@ During earlier Test Connection testing, a critical gap was found: `requests.post
 4. ☐ Executing the Phase 24B diagnostic script.
 
 **Do NOT proceed with Phase 24B until the operator explicitly approves.**
+
+---
+
+## 13. Company Configuration Transfer
+
+### Source
+
+| Field | Value |
+|---|---|
+| Database | `amazon24sep` (port 5432, READ-ONLY) |
+| Company ID | 1 |
+| Name | Eisa Heikal For Commercial & Industrial Investment |
+| Source modified | **NO** — `write_date` remains `2026-10-04 19:27:51` |
+
+### Destination
+
+| Field | Value |
+|---|---|
+| Database | `amazon_phase19_fresh` (port 5432) |
+| Company ID | 1 (updated, not duplicated) |
+| Previous name | My Company |
+
+### Fields Successfully Copied
+
+| Field | Source value | Target |
+|---|---|---|
+| Company name | Eisa Heikal For Commercial & Industrial Investment | `res_company.name` + `res_partner.name` |
+| Email | info@ionic-eg.com | Both |
+| Phone | +201553315337 | Both |
+| Street | 12 Mohamed Mkld Street | `res_partner` |
+| Street2 | Area 8  Nasr City | `res_partner` |
+| City | Cairo | `res_partner` |
+| ZIP | 11658 | `res_partner` |
+| Country | Egypt (EG) | Mapped by code → id=65 |
+| State | Cairo (C) | Mapped by code → id=278 |
+| Currency | EGP | Mapped by name → id=75 (activated) |
+| VAT | 679-678-514 | `res_partner` |
+| Company Registry | 182645 | `res_partner.company_registry` |
+| Logo | 11,445 bytes | `res_company.logo` via ORM |
+| Language | en_US | `res_partner.lang` |
+
+### Relational Fields Mapped (by business key, not raw ID)
+
+| Relation | Source ID | Mapping key | Destination ID |
+|---|---|---|---|
+| Country (Egypt) | Source DB id | `code = 'EG'` | 65 |
+| State (Cairo) | Source DB id | `code = 'C'` + `country_id` | 278 |
+| Currency (EGP) | Source DB id | `name = 'EGP'` | 75 |
+
+### Fields Skipped
+
+| Field | Reason |
+|---|---|
+| `company_registry` on `res_company` | Column does not exist in destination (stored on `res_partner` instead) |
+| `mobile` | Not set on source |
+| `website` | Set to empty string on source partner |
+| `report_header`, `report_footer`, `company_details` | Empty on source |
+| `primary_color`, `secondary_color`, `font`, `layout_background` | UI theming — preserved destination defaults |
+| Chart of accounts, journals, taxes, fiscal positions | Not safe to copy between databases (different IDs/dependencies) |
+| Bank accounts | Not authorized for transfer |
+| Accounting sequences, payment terms | Database-specific |
+
+### Verification Results
+
+| Check | Result |
+|---|---|
+| Company name matches source | PASS |
+| Address matches source | PASS |
+| VAT matches source | PASS |
+| Country = Egypt | PASS |
+| Currency = EGP | PASS |
+| Logo present | PASS (11,445 bytes) |
+| No duplicate company | PASS (1 company total) |
+| No unrelated company modified | PASS |
+| No accounting records copied | PASS |
+| Amazon instance linked to company | PASS (id=2142 → company "Eisa Heikal...") |
+| Amazon sale orders | 0 |
+| Source DB unchanged | PASS (write_date = 2026-10-04) |
