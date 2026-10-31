@@ -1,0 +1,13 @@
+<odoo>
+    <menuitem id="menu_wix_root" name="Wix" sequence="60"/>
+
+    <menuitem id="menu_wix_operations" name="Operations" parent="menu_wix_root" sequence="10"/>
+    <menuitem id="menu_wix_order_import_job" name="Order Import Jobs" parent="menu_wix_operations"
+              action="action_wix_order_import_job" sequence="10"/>
+    <menuitem id="menu_wix_sync_log" name="Sync Logs" parent="menu_wix_operations"
+              action="action_wix_sync_log" sequence="20"/>
+
+    <menuitem id="menu_wix_configuration" name="Configuration" parent="menu_wix_root" sequence="90"/>
+    <menuitem id="menu_wix_instance" name="Connections" parent="menu_wix_configuration"
+              action="action_wix_instance" sequence="10"/>
+</odoo>

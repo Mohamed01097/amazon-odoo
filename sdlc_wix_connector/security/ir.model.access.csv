@@ -1,0 +1,10 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_wix_instance_user,wix.instance user,model_wix_instance,sdlc_wix_connector.group_wix_user,1,0,0,0
+access_wix_instance_manager,wix.instance manager,model_wix_instance,sdlc_wix_connector.group_wix_manager,1,1,1,0
+access_wix_instance_technical,wix.instance technical,model_wix_instance,sdlc_wix_connector.group_wix_technical_admin,1,1,1,1
+access_wix_order_import_job_user,wix.order.import.job user,model_wix_order_import_job,sdlc_wix_connector.group_wix_user,1,0,0,0
+access_wix_order_import_job_manager,wix.order.import.job manager,model_wix_order_import_job,sdlc_wix_connector.group_wix_manager,1,1,1,0
+access_wix_order_import_job_technical,wix.order.import.job technical,model_wix_order_import_job,sdlc_wix_connector.group_wix_technical_admin,1,1,1,1
+access_wix_sync_log_user,wix.sync.log user,model_wix_sync_log,sdlc_wix_connector.group_wix_user,1,0,0,0
+access_wix_sync_log_manager,wix.sync.log manager,model_wix_sync_log,sdlc_wix_connector.group_wix_manager,1,1,1,0
+access_wix_sync_log_technical,wix.sync.log technical,model_wix_sync_log,sdlc_wix_connector.group_wix_technical_admin,1,1,1,1

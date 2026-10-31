@@ -1,0 +1,26 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_bosta_instance_user,bosta.instance user,model_bosta_instance,sdlc_bosta_connector.group_bosta_user,1,0,0,0
+access_bosta_instance_manager,bosta.instance manager,model_bosta_instance,sdlc_bosta_connector.group_bosta_manager,1,1,1,0
+access_bosta_instance_technical,bosta.instance technical,model_bosta_instance,sdlc_bosta_connector.group_bosta_technical_admin,1,1,1,1
+access_bosta_instance_stock_user,bosta.instance stock user,model_bosta_instance,stock.group_stock_user,1,0,0,0
+access_bosta_shipment_job_user,bosta.shipment.job user,model_bosta_shipment_job,sdlc_bosta_connector.group_bosta_user,1,0,0,0
+access_bosta_shipment_job_manager,bosta.shipment.job manager,model_bosta_shipment_job,sdlc_bosta_connector.group_bosta_manager,1,1,1,0
+access_bosta_shipment_job_technical,bosta.shipment.job technical,model_bosta_shipment_job,sdlc_bosta_connector.group_bosta_technical_admin,1,1,1,1
+access_bosta_shipment_job_stock_user,bosta.shipment.job stock user,model_bosta_shipment_job,stock.group_stock_user,1,1,1,0
+access_bosta_sync_log_user,bosta.sync.log user,model_bosta_sync_log,sdlc_bosta_connector.group_bosta_user,1,0,0,0
+access_bosta_sync_log_manager,bosta.sync.log manager,model_bosta_sync_log,sdlc_bosta_connector.group_bosta_manager,1,1,1,0
+access_bosta_sync_log_technical,bosta.sync.log technical,model_bosta_sync_log,sdlc_bosta_connector.group_bosta_technical_admin,1,1,1,1
+access_bosta_sync_log_stock_user,bosta.sync.log stock user,model_bosta_sync_log,stock.group_stock_user,1,1,1,0
+access_bosta_tracking_event_job_user,bosta.tracking.event.job user,model_bosta_tracking_event_job,sdlc_bosta_connector.group_bosta_user,1,0,0,0
+access_bosta_tracking_event_job_manager,bosta.tracking.event.job manager,model_bosta_tracking_event_job,sdlc_bosta_connector.group_bosta_manager,1,1,1,0
+access_bosta_tracking_event_job_technical,bosta.tracking.event.job technical,model_bosta_tracking_event_job,sdlc_bosta_connector.group_bosta_technical_admin,1,1,1,1
+access_bosta_tracking_event_job_stock_user,bosta.tracking.event.job stock user,model_bosta_tracking_event_job,stock.group_stock_user,1,1,1,0
+access_bosta_city_user,bosta.city user,model_bosta_city,sdlc_bosta_connector.group_bosta_user,1,0,0,0
+access_bosta_city_manager,bosta.city manager,model_bosta_city,sdlc_bosta_connector.group_bosta_manager,1,1,1,1
+access_bosta_city_stock_user,bosta.city stock user,model_bosta_city,stock.group_stock_user,1,0,0,0
+access_bosta_zone_user,bosta.zone user,model_bosta_zone,sdlc_bosta_connector.group_bosta_user,1,0,0,0
+access_bosta_zone_manager,bosta.zone manager,model_bosta_zone,sdlc_bosta_connector.group_bosta_manager,1,1,1,1
+access_bosta_zone_stock_user,bosta.zone stock user,model_bosta_zone,stock.group_stock_user,1,0,0,0
+access_bosta_district_user,bosta.district user,model_bosta_district,sdlc_bosta_connector.group_bosta_user,1,0,0,0
+access_bosta_district_manager,bosta.district manager,model_bosta_district,sdlc_bosta_connector.group_bosta_manager,1,1,1,1
+access_bosta_district_stock_user,bosta.district stock user,model_bosta_district,stock.group_stock_user,1,0,0,0

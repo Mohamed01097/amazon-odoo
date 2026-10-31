@@ -1,0 +1,21 @@
+<odoo noupdate="1">
+    <record id="cron_wix_process_order_import_jobs" model="ir.cron">
+        <field name="name">Wix: Process Order Import Jobs</field>
+        <field name="model_id" ref="model_wix_order_import_job"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_process_order_import_jobs()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">minutes</field>
+        <field name="active" eval="False"/>
+    </record>
+
+    <record id="cron_wix_cleanup_old_logs" model="ir.cron">
+        <field name="name">Wix: Clean Up Successful Sync Logs</field>
+        <field name="model_id" ref="model_wix_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_cleanup_old_logs()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="active" eval="False"/>
+    </record>
+</odoo>

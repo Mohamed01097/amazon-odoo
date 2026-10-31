@@ -1,0 +1,46 @@
+<odoo>
+    <record id="view_order_form_wix" model="ir.ui.view">
+        <field name="name">sale.order.form.wix</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='origin']" position="after">
+                <field name="wix_instance_id" invisible="not wix_instance_id"/>
+                <field name="wix_order_number" invisible="not wix_order_number"/>
+                <field name="wix_order_status" invisible="not wix_order_status"/>
+                <field name="wix_payment_status" invisible="not wix_payment_status"/>
+                <field name="wix_fulfillment_status"
+                       invisible="not wix_fulfillment_status"/>
+                <field name="wix_last_event_at" invisible="not wix_last_event_at"/>
+                <field name="wix_order_id" invisible="1"/>
+                <field name="wix_review_needed" invisible="1"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_order_list_wix" model="ir.ui.view">
+        <field name="name">sale.order.list.wix</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_tree"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='state']" position="before">
+                <field name="wix_payment_status" optional="hide"/>
+                <field name="wix_review_needed" optional="hide"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_sales_order_filter_wix" model="ir.ui.view">
+        <field name="name">sale.order.search.wix</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.sale_order_view_search_inherit_sale"/>
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <filter name="wix_orders" string="From Wix"
+                        domain="[('wix_order_id', '!=', False)]"/>
+                <filter name="wix_review_needed" string="Needs Wix Review"
+                        domain="[('wix_review_needed', '=', True)]"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

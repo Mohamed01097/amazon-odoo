@@ -1,0 +1,18 @@
+<odoo>
+    <record id="view_delivery_carrier_form_bosta" model="ir.ui.view">
+        <field name="name">delivery.carrier.form.bosta</field>
+        <field name="model">delivery.carrier</field>
+        <field name="inherit_id" ref="delivery.view_delivery_carrier_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//group/group[@name='delivery_details']" position="after">
+                <group name="bosta_details" string="Bosta"
+                       invisible="delivery_type != 'bosta'">
+                    <field name="bosta_instance_id"
+                           required="delivery_type == 'bosta'"/>
+                    <field name="bosta_flat_rate" widget="monetary"/>
+                    <field name="bosta_tracking_url_template"/>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>

@@ -1,0 +1,84 @@
+<odoo>
+    <record id="module_category_sdlc_bosta_connector" model="ir.module.category">
+        <field name="name">Bosta Connector</field>
+        <field name="sequence">37</field>
+    </record>
+
+    <record id="res_groups_privilege_bosta_connector" model="res.groups.privilege">
+        <field name="name">Bosta Connector</field>
+        <field name="category_id" ref="module_category_sdlc_bosta_connector"/>
+        <field name="sequence">37</field>
+    </record>
+
+    <record id="group_bosta_user" model="res.groups">
+        <field name="name">User</field>
+        <field name="privilege_id" ref="res_groups_privilege_bosta_connector"/>
+    </record>
+
+    <record id="group_bosta_manager" model="res.groups">
+        <field name="name">Manager</field>
+        <field name="privilege_id" ref="res_groups_privilege_bosta_connector"/>
+        <field name="implied_ids" eval="[
+            Command.link(ref('sdlc_bosta_connector.group_bosta_user')),
+            Command.link(ref('stock.group_stock_user')),
+        ]"/>
+    </record>
+
+    <record id="group_bosta_technical_admin" model="res.groups">
+        <field name="name">Technical Administrator</field>
+        <field name="privilege_id" ref="res_groups_privilege_bosta_connector"/>
+        <field name="implied_ids" eval="[
+            Command.link(ref('sdlc_bosta_connector.group_bosta_manager')),
+            Command.link(ref('base.group_system')),
+        ]"/>
+    </record>
+
+    <record id="rule_bosta_instance_company" model="ir.rule">
+        <field name="name">Bosta accounts by company</field>
+        <field name="model_id" ref="model_bosta_instance"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_bosta_connector.group_bosta_user'))]"/>
+    </record>
+
+    <record id="rule_bosta_shipment_job_company" model="ir.rule">
+        <field name="name">Bosta shipment jobs by company</field>
+        <field name="model_id" ref="model_bosta_shipment_job"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_bosta_connector.group_bosta_user'))]"/>
+    </record>
+
+    <record id="rule_bosta_sync_log_company" model="ir.rule">
+        <field name="name">Bosta sync logs by company</field>
+        <field name="model_id" ref="model_bosta_sync_log"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_bosta_connector.group_bosta_user'))]"/>
+    </record>
+
+    <record id="rule_bosta_tracking_event_job_company" model="ir.rule">
+        <field name="name">Bosta tracking events by company</field>
+        <field name="model_id" ref="model_bosta_tracking_event_job"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_bosta_connector.group_bosta_user'))]"/>
+    </record>
+
+    <record id="rule_bosta_city_company" model="ir.rule">
+        <field name="name">Bosta cities by company</field>
+        <field name="model_id" ref="model_bosta_city"/>
+        <field name="domain_force">[('instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_bosta_connector.group_bosta_user'))]"/>
+    </record>
+
+    <record id="rule_bosta_zone_company" model="ir.rule">
+        <field name="name">Bosta zones by company</field>
+        <field name="model_id" ref="model_bosta_zone"/>
+        <field name="domain_force">[('city_id.instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_bosta_connector.group_bosta_user'))]"/>
+    </record>
+
+    <record id="rule_bosta_district_company" model="ir.rule">
+        <field name="name">Bosta districts by company</field>
+        <field name="model_id" ref="model_bosta_district"/>
+        <field name="domain_force">[('zone_id.city_id.instance_id.company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[Command.link(ref('sdlc_bosta_connector.group_bosta_user'))]"/>
+    </record>
+</odoo>

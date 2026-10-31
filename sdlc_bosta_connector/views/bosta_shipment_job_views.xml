@@ -1,0 +1,124 @@
+<odoo>
+    <record id="view_bosta_shipment_job_form" model="ir.ui.view">
+        <field name="name">bosta.shipment.job.form</field>
+        <field name="model">bosta.shipment.job</field>
+        <field name="arch" type="xml">
+            <form string="Bosta Shipment Job">
+                <header>
+                    <button name="action_retry" type="object" string="Retry"
+                            class="btn-primary" invisible="state != 'failed'"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,done"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="picking_id"/>
+                            <field name="instance_id"/>
+                            <field name="tracking_number"/>
+                            <field name="bosta_delivery_id"/>
+                        </group>
+                        <group>
+                            <field name="next_run_at"/>
+                            <field name="retry_count"/>
+                            <field name="sync_log_id"/>
+                        </group>
+                    </group>
+                    <group string="Last Error" invisible="not last_error_message">
+                        <field name="last_error_message" nolabel="1"/>
+                    </group>
+                    <notebook>
+                        <page string="Request">
+                            <field name="request_payload_json" nolabel="1"/>
+                        </page>
+                        <page string="Response">
+                            <field name="response_payload_json" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_bosta_shipment_job_list" model="ir.ui.view">
+        <field name="name">bosta.shipment.job.list</field>
+        <field name="model">bosta.shipment.job</field>
+        <field name="arch" type="xml">
+            <list string="Bosta Shipment Jobs">
+                <field name="create_date"/>
+                <field name="picking_id"/>
+                <field name="tracking_number"/>
+                <field name="retry_count"/>
+                <field name="state"
+                       decoration-danger="state == 'failed'"
+                       decoration-success="state == 'done'"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_bosta_shipment_job" model="ir.actions.act_window">
+        <field name="name">Bosta Shipment Jobs</field>
+        <field name="res_model">bosta.shipment.job</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <record id="view_bosta_sync_log_list" model="ir.ui.view">
+        <field name="name">bosta.sync.log.list</field>
+        <field name="model">bosta.sync.log</field>
+        <field name="arch" type="xml">
+            <list string="Bosta Sync Logs">
+                <field name="create_date"/>
+                <field name="instance_id"/>
+                <field name="operation"/>
+                <field name="summary"/>
+                <field name="http_status"/>
+                <field name="state"
+                       decoration-danger="state == 'failed'"
+                       decoration-success="state == 'success'"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_bosta_sync_log_form" model="ir.ui.view">
+        <field name="name">bosta.sync.log.form</field>
+        <field name="model">bosta.sync.log</field>
+        <field name="arch" type="xml">
+            <form string="Bosta Sync Log">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="instance_id"/>
+                            <field name="operation"/>
+                            <field name="state"/>
+                        </group>
+                        <group>
+                            <field name="http_status"/>
+                            <field name="retryable"/>
+                            <field name="source_model"/>
+                            <field name="source_id"/>
+                        </group>
+                    </group>
+                    <group string="Summary">
+                        <field name="summary" nolabel="1"/>
+                    </group>
+                    <group string="Error" invisible="not error_message">
+                        <field name="error_message" nolabel="1"/>
+                    </group>
+                    <notebook>
+                        <page string="Request (Redacted)">
+                            <field name="request_data" nolabel="1"/>
+                        </page>
+                        <page string="Response (Redacted)">
+                            <field name="response_data" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_bosta_sync_log" model="ir.actions.act_window">
+        <field name="name">Bosta Sync Logs</field>
+        <field name="res_model">bosta.sync.log</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

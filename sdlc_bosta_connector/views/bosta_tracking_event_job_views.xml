@@ -1,0 +1,66 @@
+<odoo>
+    <record id="view_bosta_tracking_event_job_form" model="ir.ui.view">
+        <field name="name">bosta.tracking.event.job.form</field>
+        <field name="model">bosta.tracking.event.job</field>
+        <field name="arch" type="xml">
+            <form string="Bosta Tracking Event">
+                <header>
+                    <button name="action_retry" type="object" string="Retry"
+                            class="btn-primary"
+                            invisible="state not in ('failed', 'ignored')"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,done"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="instance_id"/>
+                            <field name="tracking_number"/>
+                            <field name="bosta_delivery_id"/>
+                            <field name="bosta_state_code"/>
+                            <field name="bosta_state_label"/>
+                        </group>
+                        <group>
+                            <field name="picking_id"/>
+                            <field name="return_picking_id"/>
+                            <field name="event_timestamp"/>
+                            <field name="next_run_at"/>
+                            <field name="retry_count"/>
+                        </group>
+                    </group>
+                    <group string="Notes" invisible="not last_error_message">
+                        <field name="last_error_message" nolabel="1"/>
+                    </group>
+                    <notebook>
+                        <page string="Raw Payload">
+                            <field name="payload_json" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_bosta_tracking_event_job_list" model="ir.ui.view">
+        <field name="name">bosta.tracking.event.job.list</field>
+        <field name="model">bosta.tracking.event.job</field>
+        <field name="arch" type="xml">
+            <list string="Bosta Tracking Events">
+                <field name="create_date"/>
+                <field name="tracking_number"/>
+                <field name="bosta_state_label"/>
+                <field name="picking_id"/>
+                <field name="return_picking_id"/>
+                <field name="state"
+                       decoration-danger="state == 'failed'"
+                       decoration-warning="state == 'ignored'"
+                       decoration-success="state == 'done'"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_bosta_tracking_event_job" model="ir.actions.act_window">
+        <field name="name">Bosta Tracking Events</field>
+        <field name="res_model">bosta.tracking.event.job</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

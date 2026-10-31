@@ -1,0 +1,70 @@
+<odoo>
+    <record id="view_wix_instance_form" model="ir.ui.view">
+        <field name="name">wix.instance.form</field>
+        <field name="model">wix.instance</field>
+        <field name="arch" type="xml">
+            <form string="Wix Connection">
+                <sheet>
+                    <div class="oe_title">
+                        <label for="name"/>
+                        <h1><field name="name" placeholder="e.g. Main Store"/></h1>
+                    </div>
+                    <group>
+                        <group string="Connection">
+                            <field name="active"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                            <field name="app_id"/>
+                            <field name="site_id"/>
+                            <field name="api_key" password="True"/>
+                        </group>
+                        <group string="Order Import">
+                            <field name="order_import_enabled"/>
+                            <field name="order_status_sync_enabled"/>
+                            <field name="order_cancel_policy"/>
+                            <field name="default_warehouse_id"/>
+                            <field name="default_pricelist_id"/>
+                            <field name="default_fiscal_position_id"/>
+                            <field name="default_sales_team_id"/>
+                        </group>
+                    </group>
+                    <group string="Order Amounts">
+                        <group>
+                            <field name="sales_tax_id"/>
+                            <field name="total_mismatch_policy"/>
+                            <field name="total_mismatch_tolerance"/>
+                        </group>
+                        <group>
+                            <field name="shipping_product_id"/>
+                            <field name="discount_product_id"/>
+                            <field name="fee_product_id"/>
+                        </group>
+                    </group>
+                    <group string="Webhook Verification">
+                        <field name="webhook_public_key" nolabel="1"
+                               placeholder="-----BEGIN PUBLIC KEY-----&#10;...&#10;-----END PUBLIC KEY-----"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_wix_instance_list" model="ir.ui.view">
+        <field name="name">wix.instance.list</field>
+        <field name="model">wix.instance</field>
+        <field name="arch" type="xml">
+            <list string="Wix Connections">
+                <field name="name"/>
+                <field name="site_id"/>
+                <field name="default_warehouse_id"/>
+                <field name="order_import_enabled"/>
+                <field name="active"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_wix_instance" model="ir.actions.act_window">
+        <field name="name">Wix Connections</field>
+        <field name="res_model">wix.instance</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

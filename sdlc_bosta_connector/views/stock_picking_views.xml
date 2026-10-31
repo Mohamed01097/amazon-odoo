@@ -1,0 +1,29 @@
+<odoo>
+    <record id="view_picking_form_bosta" model="ir.ui.view">
+        <field name="name">stock.picking.form.bosta</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='carrier_tracking_ref']" position="after">
+                <field name="bosta_shipment_state"
+                       invisible="not bosta_shipment_state"/>
+                <field name="bosta_delivery_id"
+                       invisible="not bosta_delivery_id"/>
+                <field name="bosta_delivered_at"
+                       invisible="not bosta_delivered_at"/>
+                <field name="bosta_returned_at"
+                       invisible="not bosta_returned_at"/>
+                <field name="bosta_return_picking_id"
+                       invisible="not bosta_return_picking_id"/>
+            </xpath>
+            <xpath expr="//button[@name='action_cancel']" position="before">
+                <button name="action_retry_bosta_shipment" type="object"
+                        string="Retry Bosta Booking" class="btn-secondary"
+                        invisible="bosta_shipment_state != 'failed'"/>
+                <button name="action_open_bosta_tracking" type="object"
+                        string="Track with Bosta" class="btn-secondary"
+                        invisible="bosta_shipment_state != 'booked'"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

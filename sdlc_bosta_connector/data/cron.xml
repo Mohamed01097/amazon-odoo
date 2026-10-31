@@ -1,0 +1,53 @@
+<odoo noupdate="1">
+    <record id="cron_bosta_process_shipment_jobs" model="ir.cron">
+        <field name="name">Bosta: Book Queued Shipments</field>
+        <field name="model_id" ref="model_bosta_shipment_job"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_process_shipment_jobs()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">minutes</field>
+        <field name="active" eval="False"/>
+    </record>
+
+    <record id="cron_bosta_process_tracking_events" model="ir.cron">
+        <field name="name">Bosta: Apply Tracking Events</field>
+        <field name="model_id" ref="model_bosta_tracking_event_job"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_process_tracking_event_jobs()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">minutes</field>
+        <field name="active" eval="False"/>
+    </record>
+
+    <!-- Fallback only: the webhook is the primary status mechanism. This
+         catches shipments whose callback was missed or misconfigured. -->
+    <record id="cron_bosta_reconcile_shipments" model="ir.cron">
+        <field name="name">Bosta: Reconcile Quiet Shipments</field>
+        <field name="model_id" ref="model_bosta_tracking_event_job"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_reconcile_active_shipments()</field>
+        <field name="interval_number">6</field>
+        <field name="interval_type">hours</field>
+        <field name="active" eval="False"/>
+    </record>
+
+    <record id="cron_bosta_sync_address_catalogue" model="ir.cron">
+        <field name="name">Bosta: Refresh Address Catalogue</field>
+        <field name="model_id" ref="model_bosta_instance"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_sync_address_catalogues()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="active" eval="False"/>
+    </record>
+
+    <record id="cron_bosta_cleanup_old_logs" model="ir.cron">
+        <field name="name">Bosta: Clean Up Successful Sync Logs</field>
+        <field name="model_id" ref="model_bosta_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_cleanup_old_logs()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="active" eval="False"/>
+    </record>
+</odoo>

@@ -1,0 +1,58 @@
+<odoo>
+    <record id="view_wix_sync_log_form" model="ir.ui.view">
+        <field name="name">wix.sync.log.form</field>
+        <field name="model">wix.sync.log</field>
+        <field name="arch" type="xml">
+            <form string="Wix Sync Log">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="instance_id"/>
+                            <field name="operation"/>
+                            <field name="state"/>
+                        </group>
+                        <group>
+                            <field name="create_date"/>
+                            <field name="error_category"/>
+                            <field name="source_model"/>
+                            <field name="source_id"/>
+                        </group>
+                    </group>
+                    <group string="Summary">
+                        <field name="summary" nolabel="1"/>
+                    </group>
+                    <group string="Error" invisible="not error_message">
+                        <field name="error_message" nolabel="1"/>
+                    </group>
+                    <notebook>
+                        <page string="Request (Redacted)">
+                            <field name="request_data" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_wix_sync_log_list" model="ir.ui.view">
+        <field name="name">wix.sync.log.list</field>
+        <field name="model">wix.sync.log</field>
+        <field name="arch" type="xml">
+            <list string="Wix Sync Logs">
+                <field name="create_date"/>
+                <field name="instance_id"/>
+                <field name="operation"/>
+                <field name="summary"/>
+                <field name="state"
+                       decoration-danger="state == 'failed'"
+                       decoration-success="state == 'success'"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_wix_sync_log" model="ir.actions.act_window">
+        <field name="name">Sync Logs</field>
+        <field name="res_model">wix.sync.log</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

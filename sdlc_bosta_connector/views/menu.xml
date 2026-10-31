@@ -1,0 +1,36 @@
+<odoo>
+    <menuitem id="menu_bosta_instance"
+              name="Bosta Accounts"
+              parent="stock.menu_stock_config_settings"
+              action="action_bosta_instance"
+              groups="sdlc_bosta_connector.group_bosta_manager"
+              sequence="90"/>
+
+    <menuitem id="menu_bosta_shipment_job"
+              name="Bosta Shipment Jobs"
+              parent="stock.menu_stock_warehouse_mgmt"
+              action="action_bosta_shipment_job"
+              groups="sdlc_bosta_connector.group_bosta_user"
+              sequence="95"/>
+
+    <menuitem id="menu_bosta_tracking_event_job"
+              name="Bosta Tracking Events"
+              parent="stock.menu_stock_warehouse_mgmt"
+              action="action_bosta_tracking_event_job"
+              groups="sdlc_bosta_connector.group_bosta_user"
+              sequence="96"/>
+
+    <menuitem id="menu_bosta_sync_log"
+              name="Bosta Sync Logs"
+              parent="stock.menu_stock_warehouse_mgmt"
+              action="action_bosta_sync_log"
+              groups="sdlc_bosta_connector.group_bosta_manager"
+              sequence="96"/>
+
+    <menuitem id="menu_bosta_city"
+              name="Bosta Cities"
+              parent="stock.menu_stock_config_settings"
+              action="action_bosta_city"
+              groups="sdlc_bosta_connector.group_bosta_manager"
+              sequence="91"/>
+</odoo>
