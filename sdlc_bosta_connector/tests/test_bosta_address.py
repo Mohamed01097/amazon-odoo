@@ -277,3 +277,87 @@ class TestBostaAddress(TransactionCase):
             self.env['bosta.shipment.job'].cron_process_shipment_jobs()
         mocked.assert_not_called()
         self.assertEqual(job.state, 'failed')
+
+    # ------------------------------------------------------------------
+    # The real shape, confirmed against a live call (2026-11-01)
+    #
+    # /cities/{id}/zones returns zones with no nested districts at all: each
+    # zone IS the leaf deliverable area, named in nameAr (not otherName), and
+    # carries its own dropOffAvailability/pickupAvailability directly.
+    # ------------------------------------------------------------------
+
+    def test_real_shape_city_uses_nameAr(self):
+        payload = {'data': {'list': [
+            {'_id': 'rc1', 'name': 'Alexandria', 'nameAr': 'الاسكندريه',
+             'code': 'EG-02', 'pickupAvailability': True, 'dropOffAvailability': True},
+        ]}}
+        with patch(CITIES_PATH, return_value=payload), \
+             patch(ZONES_PATH, return_value={'data': []}):
+            self.instance.action_sync_address_catalogue()
+
+        city = self.env['bosta.city'].search([('bosta_id', '=', 'rc1')])
+        self.assertEqual(city.other_name, 'الاسكندريه')
+        self.assertEqual(city.code, 'EG-02')
+
+    def test_real_shape_zone_is_the_leaf_with_its_own_availability(self):
+        """No nested districts; the zone itself carries dropOffAvailability."""
+        cities = {'data': {'list': [
+            {'_id': 'rc1', 'name': 'Cairo', 'nameAr': 'القاهرة', 'code': 'EG-01'},
+        ]}}
+        zones = {'data': [
+            {'_id': 'rz1', 'name': 'ElMaadi', 'nameAr': 'المعادي',
+             'pickupAvailability': True, 'dropOffAvailability': True},
+            {'_id': 'rz2', 'name': 'SomeClosedArea', 'nameAr': 'منطقة مغلقة',
+             'pickupAvailability': True, 'dropOffAvailability': False},
+        ]}
+        with patch(CITIES_PATH, return_value=cities), \
+             patch(ZONES_PATH, return_value=zones):
+            self.instance.action_sync_address_catalogue()
+
+        maadi = self.env['bosta.zone'].search([('bosta_id', '=', 'rz1')])
+        self.assertEqual(maadi.other_name, 'المعادي')
+        self.assertTrue(maadi.dropoff_available)
+        self.assertFalse(maadi.district_ids)
+
+        closed = self.env['bosta.zone'].search([('bosta_id', '=', 'rz2')])
+        self.assertFalse(closed.dropoff_available)
+
+    def test_real_shape_address_resolves_directly_to_the_zone(self):
+        """End-to-end: an address names the zone/neighbourhood directly."""
+        cities = {'data': {'list': [
+            {'_id': 'rc1', 'name': 'Cairo', 'nameAr': 'القاهرة', 'code': 'EG-01'},
+        ]}}
+        zones = {'data': [
+            {'_id': 'rz1', 'name': 'ElMaadi', 'nameAr': 'المعادي',
+             'pickupAvailability': True, 'dropOffAvailability': True},
+        ]}
+        with patch(CITIES_PATH, return_value=cities), \
+             patch(ZONES_PATH, return_value=zones):
+            self.instance.action_sync_address_catalogue()
+
+        partner = self._partner(city='Cairo', street2='ElMaadi')
+        city, zone, district = partner._resolve_bosta_location(self.instance)
+        self.assertEqual(city.code, 'EG-01')
+        self.assertEqual(zone.name, 'ElMaadi')
+        self.assertFalse(district)
+
+        # Arabic address text matches the same zone via nameAr.
+        partner_ar = self._partner(city='القاهرة', street2='المعادي')
+        city_ar, zone_ar, _d = partner_ar._resolve_bosta_location(self.instance)
+        self.assertEqual(zone_ar, zone)
+        self.assertEqual(city_ar, city)
+
+    def test_real_shape_closed_zone_is_never_matched(self):
+        cities = {'data': {'list': [
+            {'_id': 'rc1', 'name': 'Cairo', 'code': 'EG-01'},
+        ]}}
+        zones = {'data': [
+            {'_id': 'rz2', 'name': 'ClosedArea', 'dropOffAvailability': False},
+        ]}
+        with patch(CITIES_PATH, return_value=cities), \
+             patch(ZONES_PATH, return_value=zones):
+            self.instance.action_sync_address_catalogue()
+
+        partner = self._partner(city='Cairo', street2='ClosedArea')
+        _city, zone, _district = partner._resolve_bosta_location(self.instance)
+        self.assertFalse(zone)

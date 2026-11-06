@@ -5,17 +5,34 @@ and a district drawn from Bosta's own catalogue. Odoo stores addresses as free
 text, so the catalogue is cached here and each customer address is linked to
 it, either automatically by name or by a human picking from the list.
 
-What is verified and what is not:
+Confirmed against a real call to the live shipping API (2026-11-01, the
+client's own Bosta account):
 
-* The hierarchy is three levels - city, then zone, then district. Confirmed
-  across Bosta's own documentation.
-* The shipping API's catalogue paths are ``GET /api/v2/cities`` and
-  ``GET /api/v2/cities/{cityId}/zones``.
-* The exact response field names for the **shipping** API are NOT confirmed.
-  Bosta's published example of this shape belongs to their separate
-  Fulfillment product (``api-fulfillment.bosta.co``), so parsing accepts
-  several plausible key spellings instead of assuming one. Correct
-  :meth:`_parse_city` and :meth:`_parse_zone` once a real response is seen.
+* ``GET /api/v2/cities`` returns ``{"data": {"list": [...]}}`` — not a bare
+  list, and not ``{"data": [...]}``. Each entry has ``_id``, ``name``,
+  ``nameAr``, ``code`` (e.g. ``"EG-02"``), ``pickupAvailability``,
+  ``dropOffAvailability``.
+* ``GET /api/v2/cities/{cityId}/zones`` returns ``{"data": [...]}`` where
+  **each entry is already the leaf deliverable area** — e.g. ``"Helwan"``,
+  ``"ElMaadi"``, ``"ElKhalifa"`` — with ``_id``, ``name``, ``nameAr``,
+  ``pickupAvailability``, ``dropOffAvailability``. There is no nested
+  ``districts`` list and no separate grouping level in this account's real
+  data: what Bosta's shipping API calls a "zone" here is a neighbourhood,
+  not a grouping of several neighbourhoods.
+
+  This contradicts the three-level city → zone → district model published
+  for Bosta's separate **Fulfillment** product
+  (``api-fulfillment.bosta.co`` — a different product, confirmed by its own
+  separate host). That three-level shape, and the SDK-test-fixture shape
+  this module originally assumed, are both kept as fallback parse paths
+  (`BostaCity._upsert_zones`) in case a different account or a future API
+  version does nest districts — but the two-level shape above is the one
+  actually observed and is what `res_partner.py`'s address resolution is
+  written against.
+* The Arabic name key is ``nameAr`` on both cities and zones — not
+  ``otherName``/``cityOtherName``/``zoneOtherName`` as originally guessed
+  from third-party integration write-ups. Both spellings are still accepted
+  defensively (`_parse_city`, `BostaZone._upsert`).
 """
 
 import logging
@@ -147,7 +164,10 @@ class BostaCity(models.Model):
         return {
             'bosta_id': str(bosta_id),
             'name': str(name),
-            'other_name': raw.get('otherName') or raw.get('cityOtherName') or False,
+            'other_name': (
+                raw.get('nameAr') or raw.get('otherName')
+                or raw.get('cityOtherName') or False
+            ),
             'code': raw.get('code') or raw.get('cityCode') or False,
         }
 
@@ -226,6 +246,15 @@ class BostaZone(models.Model):
         related='city_id.instance_id', store=True, index=True,
     )
     district_ids = fields.One2many('bosta.district', 'zone_id', string='Districts')
+    # In this account's real data a "zone" is already the leaf deliverable
+    # area (see the module docstring), so availability lives here directly,
+    # not only on the (usually empty) nested districts.
+    dropoff_available = fields.Boolean(
+        default=True,
+        help="Whether Bosta delivers to this zone. A zone without drop-off "
+             "availability must not be used for a shipment.",
+    )
+    pickup_available = fields.Boolean(default=True)
     normalized_name = fields.Char(compute='_compute_normalized_name', store=True, index=True)
     normalized_other_name = fields.Char(
         compute='_compute_normalized_name', store=True, index=True,
@@ -259,8 +288,18 @@ class BostaZone(models.Model):
         vals = {
             'name': str(name),
             'bosta_id': str(bosta_id) if bosta_id else False,
-            'other_name': raw.get('otherName') or raw.get('zoneOtherName') or False,
+            'other_name': (
+                raw.get('nameAr') or raw.get('otherName')
+                or raw.get('zoneOtherName') or False
+            ),
         }
+        # Only set when the key is actually present: a nested-districts
+        # payload (the fallback shape) carries no availability of its own at
+        # this level, and defaulting it to True there would be a guess.
+        if 'dropOffAvailability' in raw:
+            vals['dropoff_available'] = bool(raw.get('dropOffAvailability'))
+        if 'pickupAvailability' in raw:
+            vals['pickup_available'] = bool(raw.get('pickupAvailability'))
         domain = [('city_id', '=', city.id)]
         domain += (
             [('bosta_id', '=', vals['bosta_id'])] if vals['bosta_id']

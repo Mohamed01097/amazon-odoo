@@ -13,9 +13,10 @@ callbacks back onto the delivery, and creates (but never auto-validates) a
 return picking when Bosta reports a parcel coming back.
 
 **No real call to Bosta has been made as of this writing.** Every one of the
-95 automated tests mocks the HTTP layer. The module is built against Bosta's
-published documentation and official SDK source, not against observed live
-traffic — see Known Limitations below for exactly what remains unverified.
+100 automated tests mocks the HTTP layer. The module is built against
+Bosta's published documentation and official SDK source, not against
+observed live traffic — see Known Limitations below for exactly what
+remains unverified.
 
 ## Why booking is asynchronous, against Odoo's own default wiring
 
@@ -195,6 +196,20 @@ including `webhookCustomHeaders` — the dict literally containing the
 callback secret sent to Bosta — which is redacted as a whole value, not
 recursed into. `cron_cleanup_old_logs` (inactive by default) removes only
 `state = 'success'` logs older than 30 days; failures are kept indefinitely.
+
+## Multi-company scoping on the address catalogue
+
+`bosta.city`/`bosta.zone`/`bosta.district` initially shipped with access
+rights (the CSV) but no `ir.rule`. In a multi-company setup that let a user
+in one company read another company's cached Bosta catalogue — not a
+credential leak, but a cross-company data leak. Fixed with company-scoped
+rules following the chain down to each model's nearest `company_id`:
+`bosta.city` via `instance_id.company_id`, `bosta.zone` via
+`city_id.instance_id.company_id`, `bosta.district` via
+`zone_id.city_id.instance_id.company_id`. Covered by
+`test_bosta_multicompany.py`, which deliberately runs as a real non-superuser
+user — `ir.rule` is not enforced for the superuser, so a test run as the
+default admin user would not have caught this.
 
 ## Known limitations (as of 2026-10-31)
 

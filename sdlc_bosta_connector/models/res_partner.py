@@ -85,9 +85,16 @@ class ResPartner(models.Model):
         ], (self.city, self.state_id.name))
 
     def _match_zone(self, city):
+        """Match a zone directly, treating it as the leaf deliverable area.
+
+        Confirmed against this account's real catalogue (2026-11-01): a
+        "zone" here is already a neighbourhood (e.g. "ElMaadi"), not a
+        grouping of several, and carries its own drop-off availability.
+        """
         self.ensure_one()
         return self._unique_match('bosta.zone', [
             ('city_id', '=', city.id),
+            ('dropoff_available', '=', True),
         ], (self.street2, self.street))
 
     def _match_district_in_city(self, city):
