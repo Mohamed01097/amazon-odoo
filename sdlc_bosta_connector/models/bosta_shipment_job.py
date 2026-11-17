@@ -235,7 +235,7 @@ class BostaShipmentJob(models.Model):
                 f"Customer {partner.display_name} has no street address."
             )
 
-        city, zone, _district = partner._resolve_bosta_location(self.instance_id)
+        city, zone, district = partner._resolve_bosta_location(self.instance_id)
         if not city:
             raise BostaError(
                 f"The city on {partner.display_name}'s address "
@@ -254,16 +254,26 @@ class BostaShipmentJob(models.Model):
             address['secondLine'] = partner.street2.strip()
         if zone:
             address['zone'] = zone.name
-        # District is deliberately never sent. Confirmed against the real API
-        # (2026-11-12), across four rejections in a row: a bare 'district'
-        # key, districtId (the cached bosta.district.bosta_id -- not a real
-        # lookup id for this account), and districtName plus the required
-        # cityId peer were all rejected, the last two both with "District
-        # Not Found". The cached bosta.district catalogue is not reliable
-        # enough to send for this account; 'zone' alone has not been
-        # rejected by any real call so far. `district` stays unused here on
-        # purpose -- do not reintroduce a districtId/districtName key without
-        # confirming it against this account's real catalogue first.
+        # Confirmed against the real API (2026-11-12 and 2026-11-17), across
+        # five rejections: a bare 'district' key, districtId (the cached
+        # bosta.district.bosta_id -- not a real lookup id for this account),
+        # districtName alone, and 'zone' with no district key at all were
+        # all rejected -- the last with the exact same "must contain at
+        # least one of [districtId, districtName]" as sending nothing. The
+        # account's cached catalogue has only one bosta.district record in
+        # the whole country (28 cities, 561 zones): Bosta's own zones
+        # endpoint almost never returns district-level data, yet the
+        # booking endpoint demands a district value almost everywhere. Given
+        # that, the zone's own name is sent as districtName when no finer
+        # district was matched -- cityId is required alongside any
+        # districtName, per the same real responses. This is a fallback, not
+        # a confirmed-correct value: if Bosta ever starts rejecting *this*
+        # as "District Not Found" too, there may be no name-based value this
+        # account's catalogue can supply at all, and that needs a real
+        # support answer, not another guess.
+        if district or zone:
+            address['districtName'] = (district or zone).name
+            address['cityId'] = city.bosta_id
         if partner.zip:
             address['postalCode'] = partner.zip.strip()
         return address

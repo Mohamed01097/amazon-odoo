@@ -49,8 +49,8 @@ the automatic path.
 
 ## The Bosta API contract, and how it was actually confirmed
 
-**Confirmed against real `POST /api/v2/deliveries` responses (2026-11-12),
-across four rejections in a row, all on the district field:**
+**Confirmed against real `POST /api/v2/deliveries` responses (2026-11-12 and
+2026-11-17), across five rejections in a row, all on the district field:**
 1. `dropOffAddress.district` is rejected outright —
    `"dropOffAddress must contain at least one of [districtId, districtName]"`.
 2. `districtId` using the cached `bosta.district.bosta_id` — **rejected**,
@@ -60,16 +60,29 @@ across four rejections in a row, all on the district field:**
 4. `districtName` **plus** `cityId` (`bosta.city.bosta_id`) — **still
    rejected**, `"District Not Found"` again. The cached district *name* does
    not match Bosta's catalogue for this city either.
+5. Sending no district field at all, with only `zone` as the leaf area —
+   **rejected again**, the exact same message as (1). `zone` alone is
+   *never* sufficient; a district of some kind is required on every real
+   address tried (Bani Suif, Maadi, New Cairo), not just an edge case.
 
-**Conclusion: `_build_drop_off_address` (`bosta_shipment_job.py`) never
-sends a district field at all.** The cached `bosta.district` catalogue
-(name or id) has not produced one accepted value across four real attempts,
-for this account — it is not reliable enough to send. `zone` (a plain name)
-has not been rejected by any of these real calls, so it is kept as the
-leaf-level area identifier. If a future booking is rejected for a missing or
-wrong area, treat the district catalogue as still unverified and check with
-Bosta support for this account's real district values before re-adding it —
-do not guess a fifth time against production.
+**The actual root cause, found by counting the cached catalogue: this
+account's `bosta.district` table has exactly one row in the whole country**
+(28 cities, 561 zones synced from `/cities/{id}/zones`). Bosta's own
+`districts` sub-array on that endpoint is populated for essentially no
+zones — it is not that our sync is broken, the live data Bosta serves from
+that endpoint has almost nothing in it, while `POST /deliveries` demands a
+district value almost everywhere.
+
+**Current mitigation in `_build_drop_off_address`: when no district was
+actually resolved (which is nearly always, given the above), the matched
+*zone's own name* is sent as `districtName`, alongside `cityId`.** This is
+explicitly a fallback, not a confirmed-correct value — it has not been
+rejected yet, but it is a guess that the zone name happens to also be an
+acceptable district name to Bosta. If it ever gets rejected too (e.g.
+another "District Not Found"), that means this account's real district
+values live somewhere this integration cannot reach via its own API, and
+the next step is a real support answer from Bosta, not a sixth guess
+against production.
 
 Do not trust secondary sources on this. Multiple third-party Bosta
 integration write-ups (and an outdated attempt earlier in this project's own

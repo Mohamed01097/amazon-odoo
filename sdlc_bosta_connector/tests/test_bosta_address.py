@@ -247,9 +247,21 @@ class TestBostaAddress(TransactionCase):
         payload = job._build_payload()
         self.assertEqual(payload['dropOffAddress']['city'], 'EG-01')
         self.assertEqual(payload['dropOffAddress']['zone'], 'Maadi & Muqattam')
+        self.assertEqual(payload['dropOffAddress']['districtName'], 'Maadi')
+        self.assertEqual(payload['dropOffAddress']['cityId'], 'c1')
         self.assertNotIn('district', payload['dropOffAddress'])
-        self.assertNotIn('districtName', payload['dropOffAddress'])
         self.assertNotIn('districtId', payload['dropOffAddress'])
+
+    def test_payload_falls_back_to_the_zone_name_as_district_when_unmatched(self):
+        """Most zones have no cached district at all; the zone name stands in."""
+        self._sync()
+        partner = self._partner(city='Giza', street2='Dokki')
+        job = self._booked_payload(partner)
+
+        payload = job._build_payload()
+        self.assertFalse(partner.bosta_district_id)
+        self.assertEqual(payload['dropOffAddress']['districtName'], 'Dokki')
+        self.assertIn('cityId', payload['dropOffAddress'])
 
     def test_booking_fails_clearly_on_an_unmatched_city(self):
         """A guessed city code would ship the parcel to the wrong governorate."""
