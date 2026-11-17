@@ -9,9 +9,11 @@ verifies each one cryptographically, and turns a `created` event into a
 confirmed Odoo `sale.order`. `updated`/`canceled` events refresh status
 fields on the already-imported order and never touch accounting. Delivery,
 invoicing and payment all run through Odoo's standard sale/stock/account
-flow, unmodified. This module has no dependency on any carrier module —
-shipping is a normal `sale.order.carrier_id` selection, assigned the same way
-for a Wix order as for any other.
+flow, unmodified. Shipping is a normal `sale.order.carrier_id` selection,
+assigned the same way for a Wix order as for any other — optionally set
+automatically from a per-connection default (see "The delivery carrier is a
+connection-level default" below). This module depends on core `delivery`
+for that field, but on no specific carrier module (Bosta or otherwise).
 
 ## Why the webhook contract looks the way it does
 

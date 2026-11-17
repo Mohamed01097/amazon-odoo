@@ -9,7 +9,9 @@
         them. Order fulfillment, delivery, invoicing and payment follow Odoo's
         standard sale/stock/account flow unmodified. Shipping carrier assignment
         (e.g. Bosta) is done through Odoo's normal delivery-method selection on
-        the sale order; this module has no dependency on any carrier module.
+        the sale order, and can be set automatically per connection via a
+        configured default; this module has no dependency on any specific
+        carrier module (Bosta or otherwise), only on core `delivery`.
     """,
     'author': 'SDLC Corp',
     'maintainer': 'SDLC Corp',
@@ -18,6 +20,7 @@
     'depends': [
         'sale_management',
         'stock',
+        'delivery',
         'contacts',
         'mail',
     ],
