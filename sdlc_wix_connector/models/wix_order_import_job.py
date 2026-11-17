@@ -316,6 +316,10 @@ class WixOrderImportJob(models.Model):
                    or (recipient.get('logistics') or {}).get('shippingDestination', {}).get('contactDetails')
                    or {})
 
+        address = (recipient.get('address')
+                   or (recipient.get('logistics') or {}).get('shippingDestination', {}).get('address')
+                   or {})
+
         price_summary = entity.get('priceSummary') or {}
         shipping_info = entity.get('shippingInfo') or {}
         shipping_cost = shipping_info.get('cost') or {}
@@ -330,6 +334,7 @@ class WixOrderImportJob(models.Model):
             'first_name': contact.get('firstName'),
             'last_name': contact.get('lastName'),
             'phone': contact.get('phone'),
+            'address': address,
             'currency': entity.get('currency'),
             'line_items': entity.get('lineItems') or [],
             # Wix documents priceSummary as the authoritative set of order
@@ -378,17 +383,31 @@ class WixOrderImportJob(models.Model):
         return {}
 
     def _resolve_partner(self, data):
-        """Find or create the customer for this order."""
+        """Find or create the customer for this order.
+
+        The shipping address the buyer typed into Wix is written onto the
+        contact so deliveries (Bosta included) have it without someone
+        re-typing it by hand. An existing contact found by email keeps
+        whatever address it already has -- only blank fields are filled --
+        so a repeat Wix order never overwrites a manually-curated contact.
+        """
         self.ensure_one()
         Partner = self.env['res.partner']
         email = (data.get('email') or '').strip()
         name = ' '.join(
             part for part in (data.get('first_name'), data.get('last_name')) if part
         ).strip()
+        address_vals = self._build_partner_address_vals(data.get('address') or {})
 
         if email:
             partner = Partner.search([('email', '=ilike', email)], limit=1)
             if partner:
+                fill_vals = {
+                    field: value for field, value in address_vals.items()
+                    if not partner[field]
+                }
+                if fill_vals:
+                    partner.sudo().write(fill_vals)
                 return partner
         if not name and not email:
             raise ValueError(_("The Wix payload has neither a buyer email nor a name."))
@@ -398,7 +417,46 @@ class WixOrderImportJob(models.Model):
             'email': email or False,
             'phone': (data.get('phone') or '').strip() or False,
             'company_id': False,
+            **address_vals,
         })
+
+    def _build_partner_address_vals(self, address):
+        """Map a Wix ``Address`` object onto ``res.partner`` address fields.
+
+        Wix's documented shape uses ``addressLine1``/``addressLine2``, but
+        the alternate ``streetAddress: {name, number}`` form is also
+        published for some endpoints and has never been seen on live
+        traffic from this client's store -- both are accepted so whichever
+        one a real webhook uses works without a code change.
+        """
+        if not isinstance(address, dict):
+            return {}
+        vals = {}
+        street_address = address.get('streetAddress') or {}
+        street = (
+            address.get('addressLine1')
+            or ' '.join(
+                part for part in (
+                    street_address.get('number'), street_address.get('name'),
+                ) if part
+            ).strip()
+        )
+        if street:
+            vals['street'] = street
+        if address.get('addressLine2'):
+            vals['street2'] = address['addressLine2']
+        if address.get('city'):
+            vals['city'] = address['city']
+        if address.get('postalCode'):
+            vals['zip'] = address['postalCode']
+        country_code = address.get('country')
+        if country_code:
+            country = self.env['res.country'].search(
+                [('code', '=ilike', country_code)], limit=1,
+            )
+            if country:
+                vals['country_id'] = country.id
+        return vals
 
     def _resolve_product(self, line):
         """Map one Wix line item to an Odoo product via its SKU."""

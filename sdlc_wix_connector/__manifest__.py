@@ -1,6 +1,6 @@
 {
     'name': 'Wix Connector',
-    'version': '19.0.3.0.0',
+    'version': '19.0.4.0.0',
     'summary': 'Import Wix storefront orders into Odoo as standard sale orders',
     'description': """
         Wix Connector
