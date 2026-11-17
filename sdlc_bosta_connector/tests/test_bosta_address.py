@@ -247,9 +247,7 @@ class TestBostaAddress(TransactionCase):
         payload = job._build_payload()
         self.assertEqual(payload['dropOffAddress']['city'], 'EG-01')
         self.assertEqual(payload['dropOffAddress']['zone'], 'Maadi & Muqattam')
-        self.assertNotIn('district', payload['dropOffAddress'])
-        self.assertNotIn('districtName', payload['dropOffAddress'])
-        self.assertNotIn('districtId', payload['dropOffAddress'])
+        self.assertEqual(payload['dropOffAddress']['district'], 'Maadi')
 
     def test_booking_fails_clearly_on_an_unmatched_city(self):
         """A guessed city code would ship the parcel to the wrong governorate."""

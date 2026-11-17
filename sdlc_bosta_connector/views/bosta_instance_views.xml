@@ -29,7 +29,6 @@
                         </group>
                         <group string="Pickup &amp; Options">
                             <field name="shipment_booking_enabled"/>
-                            <field name="dispatch_mode"/>
                             <field name="pickup_location_code"/>
                             <field name="warehouse_id"/>
                             <field name="default_cod_enabled"/>
@@ -67,7 +66,6 @@
                 <field name="pickup_location_code"/>
                 <field name="warehouse_id"/>
                 <field name="shipment_booking_enabled"/>
-                <field name="dispatch_mode"/>
                 <field name="active"/>
             </list>
         </field>

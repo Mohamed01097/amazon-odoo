@@ -26,18 +26,4 @@
             </xpath>
         </field>
     </record>
-
-    <record id="view_picking_list_bosta" model="ir.ui.view">
-        <field name="name">stock.picking.list.bosta</field>
-        <field name="model">stock.picking</field>
-        <field name="inherit_id" ref="stock.vpicktree"/>
-        <field name="arch" type="xml">
-            <xpath expr="//list" position="inside">
-                <header>
-                    <button name="action_send_to_bosta" type="object"
-                            string="Send to Bosta" class="btn-secondary"/>
-                </header>
-            </xpath>
-        </field>
-    </record>
 </odoo>

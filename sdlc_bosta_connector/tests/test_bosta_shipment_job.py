@@ -3,7 +3,6 @@
 import json
 from unittest.mock import patch
 
-from odoo.exceptions import UserError
 from odoo.tests.common import TransactionCase, tagged
 
 from odoo.addons.sdlc_bosta_connector.models.bosta_api import BostaAPI, BostaError
@@ -128,50 +127,6 @@ class TestBostaShipmentJob(TransactionCase):
         self.assertFalse(
             self.env['bosta.shipment.job'].search([('picking_id', '=', picking.id)])
         )
-
-    def test_manual_dispatch_mode_does_not_auto_enqueue(self):
-        self.instance.sudo().write({'dispatch_mode': 'manual'})
-        order = self._confirmed_order()
-        picking = self._validate_picking(order.picking_ids)
-        self.assertFalse(
-            self.env['bosta.shipment.job'].search([('picking_id', '=', picking.id)])
-        )
-        self.assertFalse(picking.bosta_shipment_state)
-
-    def test_send_to_bosta_queues_selected_manual_delivery(self):
-        self.instance.sudo().write({'dispatch_mode': 'manual'})
-        order = self._confirmed_order()
-        picking = self._validate_picking(order.picking_ids)
-
-        picking.action_send_to_bosta()
-
-        jobs = self.env['bosta.shipment.job'].search([('picking_id', '=', picking.id)])
-        self.assertEqual(len(jobs), 1)
-        self.assertEqual(picking.bosta_shipment_state, 'queued')
-
-    def test_send_to_bosta_raises_when_nothing_eligible(self):
-        order = self._confirmed_order(carrier=False)
-        picking = self._validate_picking(order.picking_ids)
-        with self.assertRaises(UserError):
-            picking.action_send_to_bosta()
-
-    def test_send_to_bosta_skips_already_booked_without_blocking_others(self):
-        self.instance.sudo().write({'dispatch_mode': 'manual'})
-        order_a = self._confirmed_order()
-        picking_a = self._validate_picking(order_a.picking_ids)
-        order_b = self._confirmed_order()
-        picking_b = self._validate_picking(order_b.picking_ids)
-        picking_b.sudo().write({'bosta_shipment_state': 'booked'})
-
-        result = (picking_a | picking_b).action_send_to_bosta()
-
-        self.assertTrue(
-            self.env['bosta.shipment.job'].search([('picking_id', '=', picking_a.id)])
-        )
-        self.assertFalse(
-            self.env['bosta.shipment.job'].search([('picking_id', '=', picking_b.id)])
-        )
-        self.assertEqual(result['params']['type'], 'warning')
 
     # ------------------------------------------------------------------
     # Booking

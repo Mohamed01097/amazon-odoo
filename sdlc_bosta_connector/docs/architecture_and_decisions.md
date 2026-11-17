@@ -12,11 +12,9 @@ books a shipment after a delivery is validated, applies Bosta's status
 callbacks back onto the delivery, and creates (but never auto-validates) a
 return picking when Bosta reports a parcel coming back.
 
-**First real calls were made on 2026-11-12** (staging, `wix_staging` DB,
-client's real production API key, `shipment_booking_enabled` toggled on and
-off around a single manual cron run — see the dropOffAddress fix below). All
-automated tests still mock the HTTP layer. The module is otherwise built
-against Bosta's published documentation and official SDK source, not against
+**No real call to Bosta has been made as of this writing.** Every one of the
+100 automated tests mocks the HTTP layer. The module is built against
+Bosta's published documentation and official SDK source, not against
 observed live traffic — see Known Limitations below for exactly what
 remains unverified.
 
@@ -48,28 +46,6 @@ provider-contract methods (`bosta_send_shipping`, `bosta_get_tracking_link`,
 the automatic path.
 
 ## The Bosta API contract, and how it was actually confirmed
-
-**Confirmed against real `POST /api/v2/deliveries` responses (2026-11-12),
-across four rejections in a row, all on the district field:**
-1. `dropOffAddress.district` is rejected outright —
-   `"dropOffAddress must contain at least one of [districtId, districtName]"`.
-2. `districtId` using the cached `bosta.district.bosta_id` — **rejected**,
-   `"District Not Found"`. For this account, that cached id does not resolve.
-3. `districtName` (the district's `name`) alone — **rejected**,
-   `"districtName missing required peer cityId"`.
-4. `districtName` **plus** `cityId` (`bosta.city.bosta_id`) — **still
-   rejected**, `"District Not Found"` again. The cached district *name* does
-   not match Bosta's catalogue for this city either.
-
-**Conclusion: `_build_drop_off_address` (`bosta_shipment_job.py`) never
-sends a district field at all.** The cached `bosta.district` catalogue
-(name or id) has not produced one accepted value across four real attempts,
-for this account — it is not reliable enough to send. `zone` (a plain name)
-has not been rejected by any of these real calls, so it is kept as the
-leaf-level area identifier. If a future booking is rejected for a missing or
-wrong area, treat the district catalogue as still unverified and check with
-Bosta support for this account's real district values before re-adding it —
-do not guess a fifth time against production.
 
 Do not trust secondary sources on this. Multiple third-party Bosta
 integration write-ups (and an outdated attempt earlier in this project's own
