@@ -5,19 +5,23 @@ from odoo.tests.common import TransactionCase, tagged
 from .test_wix_jwt import generate_keypair
 
 
-def build_claims(order_id='wix-order-1', sku='WIX-SKU-1', qty=2, price='25.00', number=1001):
+def build_claims(order_id='wix-order-1', sku='WIX-SKU-1', qty=2, price='25.00', number=1001,
+                  address=None, email='buyer@example.com'):
+    recipient_info = {
+        'contactDetails': {
+            'firstName': 'Test',
+            'lastName': 'Buyer',
+            'phone': '+201000000000',
+        },
+    }
+    if address is not None:
+        recipient_info['address'] = address
     entity = {
         'id': order_id,
         'number': number,
         'currency': 'EGP',
-        'buyerInfo': {'email': 'buyer@example.com'},
-        'recipientInfo': {
-            'contactDetails': {
-                'firstName': 'Test',
-                'lastName': 'Buyer',
-                'phone': '+201000000000',
-            },
-        },
+        'buyerInfo': {'email': email},
+        'recipientInfo': recipient_info,
         'lineItems': [{
             'quantity': qty,
             'physicalProperties': {'sku': sku},
@@ -83,6 +87,52 @@ class TestWixOrderImportJob(TransactionCase):
         self.assertEqual(order.order_line.product_uom_qty, 2)
         self.assertEqual(order.order_line.price_unit, 25.0)
         self.assertEqual(order.warehouse_id, self.warehouse)
+
+    def test_new_customer_gets_address_from_wix_payload(self):
+        """The address the buyer typed on Wix must land on the new contact."""
+        address = {
+            'addressLine1': '12 Nile St',
+            'addressLine2': 'Apt 4',
+            'city': 'Cairo',
+            'postalCode': '11511',
+            'country': 'EG',
+        }
+        job = self._create_job(build_claims(address=address))
+        self.env['wix.order.import.job'].cron_process_order_import_jobs()
+
+        partner = job.sale_order_id.partner_id
+        self.assertEqual(partner.street, '12 Nile St')
+        self.assertEqual(partner.street2, 'Apt 4')
+        self.assertEqual(partner.city, 'Cairo')
+        self.assertEqual(partner.zip, '11511')
+        self.assertEqual(partner.country_id.code, 'EG')
+
+    def test_street_address_form_is_also_accepted(self):
+        """Wix's alternate streetAddress{name,number} shape must work too."""
+        address = {
+            'streetAddress': {'name': 'Nile St', 'number': '12'},
+            'city': 'Cairo',
+        }
+        job = self._create_job(build_claims(address=address))
+        self.env['wix.order.import.job'].cron_process_order_import_jobs()
+
+        self.assertEqual(job.sale_order_id.partner_id.street, '12 Nile St')
+
+    def test_existing_contact_address_is_not_overwritten(self):
+        """A repeat Wix order must never clobber a manually-curated address."""
+        self.env['res.partner'].create({
+            'name': 'Test Buyer',
+            'email': 'buyer@example.com',
+            'street': 'Manually Entered Street',
+        })
+        address = {'addressLine1': 'From Wix Order', 'city': 'Alexandria'}
+        job = self._create_job(build_claims(address=address))
+        self.env['wix.order.import.job'].cron_process_order_import_jobs()
+
+        partner = job.sale_order_id.partner_id
+        self.assertEqual(partner.street, 'Manually Entered Street')
+        # The blank city field is still filled in from the order.
+        self.assertEqual(partner.city, 'Alexandria')
 
     def test_confirmed_order_creates_standard_delivery(self):
         """Confirmation must produce a normal outgoing picking, not custom stock moves."""

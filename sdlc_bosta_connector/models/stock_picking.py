@@ -3,6 +3,7 @@
 import logging
 
 from odoo import _, fields, models
+from odoo.exceptions import UserError
 
 _logger = logging.getLogger(__name__)
 
@@ -42,16 +43,16 @@ class StockPicking(models.Model):
         for picking in self:
             try:
                 with self.env.cr.savepoint():
-                    picking._enqueue_bosta_shipment()
+                    picking._enqueue_bosta_shipment(require_automatic=True)
             except Exception:  # noqa: BLE001 - must never break validation
                 _logger.exception(
                     "Could not queue a Bosta shipment for picking %s", picking.name,
                 )
         return res
 
-    def _enqueue_bosta_shipment(self):
+    def _enqueue_bosta_shipment(self, require_automatic=False):
         self.ensure_one()
-        if not self._should_book_bosta_shipment():
+        if not self._should_book_bosta_shipment(require_automatic=require_automatic):
             return False
 
         job = self.env['bosta.shipment.job'].sudo().create({
@@ -64,8 +65,14 @@ class StockPicking(models.Model):
         })
         return job
 
-    def _should_book_bosta_shipment(self):
-        """Only outgoing Bosta deliveries that are not already booked."""
+    def _should_book_bosta_shipment(self, require_automatic=False):
+        """Only outgoing Bosta deliveries that are not already booked.
+
+        ``require_automatic`` additionally requires the Bosta account's
+        dispatch mode to be "automatic": it is set by ``_action_done`` so a
+        "manual" account is never queued without a user picking the delivery,
+        and left off for the explicit "Send to Bosta" bulk action.
+        """
         self.ensure_one()
         if self.state != 'done':
             return False
@@ -74,7 +81,10 @@ class StockPicking(models.Model):
         carrier = self.carrier_id
         if not carrier or carrier.delivery_type != 'bosta':
             return False
-        if not carrier.bosta_instance_id:
+        instance = carrier.bosta_instance_id
+        if not instance:
+            return False
+        if require_automatic and instance.dispatch_mode != 'automatic':
             return False
         if self.carrier_tracking_ref or self.bosta_delivery_id:
             return False
@@ -85,6 +95,46 @@ class StockPicking(models.Model):
         ]):
             return False
         return True
+
+    def action_send_to_bosta(self):
+        """Bulk action: queue a Bosta booking for the selected deliveries.
+
+        Used on "manual" dispatch accounts, where ``_action_done`` does not
+        queue anything on its own. Each picking is checked independently so
+        one ineligible row in the selection does not block the rest.
+        """
+        queued = self.browse()
+        skipped = self.browse()
+        for picking in self:
+            job = picking._enqueue_bosta_shipment()
+            if job:
+                queued |= picking
+            else:
+                skipped |= picking
+
+        if not queued:
+            raise UserError(_(
+                "None of the selected deliveries are eligible for Bosta "
+                "booking (already booked, not a validated outgoing Bosta "
+                "delivery, or missing a Bosta account)."
+            ))
+
+        message = _("Queued %(count)s deliveries for Bosta booking.",
+                     count=len(queued))
+        if skipped:
+            message += ' ' + _(
+                "%(count)s were skipped (already booked or not eligible): %(names)s.",
+                count=len(skipped), names=', '.join(skipped.mapped('name')),
+            )
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _("Bosta Dispatch"),
+                'message': message,
+                'type': 'success' if not skipped else 'warning',
+            },
+        }
 
     def action_retry_bosta_shipment(self):
         """Re-queue a failed booking from the delivery form."""

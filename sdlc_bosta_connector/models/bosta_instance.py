@@ -55,6 +55,14 @@ class BostaInstance(models.Model):
              "off until the credentials and address mapping are validated: "
              "booked shipments are real and are collected by a courier.",
     )
+    dispatch_mode = fields.Selection([
+        ('automatic', 'Automatic on Validation'),
+        ('manual', 'Manual Selection'),
+    ], string='Dispatch Mode', default='automatic', required=True,
+        help="Automatic: every validated outgoing delivery on this account is "
+             "queued for Bosta booking as soon as it is done. Manual: nothing "
+             "is queued automatically; a user must select deliveries and use "
+             "the \"Send to Bosta\" action on the Deliveries list.")
 
     webhook_url = fields.Char(
         'Status Webhook URL',
