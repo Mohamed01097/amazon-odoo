@@ -6,6 +6,7 @@ correctable on the contact, rather than guessed afresh on every booking.
 """
 
 import logging
+import re
 
 from odoo import api, fields, models
 
@@ -90,12 +91,21 @@ class ResPartner(models.Model):
         Confirmed against this account's real catalogue (2026-11-01): a
         "zone" here is already a neighbourhood (e.g. "ElMaadi"), not a
         grouping of several, and carries its own drop-off availability.
+
+        ``city`` is tried first: a Wix storefront's free-text city field
+        routinely carries the actual neighbourhood ("New Cairo 1", "Maadi"),
+        while ``street``/``street2`` almost never do -- a customer types a
+        street name and number there, not an official area name. Confirmed
+        against real orders: zero of the first real Bosta bookings attempted
+        had a zone name anywhere in the street fields, and the one that
+        booked successfully only did because the zone name was put there by
+        hand for a test.
         """
         self.ensure_one()
         return self._unique_match('bosta.zone', [
             ('city_id', '=', city.id),
             ('dropoff_available', '=', True),
-        ], (self.street2, self.street))
+        ], (self.city, self.street2, self.street))
 
     def _match_district_in_city(self, city):
         """Match a district anywhere in the city, not within one zone."""
@@ -103,23 +113,38 @@ class ResPartner(models.Model):
         return self._unique_match('bosta.district', [
             ('zone_id.city_id', '=', city.id),
             ('dropoff_available', '=', True),
-        ], (self.street2, self.street))
+        ], (self.city, self.street2, self.street))
 
     def _unique_match(self, model_name, domain, candidates):
         """Return the single record matching one of ``candidates``, or empty.
 
-        Both the primary and the secondary-language name are searched, so an
-        address written in Arabic matches a catalogue entry named in English
-        and the other way round.
+        Two passes, cheapest first:
+
+        1. Exact match on the normalized name (primary or secondary
+           language), candidate by candidate -- unchanged from before.
+        2. Whole-word containment: does a candidate's normalized text
+           contain a catalogue name as a whole word/phrase, or the other
+           way round? This is what makes "New Cairo 1" (a real Wix city
+           field) match the catalogue's "New Cairo" zone without an exact
+           match -- real addresses almost never equal a catalogue name
+           exactly, but they often contain it. Only records at least 3
+           normalized characters long are considered, to avoid a short,
+           generic name (e.g. a single short word) matching almost anything.
+
+        Both passes return empty, not a guess, the moment more than one
+        distinct record matches: picking one of several candidates would
+        quietly ship a parcel to the wrong area.
         """
         self.ensure_one()
         Model = self.env[model_name].sudo()
         from .bosta_location import normalize_name
 
-        for candidate in candidates:
-            target = normalize_name(candidate)
-            if not target:
-                continue
+        targets = [normalize_name(candidate) for candidate in candidates]
+        targets = [target for target in targets if target]
+        if not targets:
+            return Model.browse()
+
+        for target in targets:
             found = Model.search(domain + [
                 '|',
                 ('normalized_name', '=', target),
@@ -130,9 +155,32 @@ class ResPartner(models.Model):
             if len(found) > 1:
                 _logger.info(
                     "Ambiguous Bosta %s match for %r on partner %s; left unset.",
-                    model_name, candidate, self.display_name,
+                    model_name, target, self.display_name,
                 )
                 return Model.browse()
+
+        candidates_pool = Model.search(domain)
+        matched = Model.browse()
+        for record in candidates_pool:
+            for name in (record.normalized_name, record.normalized_other_name):
+                if not name or len(name) < 3:
+                    continue
+                pattern = r'\b' + re.escape(name) + r'\b'
+                if any(
+                    re.search(pattern, target) or re.search(
+                        r'\b' + re.escape(target) + r'\b', name,
+                    )
+                    for target in targets if len(target) >= 3
+                ):
+                    matched |= record
+                    break
+        if len(matched) == 1:
+            return matched
+        if len(matched) > 1:
+            _logger.info(
+                "Ambiguous Bosta %s containment match for %r on partner %s; "
+                "left unset.", model_name, candidates, self.display_name,
+            )
         return Model.browse()
 
     def action_resolve_bosta_location(self):

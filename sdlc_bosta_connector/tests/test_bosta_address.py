@@ -187,6 +187,22 @@ class TestBostaAddress(TransactionCase):
         _city, zone, _district = partner._resolve_bosta_location(self.instance)
         self.assertEqual(zone.name, 'Nasr City')
 
+    def test_zone_is_matched_by_containment_in_the_city_field(self):
+        """Real Wix addresses rarely equal a zone name exactly.
+
+        Reproduces a real booking (2026-11-17): the customer's free-text
+        city was "New Cairo 1" and neither street field named the zone at
+        all -- only a whole-word match against the catalogue zone name,
+        tried against the city field first, finds it.
+        """
+        self._sync()
+        partner = self._partner(
+            city='Nasr City, Cairo', street2='Random St', street='Building 5',
+        )
+        city, zone, _district = partner._resolve_bosta_location(self.instance)
+        self.assertEqual(city.name, 'Cairo')
+        self.assertEqual(zone.name, 'Nasr City')
+
     def test_district_without_dropoff_is_not_matched(self):
         """Bosta does not deliver there, so it must never be selected."""
         self._sync()

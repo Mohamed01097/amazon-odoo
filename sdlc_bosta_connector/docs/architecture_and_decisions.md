@@ -175,6 +175,39 @@ parcel to the wrong governorate. A manually-set `bosta_city_id` /
 `bosta_zone_id` / `bosta_district_id` on the contact is never overwritten by
 automatic resolution.
 
+### Matching had to move from exact equality to containment, and to the `city` field
+
+The paragraph above ("nobody writes 'Maadi & Muqattam', they write 'Maadi'")
+turned out to be only half right once real Wix orders were involved. The
+first three real bookings attempted (2026-11-12, 2026-11-17) all failed to
+match *any* zone or district, even though the address was real and
+deliverable — because none of them had an exact catalogue name in `street`
+or `street2` at all. A real customer writes a street name and number there
+("شارع التسعين الجنوبى"), not an administrative area name.
+
+What actually carried the area name, in every real case checked, was the
+free-text **`city`** field (e.g. "New Cairo 1") — Wix storefronts commonly
+collect the neighbourhood there rather than the governorate, and it is
+tried as a candidate (first, before `street2`/`street`) in both
+`_match_zone` and `_match_district_in_city` for exactly this reason.
+
+Because that text essentially never equals a catalogue name *exactly*
+("New Cairo 1" ≠ "New Cairo"), `_unique_match` gained a second pass:
+whole-word containment (`\bname\b` found inside the normalized candidate
+text, or vice versa), tried only after the exact pass finds nothing. Still
+governed by the same rule as exact matching — more than one distinct
+containment match is left unmatched, not guessed. Confirmed working
+end-to-end: the fourth real booking attempt, after this change, used the
+zone matched this way as the `districtName` fallback (see "The Bosta API
+contract" above) and was accepted by Bosta with a real tracking number.
+
+Known risk accepted here: a short zone/district name could in principle
+contain-match against an unrelated address coincidentally. `_unique_match`
+already requires 3+ normalized characters and still refuses to guess on
+ambiguity, but this is a heuristic, not a verified identifier — a wrong
+containment match is a real mis-shipment risk, not just a failed booking,
+unlike the other failure modes in this file.
+
 ## Why booking fails loudly on an unresolved address
 
 `bosta_shipment_job.py::_build_drop_off_address` raises `BostaError`
