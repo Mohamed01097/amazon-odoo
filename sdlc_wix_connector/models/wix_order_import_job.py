@@ -620,6 +620,8 @@ class WixOrderImportJob(models.Model):
             order_vals['fiscal_position_id'] = instance.default_fiscal_position_id.id
         if instance.default_sales_team_id:
             order_vals['team_id'] = instance.default_sales_team_id.id
+        if instance.default_carrier_id:
+            order_vals['carrier_id'] = instance.default_carrier_id.id
 
         order = self.env['sale.order'].create(order_vals)
         self._verify_total(order, data)

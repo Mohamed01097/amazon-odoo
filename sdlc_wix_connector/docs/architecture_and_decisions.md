@@ -97,6 +97,28 @@ This matters operationally: the order total is what a courier (e.g. Bosta)
 collects as COD. A silently wrong total becomes a silently wrong cash
 collection.
 
+## The delivery carrier is a connection-level default, not read from Wix
+
+Every imported order gets `wix.instance.default_carrier_id` as its
+`carrier_id` (if one is configured) — the same pattern as
+`default_warehouse_id`/`default_pricelist_id`/`default_sales_team_id`. This
+is what lets a validated delivery already be eligible for the Bosta
+connector's dispatch flow (`sdlc_bosta_connector`) without anyone picking a
+shipping method by hand on every order.
+
+Wix's own per-order shipping method name (`shippingInfo.title`) is *not*
+mapped to a carrier automatically — it only labels the shipping fee line
+(see "Order totals" above). A Wix store's named shipping options
+("Standard", "Express", a courier's own name) can be renamed or
+reconfigured on Wix's side at any time, with nothing here to notice; guessing
+a `delivery.carrier` from that string would silently pick the wrong one
+(or none) the moment the name changes. One configured default per
+connection is simple, visible in one place, and never goes stale behind a
+storefront setting no one remembered to keep in sync. If a store ever offers
+more than one real shipping option that must route to different carriers,
+that needs its own explicit mapping table — don't bolt a guess onto
+`shippingInfo.title` instead.
+
 ## Cancellation handling is deliberately conservative
 
 `order_cancel_policy` defaults to `flag_only`: a Wix cancellation always sets

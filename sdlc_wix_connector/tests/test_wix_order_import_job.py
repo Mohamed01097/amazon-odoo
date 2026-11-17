@@ -134,6 +134,28 @@ class TestWixOrderImportJob(TransactionCase):
         # The blank city field is still filled in from the order.
         self.assertEqual(partner.city, 'Alexandria')
 
+    def test_default_carrier_is_set_on_the_imported_order(self):
+        """The connection's configured carrier must land on every import.
+
+        Wix's own shipping method name is deliberately not mapped
+        automatically (see architecture_and_decisions.md) -- only this
+        explicit default is.
+        """
+        delivery_product = self.env['product.product'].create({
+            'name': 'Test Delivery Fee',
+            'type': 'service',
+        })
+        carrier = self.env['delivery.carrier'].create({
+            'name': 'Test Carrier',
+            'product_id': delivery_product.id,
+        })
+        self.instance.sudo().write({'default_carrier_id': carrier.id})
+
+        job = self._create_job(build_claims(order_id='wix-order-carrier'))
+        self.env['wix.order.import.job'].cron_process_order_import_jobs()
+
+        self.assertEqual(job.sale_order_id.carrier_id, carrier)
+
     def test_confirmed_order_creates_standard_delivery(self):
         """Confirmation must produce a normal outgoing picking, not custom stock moves."""
         job = self._create_job(build_claims())

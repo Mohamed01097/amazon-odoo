@@ -89,6 +89,20 @@ class WixInstance(models.Model):
         check_company=True,
         domain="[('company_id', 'in', [company_id, False])]",
     )
+    default_carrier_id = fields.Many2one(
+        'delivery.carrier',
+        string='Default Delivery Method',
+        check_company=True,
+        domain="[('company_id', 'in', [company_id, False])]",
+        help="Delivery method set on every sale order imported from this Wix "
+             "connection, e.g. the Bosta delivery method, so the delivery "
+             "already has a carrier before it is validated. Wix's own "
+             "shipping method name (shippingInfo.title) is not mapped to "
+             "this automatically -- it is only used as the shipping line's "
+             "label -- because a Wix store can rename or reconfigure its "
+             "shipping options at any time with no corresponding change "
+             "here, and a wrong guess would be worse than asking once.",
+    )
 
     # --- Order financial mapping ---
     sales_tax_id = fields.Many2one(

@@ -25,6 +25,7 @@
                             <field name="default_pricelist_id"/>
                             <field name="default_fiscal_position_id"/>
                             <field name="default_sales_team_id"/>
+                            <field name="default_carrier_id"/>
                         </group>
                     </group>
                     <group string="Order Amounts">
