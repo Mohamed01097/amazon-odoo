@@ -38,23 +38,31 @@ class AmazonDashboardController(http.Controller):
         Order = env['amazon.sale.order']
         Product = env['amazon.product']
 
-        period_orders = Order.search(od + [('purchase_date', '>=', start_date), ('purchase_date', '<=', end_date)])
-        orders_today = Order.search_count(od + [('purchase_date', '>=', today.isoformat())])
+        period_domain = od + [('purchase_date', '>=', start_date), ('purchase_date', '<=', end_date)]
+        period_orders = Order.search(period_domain)
+        tomorrow = today + timedelta(days=1)
+        orders_today = Order.search_count(od + [('purchase_date', '>=', today.isoformat()), ('purchase_date', '<', tomorrow.isoformat())])
         total_orders = Order.search_count(od)
 
         revenue_period = sum(period_orders.mapped('order_total'))
         avg_order = revenue_period / len(period_orders) if period_orders else 0
 
-        pending_orders = Order.search_count(od + [('order_status', 'in', ['Pending', 'Unshipped'])])
-        shipped_orders = Order.search_count(od + [('order_status', '=', 'Shipped')])
-        cancelled_orders = Order.search_count(od + [('order_status', '=', 'Canceled')])
+        # Pending/Shipped/Cancelled are scoped to the same selected period as
+        # "Orders (Period)" and the status-distribution chart, so all three
+        # stay consistent when the date range or instance filter changes.
+        pending_orders = Order.search_count(period_domain + [('order_status', 'in', ['Pending', 'Unshipped'])])
+        shipped_orders = Order.search_count(period_domain + [('order_status', '=', 'Shipped')])
+        cancelled_orders = Order.search_count(period_domain + [('order_status', '=', 'Canceled')])
 
         total_products = Product.search_count(pd2 + [('status', '=', 'Active')])
         low_stock = Product.search_count(pd2 + [('amazon_qty', '<', 10), ('status', '=', 'Active')])
         out_of_stock = Product.search_count(pd2 + [('amazon_qty', '<=', 0), ('status', '=', 'Active')])
 
-        active_alerts = env['amazon.smart.alert'].search_count([('state', 'in', ['new', 'acknowledged'])])
-        critical_alerts = env['amazon.smart.alert'].search_count([('state', 'in', ['new', 'acknowledged']), ('severity', '=', '4_critical')])
+        # Alerts must respect the selected instance like every other KPI,
+        # otherwise switching instances still shows the global alert count.
+        alert_domain = pd2 and [('instance_id', '=', int(instance_id))] or []
+        active_alerts = env['amazon.smart.alert'].search_count(alert_domain + [('state', 'in', ['new', 'acknowledged'])])
+        critical_alerts = env['amazon.smart.alert'].search_count(alert_domain + [('state', 'in', ['new', 'acknowledged']), ('severity', '=', '4_critical')])
 
         partners = period_orders.mapped('partner_id')
         total_customers = len(set(partners.ids))
@@ -63,7 +71,10 @@ class AmazonDashboardController(http.Controller):
         fba_count = Order.search_count(od + [('fulfillment_channel', '=', 'AFN')])
 
         avg_health = 0
-        healths = env['amazon.product.health'].search(pd2)
+        # Scope the health average to Active products only, same as the
+        # "Active Products" KPI, so a stale/archived product's score can't
+        # skew the average shown next to it.
+        healths = env['amazon.product.health'].search(pd2 + [('product_id.status', '=', 'Active')])
         if healths:
             avg_health = round(sum(healths.mapped('health_score')) / len(healths))
 
@@ -78,16 +89,28 @@ class AmazonDashboardController(http.Controller):
 
         status_dist = {}
         for s in ['Pending', 'Unshipped', 'Shipped', 'Canceled']:
-            c = Order.search_count(od + [('order_status', '=', s), ('purchase_date', '>=', start_date)])
+            c = Order.search_count(period_domain + [('order_status', '=', s)])
             if c:
                 status_dist[s] = c
 
+        # Group by SKU (stable/unique per instance) instead of the free-text
+        # title, otherwise the same product can be split into several rows
+        # when its title string differs slightly between orders. Also track
+        # revenue per product (line_total = item_price + item_tax +
+        # shipping_price - promotion_discount) alongside quantity, since a
+        # units-only ranking was the main client complaint on this chart.
         product_sales = {}
         for order in period_orders:
             for line in order.order_line_ids:
+                key = line.sku or line.title or 'Unknown'
                 name = line.title or line.sku or 'Unknown'
-                product_sales[name] = product_sales.get(name, 0) + line.quantity
-        top_products = [{'name': p[0][:25], 'qty': p[1]} for p in sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:10]]
+                entry = product_sales.setdefault(key, {'name': name, 'qty': 0.0, 'revenue': 0.0})
+                entry['qty'] += line.quantity
+                entry['revenue'] += line.line_total
+        top_products = [
+            {'name': p['name'][:25], 'qty': p['qty'], 'revenue': round(p['revenue'], 2)}
+            for p in sorted(product_sales.values(), key=lambda x: x['qty'], reverse=True)[:10]
+        ]
 
         weeks = min(days // 7 + 1, 12)
         weekly_revenue = []

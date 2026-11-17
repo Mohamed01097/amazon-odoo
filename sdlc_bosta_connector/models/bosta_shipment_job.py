@@ -235,7 +235,7 @@ class BostaShipmentJob(models.Model):
                 f"Customer {partner.display_name} has no street address."
             )
 
-        city, zone, district = partner._resolve_bosta_location(self.instance_id)
+        city, zone, _district = partner._resolve_bosta_location(self.instance_id)
         if not city:
             raise BostaError(
                 f"The city on {partner.display_name}'s address "
@@ -254,8 +254,16 @@ class BostaShipmentJob(models.Model):
             address['secondLine'] = partner.street2.strip()
         if zone:
             address['zone'] = zone.name
-        if district:
-            address['district'] = district.name
+        # District is deliberately never sent. Confirmed against the real API
+        # (2026-11-12), across four rejections in a row: a bare 'district'
+        # key, districtId (the cached bosta.district.bosta_id -- not a real
+        # lookup id for this account), and districtName plus the required
+        # cityId peer were all rejected, the last two both with "District
+        # Not Found". The cached bosta.district catalogue is not reliable
+        # enough to send for this account; 'zone' alone has not been
+        # rejected by any real call so far. `district` stays unused here on
+        # purpose -- do not reintroduce a districtId/districtName key without
+        # confirming it against this account's real catalogue first.
         if partner.zip:
             address['postalCode'] = partner.zip.strip()
         return address

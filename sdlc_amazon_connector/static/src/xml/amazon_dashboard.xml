@@ -49,7 +49,7 @@
                         </div>
                     </div>
                     <div class="col-lg-3 col-md-6">
-                        <div class="card border-0 h-100" style="background:linear-gradient(135deg,#11998e,#38ef7d);color:#fff;border-radius:12px;">
+                        <div class="card border-0 h-100" style="background:linear-gradient(135deg,#11998e,#38ef7d);color:#fff;cursor:pointer;border-radius:12px;" t-on-click="openRevenue">
                             <div class="card-body">
                                 <div class="d-flex justify-content-between"><div><div style="opacity:0.8;font-size:13px;">Revenue (Period)</div><h2 class="mb-0 mt-1" t-out="formatCurrency(state.kpis.revenue_period)"/></div><i class="fa fa-inr" style="font-size:36px;opacity:0.3;"/></div>
                                 <div class="mt-2" style="font-size:12px;opacity:0.8;">Avg Order: <b t-out="formatCurrency(state.kpis.avg_order_value)"/></div>
@@ -65,7 +65,7 @@
                         </div>
                     </div>
                     <div class="col-lg-3 col-md-6">
-                        <div class="card border-0 h-100" style="background:linear-gradient(135deg,#f093fb,#f5576c);color:#fff;border-radius:12px;">
+                        <div class="card border-0 h-100" style="background:linear-gradient(135deg,#f093fb,#f5576c);color:#fff;cursor:pointer;border-radius:12px;" t-on-click="openCustomers">
                             <div class="card-body">
                                 <div class="d-flex justify-content-between"><div><div style="opacity:0.8;font-size:13px;">Customers</div><h2 class="mb-0 mt-1" t-out="state.kpis.total_customers || 0"/></div><i class="fa fa-users" style="font-size:36px;opacity:0.3;"/></div>
                                 <div class="mt-2" style="font-size:12px;opacity:0.8;">FBM: <b t-out="state.kpis.fbm_count || 0"/> | FBA: <b t-out="state.kpis.fba_count || 0"/></div>
@@ -76,11 +76,11 @@
 
                 <!-- STATUS PILLS -->
                 <div class="row g-2 mb-3">
-                    <div class="col"><div class="text-center p-2 rounded-3" style="background:#fff3cd;"><div style="font-size:22px;font-weight:700;color:#856404;" t-out="state.kpis.pending_orders || 0"/><div style="font-size:11px;color:#856404;">Pending</div></div></div>
+                    <div class="col" style="cursor:pointer;" t-on-click="openPending"><div class="text-center p-2 rounded-3" style="background:#fff3cd;"><div style="font-size:22px;font-weight:700;color:#856404;" t-out="state.kpis.pending_orders || 0"/><div style="font-size:11px;color:#856404;">Pending</div></div></div>
                     <div class="col" style="cursor:pointer;" t-on-click="openDelivery"><div class="text-center p-2 rounded-3" style="background:#d4edda;"><div style="font-size:22px;font-weight:700;color:#155724;" t-out="state.kpis.shipped_orders || 0"/><div style="font-size:11px;color:#155724;">Shipped</div></div></div>
-                    <div class="col"><div class="text-center p-2 rounded-3" style="background:#f8d7da;"><div style="font-size:22px;font-weight:700;color:#721c24;" t-out="state.kpis.cancelled_orders || 0"/><div style="font-size:11px;color:#721c24;">Cancelled</div></div></div>
-                    <div class="col"><div class="text-center p-2 rounded-3" style="background:#fff3cd;"><div style="font-size:22px;font-weight:700;color:#856404;" t-out="state.kpis.low_stock || 0"/><div style="font-size:11px;color:#856404;">Low Stock</div></div></div>
-                    <div class="col"><div class="text-center p-2 rounded-3" style="background:#f8d7da;"><div style="font-size:22px;font-weight:700;color:#721c24;" t-out="state.kpis.out_of_stock || 0"/><div style="font-size:11px;color:#721c24;">Out of Stock</div></div></div>
+                    <div class="col" style="cursor:pointer;" t-on-click="openCancelled"><div class="text-center p-2 rounded-3" style="background:#f8d7da;"><div style="font-size:22px;font-weight:700;color:#721c24;" t-out="state.kpis.cancelled_orders || 0"/><div style="font-size:11px;color:#721c24;">Cancelled</div></div></div>
+                    <div class="col" style="cursor:pointer;" t-on-click="openLowStock"><div class="text-center p-2 rounded-3" style="background:#fff3cd;"><div style="font-size:22px;font-weight:700;color:#856404;" t-out="state.kpis.low_stock || 0"/><div style="font-size:11px;color:#856404;">Low Stock</div></div></div>
+                    <div class="col" style="cursor:pointer;" t-on-click="openOutOfStock"><div class="text-center p-2 rounded-3" style="background:#f8d7da;"><div style="font-size:22px;font-weight:700;color:#721c24;" t-out="state.kpis.out_of_stock || 0"/><div style="font-size:11px;color:#721c24;">Out of Stock</div></div></div>
                     <div class="col" style="cursor:pointer;" t-on-click="openAlerts"><div class="text-center p-2 rounded-3" style="background:linear-gradient(135deg,#ff416c,#ff4b2b);color:#fff;"><div style="font-size:22px;font-weight:700;"><t t-out="state.kpis.critical_alerts || 0"/>/<t t-out="state.kpis.active_alerts || 0"/></div><div style="font-size:11px;">Alerts</div></div></div>
                 </div>
 

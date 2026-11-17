@@ -167,9 +167,19 @@ class AmazonDashboard extends Component {
             type: "bar",
             data: {
                 labels: data.map(d => d.name),
-                datasets: [{ label: "Units Sold", data: data.map(d => d.qty), backgroundColor: "#ff9900" }],
+                datasets: [
+                    { label: "Units Sold", data: data.map(d => d.qty), backgroundColor: "#ff9900", xAxisID: "x" },
+                    { label: "Revenue", data: data.map(d => d.revenue || 0), backgroundColor: "#11998e", xAxisID: "x1" },
+                ],
             },
-            options: { responsive: true, indexAxis: "y" },
+            options: {
+                responsive: true,
+                indexAxis: "y",
+                scales: {
+                    x: { position: "bottom", title: { display: true, text: "Units Sold" } },
+                    x1: { position: "top", grid: { drawOnChartArea: false }, title: { display: true, text: "Revenue" } },
+                },
+            },
         });
     }
 
@@ -214,32 +224,68 @@ class AmazonDashboard extends Component {
         this.state.optimizing = false;
     }
 
-    openOrders() {
-        const domain = this.state.selectedInstance
-            ? [["instance_id", "=", this.state.selectedInstance]]
-            : [];
+    // Mirrors the start/end date computation in dashboard_controller.py's
+    // dashboard_data(), so cards that are scoped to "the selected period"
+    // open a list filtered to exactly the same orders the KPI counted.
+    _periodDomain() {
+        if (this.state.dateRange === "custom" && this.state.customFrom && this.state.customTo) {
+            return [["purchase_date", ">=", this.state.customFrom], ["purchase_date", "<=", this.state.customTo]];
+        }
+        const days = parseInt(this.state.dateRange || "30", 10);
+        const today = new Date();
+        const start = new Date(today);
+        start.setDate(start.getDate() - days);
+        const end = new Date(today);
+        end.setDate(end.getDate() + 1);
+        const fmt = (d) => d.toISOString().slice(0, 10);
+        return [["purchase_date", ">=", fmt(start)], ["purchase_date", "<=", fmt(end)]];
+    }
+
+    _instanceDomain() {
+        return this.state.selectedInstance ? [["instance_id", "=", this.state.selectedInstance]] : [];
+    }
+
+    _openOrders(name, extraDomain = [], context = {}) {
         this.action.doAction({
             type: "ir.actions.act_window",
-            name: "Amazon Orders",
+            name,
             res_model: "amazon.sale.order",
             views: [[false, "list"], [false, "form"]],
-            domain,
+            domain: [...this._instanceDomain(), ...extraDomain],
+            context,
         });
     }
 
-    openProducts() {
-        const domain = [["status", "=", "Active"]];
-        if (this.state.selectedInstance) {
-            domain.push(["instance_id", "=", this.state.selectedInstance]);
-        }
+    _openProducts(name, extraDomain = []) {
         this.action.doAction({
             type: "ir.actions.act_window",
-            name: "Active Amazon Products",
+            name,
             res_model: "amazon.product",
             views: [[false, "list"], [false, "form"]],
-            domain,
+            domain: [...this._instanceDomain(), ...extraDomain],
         });
     }
+
+    openOrders() { this._openOrders("Amazon Orders (Period)", this._periodDomain()); }
+    openRevenue() { this._openOrders("Amazon Orders (Revenue, Period)", this._periodDomain(), { search_default_group_by_status: 0 }); }
+    openCustomers() {
+        this._openOrders("Customers (Period)", this._periodDomain(), { group_by: ["partner_id"] });
+    }
+    openPending() {
+        this._openOrders("Pending Orders", [...this._periodDomain(), ["order_status", "in", ["Pending", "Unshipped"]]]);
+    }
+    openCancelled() {
+        this._openOrders("Cancelled Orders", [...this._periodDomain(), ["order_status", "=", "Canceled"]]);
+    }
+
+    openProducts() { this._openProducts("Active Amazon Products", [["status", "=", "Active"]]); }
+    openLowStock() {
+        this._openProducts("Low Stock Products", [["status", "=", "Active"], ["amazon_qty", "<", 10]]);
+    }
+    openOutOfStock() {
+        this._openProducts("Out of Stock Products", [["status", "=", "Active"], ["amazon_qty", "<=", 0]]);
+    }
+
     openAlerts() { this.action.doAction("sdlc_amazon_connector.amazon_alert_action"); }
     openDelivery() { this.action.doAction("sdlc_amazon_connector.amazon_delivery_all_action"); }
     openSyncLogs() { this.action.doAction("sdlc_amazon_connector.amazon_sync_report_action"); }
