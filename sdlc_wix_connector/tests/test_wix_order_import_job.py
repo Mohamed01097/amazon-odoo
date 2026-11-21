@@ -107,6 +107,32 @@ class TestWixOrderImportJob(TransactionCase):
         self.assertEqual(partner.zip, '11511')
         self.assertEqual(partner.country_id.code, 'EG')
 
+    def test_real_single_address_line_shape_is_accepted(self):
+        """Reproduces a real order (2026-11-21): one combined addressLine,
+        no addressLine2, and a literal "0" postalCode that must not be
+        written as a real zip."""
+        address = {
+            'country': 'EG',
+            'subdivision': 'EG-GZ',
+            'city': 'October Gardens',
+            'postalCode': '0',
+            'addressLine': '١٦٧ فاليرا جاردن-الحى الخامس ثالث ٦ اكتوبر - الجيزه',
+            'countryFullname': 'Egypt',
+            'subdivisionFullname': 'Giza',
+        }
+        job = self._create_job(build_claims(address=address))
+        self.env['wix.order.import.job'].cron_process_order_import_jobs()
+
+        partner = job.sale_order_id.partner_id
+        self.assertEqual(
+            partner.street,
+            '١٦٧ فاليرا جاردن-الحى الخامس ثالث ٦ اكتوبر - الجيزه',
+        )
+        self.assertEqual(partner.city, 'October Gardens')
+        self.assertFalse(partner.zip)
+        self.assertEqual(partner.country_id.code, 'EG')
+        self.assertEqual(partner.state_id.name, 'Giza')
+
     def test_street_address_form_is_also_accepted(self):
         """Wix's alternate streetAddress{name,number} shape must work too."""
         address = {

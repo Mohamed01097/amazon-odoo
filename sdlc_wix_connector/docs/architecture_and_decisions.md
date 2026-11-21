@@ -169,15 +169,20 @@ Two deliberate choices:
   order must not clobber a manually-curated business contact; filling only
   blanks still gets a brand-new contact a usable address without touching
   one a human already fixed up.
-- **Both of Wix's documented address shapes are accepted**:
-  `addressLine1`/`addressLine2` and the alternate `streetAddress: {name,
-  number}` form. Like the rest of this module's field mapping (see "Known
-  limitations" below), this is built from Wix's published `Address` object
-  documentation, not from a real webhook — no live Wix order has ever
-  reached this server with an address attached. `subdivision`/state is
-  deliberately not mapped yet: Wix's region code and Odoo's
-  `res.country.state.code` are not guaranteed to line up, and guessing a
-  wrong state silently is worse than leaving it blank.
+- **Confirmed against a real order (2026-11-21, this client's store): the
+  actual key is a single combined `addressLine` string**, not the
+  documented `addressLine1`/`addressLine2` pair — the real payload had no
+  second line at all, just one full address in Arabic. `addressLine1` and
+  the alternate `streetAddress: {name, number}` form are kept as fallbacks
+  (neither has been seen live), so whichever shape an order actually uses
+  still works. The real order's `postalCode` was the literal string `"0"`
+  — not a postal code, just what Wix sends when the buyer left it blank —
+  so a bare `"0"` is treated as no value, never written to `zip`.
+- **`subdivisionFullname` is now mapped to `state_id`**, confirmed by the
+  same real order (`"subdivisionFullname": "Giza"` alongside
+  `"country": "EG"`). It only sets the field when Odoo already has a
+  matching `res.country.state` for that country and name — it never creates
+  one or guesses from the `subdivision` ISO code, which is left unused.
 
 ## Data hygiene
 

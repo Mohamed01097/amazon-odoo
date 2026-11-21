@@ -423,11 +423,20 @@ class WixOrderImportJob(models.Model):
     def _build_partner_address_vals(self, address):
         """Map a Wix ``Address`` object onto ``res.partner`` address fields.
 
-        Wix's documented shape uses ``addressLine1``/``addressLine2``, but
-        the alternate ``streetAddress: {name, number}`` form is also
-        published for some endpoints and has never been seen on live
-        traffic from this client's store -- both are accepted so whichever
-        one a real webhook uses works without a code change.
+        Confirmed against a real order (2026-11-21, this client's store):
+        the actual key is a single combined ``addressLine`` string (e.g.
+        "١٦٧ فاليرا جاردن-الحى الخامس ثالث ٦ اكتوبر - الجيزه"), not the
+        documented ``addressLine1``/``addressLine2`` pair -- the real
+        payload had no ``addressLine2`` at all, so every Odoo field had to
+        come out of the one line. ``addressLine1`` and the alternate
+        ``streetAddress: {name, number}`` form (both still published by
+        Wix, neither seen live yet) are kept as fallbacks so whichever shape
+        a given order actually uses works without a code change.
+
+        The same real order's ``postalCode`` was the literal string ``"0"``
+        -- not a real postal code, just what Wix sends when the buyer left
+        it blank. Writing that to the contact would be actively misleading,
+        so a bare ``"0"`` is treated as no value at all.
         """
         if not isinstance(address, dict):
             return {}
@@ -435,6 +444,7 @@ class WixOrderImportJob(models.Model):
         street_address = address.get('streetAddress') or {}
         street = (
             address.get('addressLine1')
+            or address.get('addressLine')
             or ' '.join(
                 part for part in (
                     street_address.get('number'), street_address.get('name'),
@@ -447,8 +457,9 @@ class WixOrderImportJob(models.Model):
             vals['street2'] = address['addressLine2']
         if address.get('city'):
             vals['city'] = address['city']
-        if address.get('postalCode'):
-            vals['zip'] = address['postalCode']
+        postal_code = address.get('postalCode')
+        if postal_code and postal_code != '0':
+            vals['zip'] = postal_code
         country_code = address.get('country')
         if country_code:
             country = self.env['res.country'].search(
@@ -456,6 +467,14 @@ class WixOrderImportJob(models.Model):
             )
             if country:
                 vals['country_id'] = country.id
+        subdivision_name = address.get('subdivisionFullname')
+        if subdivision_name and vals.get('country_id'):
+            state = self.env['res.country.state'].search([
+                ('country_id', '=', vals['country_id']),
+                ('name', '=ilike', subdivision_name),
+            ], limit=1)
+            if state:
+                vals['state_id'] = state.id
         return vals
 
     def _resolve_product(self, line):
