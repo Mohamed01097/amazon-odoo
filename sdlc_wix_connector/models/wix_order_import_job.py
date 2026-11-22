@@ -408,17 +408,52 @@ class WixOrderImportJob(models.Model):
                 }
                 if fill_vals:
                     partner.sudo().write(fill_vals)
+                self._maybe_resolve_bosta_location(partner)
                 return partner
         if not name and not email:
             raise ValueError(_("The Wix payload has neither a buyer email nor a name."))
 
-        return Partner.create({
+        partner = Partner.create({
             'name': name or email,
             'email': email or False,
             'phone': (data.get('phone') or '').strip() or False,
             'company_id': False,
             **address_vals,
         })
+        self._maybe_resolve_bosta_location(partner)
+        return partner
+
+    def _maybe_resolve_bosta_location(self, partner):
+        """Resolve Bosta City/Zone/District on import, if Bosta is installed.
+
+        This module has no manifest dependency on any carrier module (see
+        the top of this file), so the call is duck-typed: if
+        ``sdlc_bosta_connector`` is not installed, ``bosta.instance`` is not
+        a registered model and this is a silent no-op.
+
+        Waiting for this to happen lazily, only when a Bosta shipment job
+        tries to book, has two problems: the resolution write happens
+        inside that job's own savepoint, which a failed booking rolls back
+        (so a failed attempt leaves no trace that matching ever ran); and
+        nobody sees the result until someone opens the shipment job's error
+        log. Resolving here instead means staff can see and correct
+        Bosta City/Zone/District on the contact right after import, before
+        any delivery is even validated.
+        """
+        self.ensure_one()
+        if 'bosta.instance' not in self.env:
+            return
+        instance = self.env['bosta.instance'].sudo().search(
+            [('active', '=', True)], limit=1,
+        )
+        if not instance:
+            return
+        try:
+            partner._resolve_bosta_location(instance)
+        except Exception:  # noqa: BLE001 - must never block order import
+            _logger.exception(
+                "Could not resolve Bosta location for partner %s", partner.id,
+            )
 
     def _build_partner_address_vals(self, address):
         """Map a Wix ``Address`` object onto ``res.partner`` address fields.

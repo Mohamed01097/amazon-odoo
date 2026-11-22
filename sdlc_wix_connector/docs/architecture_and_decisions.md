@@ -184,6 +184,31 @@ Two deliberate choices:
   matching `res.country.state` for that country and name — it never creates
   one or guesses from the `subdivision` ISO code, which is left unused.
 
+### Bosta City/Zone/District are resolved here too, duck-typed
+
+`_resolve_partner` calls `partner._resolve_bosta_location(instance)` right
+after the address is set — on both a newly created contact and an existing
+one whose blanks were just filled — rather than leaving that for the Bosta
+connector's shipment job to do lazily on its own.
+
+Two reasons this moved earlier:
+- `bosta.shipment.job._process_job()` runs inside its own savepoint, which
+  a failed booking rolls back — including the city/zone/district match it
+  just made. A failed attempt used to leave no trace that resolution had
+  even run; the only way to see the result was to read the job's error log
+  after a real booking attempt.
+- Resolving at import time means staff can see — and correct, on the
+  contact form — Bosta City/Zone/District right after the order lands,
+  before any delivery is validated, instead of only after a shipment
+  booking has already failed.
+
+This module still has no manifest dependency on `sdlc_bosta_connector` (see
+"What this module does" above) — the call is duck-typed:
+`_maybe_resolve_bosta_location` checks `'bosta.instance' not in self.env`
+first and is a silent no-op if the Bosta connector isn't installed. A
+resolution failure is logged and swallowed, never allowed to fail the order
+import itself.
+
 ## Data hygiene
 
 `wix.sync.log` grows with every webhook delivery and every import attempt.
