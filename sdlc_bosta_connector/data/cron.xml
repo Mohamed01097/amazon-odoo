@@ -19,6 +19,18 @@
         <field name="active" eval="False"/>
     </record>
 
+    <!-- Fallback only: action_assign() is the primary trigger. This catches
+         a picking that became reserved through some other internal path. -->
+    <record id="cron_bosta_enqueue_ready_shipments" model="ir.cron">
+        <field name="name">Bosta: Enqueue Ready Shipments</field>
+        <field name="model_id" ref="stock.model_stock_picking"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_enqueue_ready_bosta_shipments()</field>
+        <field name="interval_number">10</field>
+        <field name="interval_type">minutes</field>
+        <field name="active" eval="False"/>
+    </record>
+
     <!-- Fallback only: the webhook is the primary status mechanism. This
          catches shipments whose callback was missed or misconfigured. -->
     <record id="cron_bosta_reconcile_shipments" model="ir.cron">

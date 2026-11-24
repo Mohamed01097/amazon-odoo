@@ -56,6 +56,9 @@ class TestBostaTrackingEvent(TransactionCase):
             'is_storable': True,
             'list_price': 90.0,
         })
+        cls.env['stock.quant']._update_available_quantity(
+            cls.product, cls.warehouse.lot_stock_id, 100,
+        )
 
     # ------------------------------------------------------------------
     # Fixtures
@@ -82,6 +85,35 @@ class TestBostaTrackingEvent(TransactionCase):
             '_id': delivery_id, 'trackingNumber': tracking,
         }):
             self.env['bosta.shipment.job'].cron_process_shipment_jobs()
+        return picking
+
+    def _booked_unvalidated_picking(self, tracking='BST-TRACK-2', delivery_id='dlv-2',
+                                     qty=1):
+        """The normal flow now: booked while still reserved, never validated.
+
+        This is the primary fixture tracking-event tests should use --
+        ``_booked_picking`` above (validated first) is kept only to cover the
+        fallback path, where a picking reached ``done`` without ever having
+        been queued at reservation time.
+        """
+        order = self.env['sale.order'].create({
+            'partner_id': self.partner.id,
+            'carrier_id': self.carrier.id,
+            'order_line': [(0, 0, {
+                'product_id': self.product.id,
+                'product_uom_qty': qty,
+            })],
+        })
+        order.action_confirm()
+        picking = order.picking_ids
+        picking.action_assign()
+        self.assertEqual(picking.state, 'assigned')
+
+        with patch(CREATE_PATH, return_value={
+            '_id': delivery_id, 'trackingNumber': tracking,
+        }):
+            self.env['bosta.shipment.job'].cron_process_shipment_jobs()
+        self.assertEqual(picking.carrier_tracking_ref, tracking)
         return picking
 
     def _event(self, state, tracking='BST-TRACK-1', delivery_id='dlv-1',
@@ -153,7 +185,39 @@ class TestBostaTrackingEvent(TransactionCase):
     # Returns
     # ------------------------------------------------------------------
 
+    def test_delivered_state_validates_the_still_assigned_picking(self):
+        """The new primary flow: booking happens before validation, and
+        Bosta's own delivered confirmation is what triggers it."""
+        picking = self._booked_unvalidated_picking()
+        self.assertNotEqual(picking.state, 'done')
+
+        self._queue_and_run(self._event(
+            bosta_state.STATE_DELIVERED, tracking='BST-TRACK-2', delivery_id='dlv-2',
+        ))
+
+        self.assertEqual(picking.state, 'done')
+        self.assertEqual(picking.bosta_shipment_state, 'delivered')
+        self.assertTrue(picking.bosta_delivered_at)
+
+    def test_returned_state_cancels_order_and_picking_when_not_yet_validated(self):
+        """A refused parcel: nothing was ever deducted from stock, so there
+        is nothing to return -- the order is simply cancelled."""
+        picking = self._booked_unvalidated_picking()
+        order = picking.sale_id
+        self.assertNotEqual(picking.state, 'done')
+
+        self._queue_and_run(self._event(
+            bosta_state.STATE_TERMINATED, tracking='BST-TRACK-2', delivery_id='dlv-2',
+        ))
+
+        self.assertEqual(picking.state, 'cancel')
+        self.assertEqual(order.state, 'cancel')
+        self.assertFalse(picking.bosta_return_picking_id)
+
     def test_returned_state_creates_unvalidated_reverse_picking(self):
+        """Fallback path: a picking already validated some other way (not
+        the new booked-before-validation flow) still gets the old
+        reverse-stock-move treatment, never a silent sale order cancel."""
         picking = self._booked_picking()
         job = self._queue_and_run(self._event(bosta_state.STATE_TERMINATED))
 

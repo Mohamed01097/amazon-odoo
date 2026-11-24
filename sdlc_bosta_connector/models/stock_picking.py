@@ -1,8 +1,8 @@
-"""Enqueue a Bosta booking when a Bosta-carrier delivery is validated."""
+"""Enqueue a Bosta booking when a Bosta-carrier delivery is reserved."""
 
 import logging
 
-from odoo import _, fields, models
+from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
 _logger = logging.getLogger(__name__)
@@ -32,8 +32,32 @@ class StockPicking(models.Model):
         help="Reverse picking created when Bosta reported the parcel as returned.",
     )
 
+    def action_assign(self):
+        """Queue a Bosta booking as soon as the delivery is reserved.
+
+        Booking no longer waits for ``button_validate()``: the shipment is
+        handed to Bosta while the picking is still ``assigned``, and the
+        picking itself is only validated later, automatically, when Bosta's
+        webhook reports the parcel actually delivered
+        (``bosta_tracking_event_job.py``). ``_action_done`` below is kept as
+        a fallback for a picking that reaches ``done`` without ever having
+        been queued (a manual validation, or a non-Bosta flow) -- it is not
+        the primary trigger any more.
+        """
+        res = super().action_assign()
+        for picking in self.filtered(lambda p: p.state == 'assigned'):
+            try:
+                with self.env.cr.savepoint():
+                    picking._enqueue_bosta_shipment(require_automatic=True)
+            except Exception:  # noqa: BLE001 - must never break reservation
+                _logger.exception(
+                    "Could not queue a Bosta shipment for picking %s", picking.name,
+                )
+        return res
+
     def _action_done(self):
-        """Queue a Bosta booking for each newly validated Bosta delivery.
+        """Fallback: queue a Bosta booking for a delivery that reaches
+        ``done`` without having been queued at reservation time.
 
         The API is never called here: the booking runs in
         ``bosta.shipment.job`` so a Bosta outage cannot block stock validation
@@ -69,12 +93,18 @@ class StockPicking(models.Model):
         """Only outgoing Bosta deliveries that are not already booked.
 
         ``require_automatic`` additionally requires the Bosta account's
-        dispatch mode to be "automatic": it is set by ``_action_done`` so a
-        "manual" account is never queued without a user picking the delivery,
-        and left off for the explicit "Send to Bosta" bulk action.
+        dispatch mode to be "automatic": it is set by ``action_assign``/
+        ``_action_done`` so a "manual" account is never queued without a user
+        picking the delivery, and left off for the explicit "Send to Bosta"
+        bulk action.
+
+        ``assigned`` is the normal trigger point now (reserved and ready to
+        hand to the courier, before validation); ``done`` is kept valid too,
+        as the fallback entry point for a picking validated without ever
+        having been queued.
         """
         self.ensure_one()
-        if self.state != 'done':
+        if self.state not in ('assigned', 'done'):
             return False
         if self.picking_type_id.code != 'outgoing':
             return False
@@ -152,3 +182,31 @@ class StockPicking(models.Model):
         if not url:
             return False
         return {'type': 'ir.actions.act_url', 'url': url, 'target': 'new'}
+
+    @api.model
+    def cron_enqueue_ready_bosta_shipments(self, limit=100):
+        """Safety net: queue any reserved Bosta delivery `action_assign`
+        happened to miss.
+
+        `action_assign()` is the documented public entry point for
+        reservation, but it is not the only internal path a move can take to
+        become reserved (a scheduler run, a direct `stock.move._action_assign`
+        call). Any ``assigned`` Bosta-carrier picking with automatic dispatch
+        and no job yet is queued here instead of being silently missed.
+        Inactive by default, like every cron in this module.
+        """
+        pickings = self.search([
+            ('state', '=', 'assigned'),
+            ('picking_type_id.code', '=', 'outgoing'),
+            ('carrier_id.delivery_type', '=', 'bosta'),
+            ('bosta_shipment_job_id', '=', False),
+        ], limit=limit)
+        for picking in pickings:
+            try:
+                with self.env.cr.savepoint():
+                    picking._enqueue_bosta_shipment(require_automatic=True)
+            except Exception:  # noqa: BLE001 - one picking must not stop the rest
+                _logger.exception(
+                    "Could not queue a Bosta shipment for picking %s", picking.name,
+                )
+        return True

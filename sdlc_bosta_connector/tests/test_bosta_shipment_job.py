@@ -59,6 +59,12 @@ class TestBostaShipmentJob(TransactionCase):
             'is_storable': True,
             'list_price': 150.0,
         })
+        # Real stock on hand, so action_assign() actually reserves instead
+        # of leaving the picking waiting -- needed for the new "book while
+        # still assigned" flow.
+        cls.env['stock.quant']._update_available_quantity(
+            cls.product, cls.warehouse.lot_stock_id, 100,
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -90,6 +96,32 @@ class TestBostaShipmentJob(TransactionCase):
     # ------------------------------------------------------------------
     # Enqueue behaviour
     # ------------------------------------------------------------------
+
+    def test_reserving_bosta_delivery_enqueues_one_job_before_validation(self):
+        """Booking now happens at reservation, not at validation."""
+        order = self._confirmed_order()
+        picking = order.picking_ids
+        picking.action_assign()
+        self.assertEqual(picking.state, 'assigned')
+
+        jobs = self.env['bosta.shipment.job'].search([('picking_id', '=', picking.id)])
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs.state, 'draft')
+        self.assertEqual(picking.bosta_shipment_state, 'queued')
+        self.assertNotEqual(picking.state, 'done')
+
+    def test_job_books_while_picking_still_assigned(self):
+        """The shipment job itself must never validate the picking."""
+        order = self._confirmed_order()
+        picking = order.picking_ids
+        picking.action_assign()
+        self.assertEqual(picking.state, 'assigned')
+
+        with patch(CREATE_PATH, return_value=self._ok_response()):
+            self.env['bosta.shipment.job'].cron_process_shipment_jobs()
+
+        self.assertEqual(picking.carrier_tracking_ref, 'BST-1001')
+        self.assertEqual(picking.state, 'assigned')
 
     def test_validating_bosta_delivery_enqueues_one_job(self):
         order = self._confirmed_order()

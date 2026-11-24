@@ -1,16 +1,21 @@
 # Bosta Connector — Architecture and Decisions
 
-Last updated: 2026-10-31. Covers `sdlc_bosta_connector` 19.0.2.0.0.
+Last updated: 2026-11-24. Covers `sdlc_bosta_connector` 19.0.6.0.0.
 
 ## What this module does
 
 Registers Bosta (Egyptian last-mile courier) as a standard Odoo delivery
 method (`delivery.carrier` with `delivery_type = 'bosta'`), so it is
 selectable on any sale order exactly like any other carrier — this module
-has no dependency on `sdlc_wix_connector` or any other sales channel. It
-books a shipment after a delivery is validated, applies Bosta's status
-callbacks back onto the delivery, and creates (but never auto-validates) a
-return picking when Bosta reports a parcel coming back.
+has no dependency on `sdlc_wix_connector` or any other sales channel.
+
+**Booking happens before the delivery is validated, not after** (changed
+2026-11-24 — see "Booking now happens at reservation" below): a Bosta
+shipment is booked as soon as the delivery is reserved (`assigned`), and the
+picking itself is validated automatically, later, only once Bosta's webhook
+confirms the parcel was actually delivered. A parcel the customer refused
+cancels the delivery and its sale order instead of going through a return
+flow, because nothing was ever deducted from stock to begin with.
 
 **First real calls were made on 2026-11-12** (staging, `wix_staging` DB,
 client's real production API key, `shipment_booking_enabled` toggled on and
@@ -32,20 +37,74 @@ the framework calls automatically.
 This module does not use that path. `delivery_carrier.py` enforces
 (`_check_bosta_integration_level`, a model constraint) that a Bosta carrier's
 `integration_level` always stays `'rate'`, which suppresses Odoo's automatic
-synchronous call entirely. Instead, `stock_picking.py::_action_done` enqueues
-a `bosta.shipment.job` row, and a cron books the shipment with bounded
-retries (`bosta_shipment_job.py`).
+synchronous call entirely. Instead, `stock_picking.py::action_assign`
+enqueues a `bosta.shipment.job` row, and a cron books the shipment with
+bounded retries (`bosta_shipment_job.py`).
 
 This is a deliberate deviation from Odoo's own intended wiring, chosen for
 one reason: a Bosta outage must never block a warehouse worker from
-validating a delivery, and a request that times out after Bosta had already
-accepted it must not be lost — a synchronous call inside the validation
-transaction cannot give you either property. The three standard
+reserving or validating a delivery, and a request that times out after
+Bosta had already accepted it must not be lost — a synchronous call inside
+either transaction cannot give you either property. The three standard
 provider-contract methods (`bosta_send_shipping`, `bosta_get_tracking_link`,
 `bosta_cancel_shipment`) are still implemented in full, for a manual
 "Retry Bosta Booking" button on the picking and for any core code that calls
 `carrier_id.send_shipping(...)` directly — they are simply not relied on for
 the automatic path.
+
+## Booking now happens at reservation, validation happens at Bosta's confirmation
+
+Until 2026-11-24, this module booked a shipment *after*
+`button_validate()` — stock left the warehouse in Odoo's own books as soon
+as a warehouse worker validated the delivery, regardless of whether Bosta
+ever actually collected or delivered it. The client asked for the opposite
+ordering: send to Bosta as soon as the delivery is ready, and only count the
+stock as gone once Bosta confirms the parcel actually reached the customer.
+A parcel the customer refuses should cancel the order outright, not go
+through a return-receipt step — there is nothing to receive back if nothing
+was ever deducted.
+
+**What changed:**
+
+- `stock_picking.py::action_assign` is now the primary trigger (replacing
+  `_action_done`), queuing a `bosta.shipment.job` the moment the picking
+  becomes `assigned` — reserved, not yet validated.
+  `_should_book_bosta_shipment` accepts a picking in either `assigned` or
+  `done` state; `bosta_shipment_job.py::_process_job`'s own guard was
+  widened the same way.
+- `_action_done` is kept, but only as a **fallback**: a picking that
+  reaches `done` without ever having been queued (a manual validation
+  outside this flow, or any case the reservation hook missed) is still
+  queued there, exactly as before. The de-duplication check in
+  `_should_book_bosta_shipment` (an existing job already found) means this
+  never double-books a picking already queued at reservation time.
+- `stock_picking.py::cron_enqueue_ready_bosta_shipments` (inactive by
+  default, like every cron in this module) is a second-layer fallback: a
+  `stock.move` can become reserved through internal paths other than the
+  public `action_assign()` method (a scheduler run, a direct
+  `stock.move._action_assign()` call); this periodically catches any
+  `assigned` Bosta picking the hook missed.
+- `bosta_tracking_event_job.py::_process_job` now reacts to the two
+  terminal outcomes instead of only recording them:
+  - **Delivered** (`STATE_DELIVERED`): `_validate_picking` sets every move's
+    quantity to full demand and calls `button_validate()` — Bosta's own
+    confirmation is what makes the picking `done`, not a warehouse worker
+    clicking a button. Partial Bosta deliveries are not a case this
+    account's contract supports (see Known Limitations), so there is no
+    partial-quantity handling here.
+  - **Returned/Terminated**: branches on whether the picking was already
+    `done` by the time the webhook arrives.
+    - **Not yet validated** (the new normal case):
+      `_cancel_order_and_picking` cancels the picking and its `sale_id`
+      outright — mirroring `sdlc_wix_connector`'s own cancellation safety
+      check exactly: a delivery already validated, or an order with a
+      posted invoice, is never cancelled automatically, only flagged for
+      review on the picking's chatter.
+    - **Already `done`** (a picking validated some other way before this
+      flow applied, or the old booking-after-validation path): the
+      original `_create_return_picking` reverse-stock-move behaviour is
+      preserved unchanged — stock genuinely did leave in Odoo's books, so
+      a real reverse receipt is still the right thing.
 
 ## The Bosta API contract, and how it was actually confirmed
 
@@ -231,9 +290,12 @@ unrecognised code — it is never folded into the nearest known state. Only
 Bosta's real traffic uses a different code for refusals specifically, add it
 to `RETURN_STATES` rather than widening an existing mapping.
 
-## Returns use Odoo's standard wizard, unmodified
+## Returns use Odoo's standard wizard, unmodified (the already-`done` fallback)
 
-When a terminal "returned" state is reported,
+This path only runs any more when a "returned" state is reported for a
+picking that was already `done` by that point — see "Booking now happens at
+reservation" above for the normal case, which cancels the order instead.
+
 `bosta_tracking_event_job.py::_create_return_picking` drives
 `stock.return.picking` programmatically — the same wizard the warehouse UI
 uses. `_create_return()` calls `action_confirm()` and `action_assign()` on
@@ -281,8 +343,18 @@ rules following the chain down to each model's nearest `company_id`:
 user — `ir.rule` is not enforced for the superuser, so a test run as the
 default admin user would not have caught this.
 
-## Known limitations (as of 2026-10-31)
+## Known limitations (as of 2026-11-24)
 
+- **No partial-delivery or partial-return handling.** `_validate_picking`
+  always sets every move to its full demanded quantity on a "delivered"
+  callback; `_cancel_order_and_picking` always cancels the whole picking and
+  order on a "returned" one. Bosta's webhook carries no per-item detail, so
+  there is currently no code path for "the customer kept 2 of 3 items."
+- **`stock.picking.sale_id` is accessed duck-typed**
+  (`'sale_id' in picking._fields`), not as a manifest dependency on `sale`/
+  `sale_stock` — consistent with this module's "no dependency on any sales
+  channel" design. If `sale_stock` is not installed, a returned parcel still
+  cancels the picking, just not any sale order (there is nothing to find).
 - No live validation against Bosta exists. `shipment_booking_enabled`
   defaults to `False` on every `bosta.instance` specifically so this cannot
   happen by accident even once a key is configured.

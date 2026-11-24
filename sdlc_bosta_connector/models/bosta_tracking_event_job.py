@@ -148,9 +148,23 @@ class BostaTrackingEventJob(models.Model):
             code=self.bosta_state_code,
         ))
 
+        if shipment_state == 'delivered' and picking.state not in ('done', 'cancel'):
+            self._validate_picking(picking)
+
         return_picking = False
         if bosta_state.is_return(self.bosta_state_code):
-            return_picking = self._create_return_picking(picking)
+            if picking.state == 'done':
+                # Stock already left in Odoo's own books (a manual
+                # validation outside the normal booking-before-validate
+                # flow, or a shipment booked the old way): the parcel must
+                # be physically received back, so this stays a human
+                # decision via the standard return wizard.
+                return_picking = self._create_return_picking(picking)
+            else:
+                # Normal case: nothing was ever deducted from stock, so
+                # there is nothing to receive back -- the order simply
+                # never happened from inventory's point of view.
+                self._cancel_order_and_picking(picking)
 
         self.sudo().write({
             'state': 'done',
@@ -192,6 +206,59 @@ class BostaTrackingEventJob(models.Model):
             if picking:
                 return picking
         return Picking.browse()
+
+    def _validate_picking(self, picking):
+        """Validate the delivery because Bosta confirmed it was delivered.
+
+        Booking now happens while the picking is still ``assigned`` (see
+        ``stock_picking.py::action_assign``), so stock has not actually left
+        the warehouse in Odoo's own books until this runs. Bosta reporting a
+        successful delivery is what makes that true, so it is what triggers
+        ``button_validate()`` -- not a warehouse worker clicking a button.
+
+        Quantities are set to full demand: Bosta's "delivered" callback
+        carries no per-item detail, and a partial Bosta delivery is not a
+        case this account's contract currently supports (see Known
+        Limitations).
+        """
+        self.ensure_one()
+        for move in picking.move_ids.filtered(lambda m: m.state not in ('done', 'cancel')):
+            move.quantity = move.product_uom_qty
+        picking.sudo().with_context(skip_backorder=True).button_validate()
+
+    def _cancel_order_and_picking(self, picking):
+        """Cancel the delivery and its sale order for a refused parcel.
+
+        Mirrors ``sdlc_wix_connector``'s own cancellation safety check
+        exactly: a delivery already validated or an order with a posted
+        invoice is never cancelled automatically, only flagged for review --
+        cancelling here would contradict stock that has physically left or
+        accounting that is already posted.
+        """
+        self.ensure_one()
+        order = picking.sale_id if 'sale_id' in picking._fields else False
+        blockers = []
+        if picking.state == 'done':
+            blockers.append(_("the delivery is already validated"))
+        if order and order.invoice_ids.filtered(lambda move: move.state == 'posted'):
+            blockers.append(_("an invoice is already posted"))
+        if blockers:
+            picking.message_post(body=_(
+                "Bosta reported this parcel as returned, but it was not "
+                "cancelled because %(reasons)s. Please review.",
+                reasons='; '.join(blockers),
+            ))
+            return False
+
+        picking.sudo().action_cancel()
+        if order and order.state != 'cancel':
+            order.sudo()._action_cancel()
+        picking.message_post(body=_(
+            "Cancelled automatically because Bosta reported this parcel as "
+            "returned. No stock had left the warehouse in Odoo and no "
+            "invoice was posted."
+        ))
+        return True
 
     def _create_return_picking(self, picking):
         """Create the reverse picking for a parcel coming back.

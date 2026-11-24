@@ -1,6 +1,6 @@
 {
     'name': 'Bosta Connector',
-    'version': '19.0.5.0.0',
+    'version': '19.0.6.0.0',
     'summary': 'Bosta last-mile delivery carrier for Odoo',
     'description': """
         Bosta Connector

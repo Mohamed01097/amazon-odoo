@@ -129,8 +129,8 @@ class BostaShipmentJob(models.Model):
             )
             return
 
-        if picking.state != 'done':
-            self._defer(_("The delivery is no longer validated."))
+        if picking.state not in ('assigned', 'done'):
+            self._defer(_("The delivery is not in a bookable state."))
             return
 
         # Booking creates a real shipment that a courier will collect, so it
